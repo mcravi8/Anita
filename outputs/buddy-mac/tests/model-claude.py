@@ -6,7 +6,7 @@ for line in sys.stdin:
     assert c['apiKey']=='fixture-key'
     assert c['model'] in ['claude-sonnet-4-6','claude-other'], c['model']
     assert 'Selected model: '+c['model'] in c['instructions']
-    assert 'dedicated coding-session manager is not connected' in c['instructions']
+    assert 'Buddy provides buddy_coding_session' in c['instructions']
     if 'PINNED_TURN' in c['prompt']:
         print(json.dumps({'type':'progress','runId':c['runId'],'text':'Fixture active'}),flush=True)
         time.sleep(1)

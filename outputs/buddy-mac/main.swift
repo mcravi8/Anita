@@ -39,10 +39,13 @@ import AppKit
             }
         }
         conversations.extraToolHandler = { [weak self] tool, args, context in
-            guard let self, ["buddy_start_background_task","buddy_manage_routine"].contains(tool), let id = context["agentId"] as? String else { throw BuddyWorkerFailure(message: "Background work is unavailable for this turn.") }
+            guard let self, ["buddy_start_background_task","buddy_manage_routine","buddy_coding_session"].contains(tool), let id = context["agentId"] as? String else { throw BuddyWorkerFailure(message: "Background work is unavailable for this turn.") }
             let workspace = try self.workspaceContext()
             guard workspace.agents.contains(id) else { throw BuddyWorkerFailure(message: "This agent is no longer available.") }
             _ = try await BuddyWorkerClient.start(support: self.supportURL, workspace: workspace.workspace)
+            if tool=="buddy_coding_session" {
+                return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"coding","workspace":workspace.workspace,"agentId":id,"requestId":(context["runId"] as? String ?? "")+":"+(context["callId"] as? String ?? ""),"arguments":args])
+            }
             if tool=="buddy_manage_routine" {
                 let result=try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"routine","workspace":workspace.workspace,"agentId":id,"requestId":(context["runId"] as? String ?? "")+":"+(context["callId"] as? String ?? ""),"arguments":args])
                 if let value=result["routine"] { self.deliver(["type":"routine","runId":context["runId"] ?? "","routine":value]) }
@@ -222,7 +225,7 @@ import AppKit
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }
     @objc private func about() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.17.1", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.18.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
@@ -271,7 +274,7 @@ import AppKit
                 options.actorId = agent
                 options.extraTools = BuddyWorkerClient.tools
                 options.requiresRoutine = BuddyWorkerClient.recurringRequest(payload["text"] as? String ?? "")
-                options.instructions = "For an explicit recurring request (run this every morning/daily/weekly), call buddy_manage_routine now. Carry the relevant user brief from history into the goal. For email, choose a targeted search with follow-ups and an explicit lookback window. Default to 09:00 local for an unspecified morning, state that assumption and the saved next run. Do not create a one-off task instead. Never claim scheduled without saved=true and a routine ID. Do not schedule hypothetical examples or questions. Use list/update/pause/resume/delete for existing routines. Results and controls are in Background work. This Mac must be awake and online; a missed run catches up once. If the user explicitly asks you to run a task in the background, use buddy_start_background_task. Pass the full authorized brief and the facts needed to execute it; the worker has separate conversation context. It uses this agent’s saved provider and model, its configured spending limit, and current agent permissions, private browser/files, and native human action reviews. Report the returned task title and tell the user results and reviews are in Background work. Don't create background work for ordinary questions, invent tasks, or claim it has finished when only queued."
+                options.instructions = "For explicit coding/build/test requests or requests to use Claude Code, call buddy_coding_session directly with a complete task brief; it is a native worker tool, not a connected service. Check status for real results. For an explicit recurring request (run this every morning/daily/weekly), call buddy_manage_routine now. Carry the relevant user brief from history into the goal. For email, choose a targeted search with follow-ups and an explicit lookback window. Default to 09:00 local for an unspecified morning, state that assumption and the saved next run. Do not create a one-off task instead. Never claim scheduled without saved=true and a routine ID. Do not schedule hypothetical examples or questions. Use list/update/pause/resume/delete for existing routines. Results and controls are in Background work. This Mac must be awake and online; a missed run catches up once. If the user explicitly asks you to run a task in the background, use buddy_start_background_task. Pass the full authorized brief and the facts needed to execute it; the worker has separate conversation context. It uses this agent’s saved provider and model, its configured spending limit, and current agent permissions, private browser/files, and native human action reviews. Report the returned task title and tell the user results and reviews are in Background work. Don't create background work for ordinary questions, invent tasks, or claim it has finished when only queued."
                 options.proposalScope = BuddyProposalScope(workspace: context.workspace, chat: agent, actorId: agent, replyRunId: payload["runId"] as? String ?? "")
                 try ai.ensureAgentDefaults(workspace:context.workspace,agents:context.agents)
                 options.historyScope=BuddyHistoryScope(workspace:context.workspace,agent:agent)

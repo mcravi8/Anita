@@ -113,7 +113,7 @@ enum BuddyWorkerWire {
         guard UUID(uuidString: workspace) != nil, UUID(uuidString: agent) != nil, !requestId.isEmpty, requestId.count <= 200,
               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, title.count <= 150,
               !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, goal.count <= 30000,
-              ["research", "applications", "email", "general"].contains(kind), ["chatgpt", "claude"].contains(provider), budget.isFinite, budget >= 0, budget <= 10 else { throw BuddyWorkerFailure(message: "Add a short task title, a clear brief, and a supported provider.") }
+              ["research", "applications", "email", "general", "coding"].contains(kind), ["chatgpt", "claude"].contains(provider), (kind != "coding" || provider=="claude"), budget.isFinite, budget >= 0, budget <= 10 else { throw BuddyWorkerFailure(message: "Add a short task title, a clear brief, and a supported provider.") }
         if let old = jobs.first(where: { $0["workspace"] as? String == workspace && $0["agentId"] as? String == agent && $0["requestId"] as? String == requestId }) { return old }
         guard jobs.count < 1000, jobs.filter({ !Self.terminal.contains($0["status"] as? String ?? "") }).count < 30 else { throw BuddyWorkerFailure(message: "Finish or cancel some background tasks before adding more.") }
         let now = ISO8601DateFormatter().string(from: Date())
@@ -122,9 +122,9 @@ enum BuddyWorkerWire {
         jobs.append(job); do { try persist() } catch { jobs.removeLast(); throw error }; return job
     }
     func setPaused(_ value: Bool) throws { let old = paused; paused = value; do { try persist() } catch { paused = old; throw error } }
-    func resume(_ id: String) throws -> [String: Any] {
+    func resume(_ id: String, continuingCoding:Bool=false) throws -> [String: Any] {
         let job = try self.job(id)
-        guard ["paused", "failed", "interrupted", "waiting_user"].contains(job["status"] as? String ?? "") else { throw BuddyWorkerFailure(message: "This task can’t be resumed in its current state.") }
+        guard ["paused", "failed", "interrupted", "waiting_user"].contains(job["status"] as? String ?? "") || (continuingCoding && job["kind"] as? String=="coding" && job["status"] as? String=="completed") else { throw BuddyWorkerFailure(message: "This task can’t be resumed in its current state.") }
         return try update(id, ["status": "queued", "progress": "Queued to continue from saved progress. Check existing external state before any send or submission."])
     }
 }

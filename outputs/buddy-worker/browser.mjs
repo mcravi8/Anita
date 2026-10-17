@@ -33,7 +33,7 @@ export class PrivateBrowser {
     await this.close(); await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);
     this.context=await chromium.launchPersistentContext(this.profile,{channel:'chrome',headless:!headed,chromiumSandbox:true,acceptDownloads:false,permissions:[],serviceWorkers:'block',args:['--disable-extensions','--disable-background-networking']});
     await this.context.route('**/*',async route=>{try{await publicURL(route.request().url(),lookup,this.testOrigin);await route.continue();}catch{await route.abort('blockedbyclient');}});
-    this.context.on('page',p=>{if(p!==this.page)p.close().catch(()=>{});});
+    if(!headed)this.context.on('page',p=>{if(p!==this.page)p.close().catch(()=>{});});
     this.page=this.context.pages()[0]||await this.context.newPage();this.page.setDefaultTimeout(12000);
     this.page.on('dialog',dialog=>dialog.dismiss().catch(()=>{}));
     return this;

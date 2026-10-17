@@ -29,6 +29,7 @@ import Darwin
     private let executableOverride: URL?
     private let makeBrowser: () -> BuddyWorkerProcess
     init(support: URL, executable: URL? = nil, makeBrowser: (() -> BuddyWorkerProcess)? = nil) { self.support = support; self.executableOverride = executable; self.makeBrowser=makeBrowser ?? {BuddyWorkerProcess()} }
+    private var agentModels:BuddyAgentModels {BuddyAgentModels(support:support)}
     private var providerSettings: BuddyAISettings { BuddyAISettings(support: support) }
     private var root: URL { support.appendingPathComponent("Worker", isDirectory: true) }
     private var privateMarker:URL {root.appendingPathComponent("PrivateSignIn.json")}
@@ -99,7 +100,7 @@ import Darwin
         let operation = request["operation"] as? String ?? "status"
         if operation == "status" {
             let jobs = store.jobs.filter { $0["workspace"] as? String == current }.map { job -> [String: Any] in var out = job; out.removeValue(forKey: "goal"); out.removeValue(forKey: "events"); out.removeValue(forKey: "reviews"); out.removeValue(forKey: "result"); return out }
-            return ["online": true, "paused": store.paused, "tasks": jobs, "routines":routines.routines.filter{$0["workspace"] as? String==current}, "scheduleError":(try? String(contentsOf:root.appendingPathComponent("schedule-error.txt"),encoding:.utf8)) ?? "", "privateBrowser": privateAgent.map { ["agentId": $0, "taskId": privateTask as Any? ?? NSNull()] } as Any? ?? NSNull(), "claudeConnected": try providerSettings.current(current).claudeEnabled && BuddyClaudeKey.read(current) != nil, "defaultProvider": try providerSettings.current(current).provider, "claudeBudgetUSD": try providerSettings.current(current).claudeBudgetUSD, "nodeAvailable": BuddyWorkerProcess.runtime != nil, "computer": "This Mac · private browser and files"]
+            return ["online": true, "paused": store.paused, "tasks": jobs, "routines":routines.routines.filter{$0["workspace"] as? String==current}, "scheduleError":(try? String(contentsOf:root.appendingPathComponent("schedule-error.txt"),encoding:.utf8)) ?? "", "privateBrowser": privateAgent.map { ["agentId": $0, "taskId": privateTask as Any? ?? NSNull()] } as Any? ?? NSNull(), "claudeConnected": try providerSettings.current(current).claudeEnabled && BuddyClaudeKey.read(current) != nil, "defaultProvider": try providerSettings.current(current).provider, "agentModels":try agentModels.ensure(workspace:current,agents:((try state())["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String},provider:providerSettings.current(current).provider).mapValues(\.payload), "claudeBudgetUSD": try providerSettings.current(current).claudeBudgetUSD, "nodeAvailable": BuddyWorkerProcess.runtime != nil, "computer": "This Mac · private browser and files"]
         }
         if operation == "openGoogle" {
             let id=request["agentId"] as? String ?? "", a=try agent(id,workspace:current)
@@ -129,11 +130,12 @@ import Darwin
             let id=request["agentId"] as? String ?? "",args=request["arguments"] as? [String:Any] ?? [:]
             if !["pause","delete","list"].contains(args["action"] as? String ?? "") { _ = try agent(id,workspace:current) }
             let choice=try providerSettings.current(current)
+            let selected=try agentModels.selection(workspace:current,agent:id) ?? .initial(choice.provider)
             if ["create","update"].contains(args["action"] as? String ?? "") {
-                guard choice.enabled(choice.provider),choice.provider != "claude" || BuddyClaudeKey.read(current) != nil else { throw BuddyWorkerFailure(message:"Connect the selected AI provider before saving an active routine.") }
+                guard choice.enabled(selected.provider),selected.provider != "claude" || BuddyClaudeKey.read(current) != nil else { throw BuddyWorkerFailure(message:"Connect the selected AI provider before saving an active routine.") }
             }
             if args["action"] as? String=="resume",let rid=args["routineID"] as? String,let prior=store.jobs.last(where:{$0["routineID"] as? String==rid}),!["completed","cancelled"].contains(prior["status"] as? String ?? "") { throw BuddyWorkerFailure(message:"Open the last run and finish or cancel it before resuming this routine.") }
-            let result=try routines.manage(args,workspace:current,agent:id,requestID:request["requestId"] as? String ?? UUID().uuidString,provider:choice.provider,budget:choice.provider=="claude" ? choice.claudeBudgetUSD:0)
+            let result=try routines.manage(args,workspace:current,agent:id,requestID:request["requestId"] as? String ?? UUID().uuidString,provider:selected.provider,budget:selected.provider=="claude" ? choice.claudeBudgetUSD:0,model:selected.model)
             if ["pause","delete"].contains(args["action"] as? String ?? ""),let rid=args["routineID"] as? String {
                 for job in store.jobs where job["routineID"] as? String==rid && job["status"] as? String=="queued" { try store.update(job["id"] as! String,["status":"cancelled","progress":"Routine paused or removed before this run started."]) }
                 if let active,(try? store.job(active)["routineID"] as? String)==rid { await stop(active,status:"paused") }
@@ -143,10 +145,11 @@ import Darwin
         if operation == "create" {
             let id = request["agentId"] as? String ?? ""; _ = try agent(id, workspace: current)
             let choice = try providerSettings.current(current)
-            let provider = request["provider"] as? String ?? choice.provider, budget = request["budgetUSD"] as? Double ?? (provider == "claude" ? choice.claudeBudgetUSD : 0)
+            let selected=try agentModels.selection(workspace:current,agent:id) ?? .initial(choice.provider)
+            let provider = (request["provider"] as? String).flatMap{$0.isEmpty ? nil:$0} ?? selected.provider, budget = request["budgetUSD"] as? Double ?? (provider == "claude" ? choice.claudeBudgetUSD : 0)
             guard choice.enabled(provider) else { throw BuddyWorkerFailure(message: "Connect this provider in Settings → AI provider before starting a task.") }
             if provider == "claude" { guard BuddyClaudeKey.read(current) != nil, budget > 0 else { throw BuddyWorkerFailure(message: "Connect your Claude API key and choose a task spending limit first.") } }
-            let job = try store.create(workspace: current, agent: id, requestId: request["requestId"] as? String ?? "", title: request["title"] as? String ?? "", goal: request["goal"] as? String ?? "", kind: request["kind"] as? String ?? "general", provider: provider, budget: budget)
+            let job = try store.create(workspace: current, agent: id, requestId: request["requestId"] as? String ?? "", title: request["title"] as? String ?? "", goal: request["goal"] as? String ?? "", kind: request["kind"] as? String ?? "general", provider: provider, budget: budget,model:provider==selected.provider ? selected.model:BuddyAgentModelSelection.initial(provider).model)
             return ["task": job]
         }
         if operation == "pauseAll" { try store.setPaused(request["paused"] as? Bool ?? true); if store.paused, let active { await stop(active, status: "paused") }; return ["paused": store.paused] }
@@ -338,9 +341,9 @@ import Darwin
             let home = folder.appendingPathComponent("Claude", isDirectory: true); try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             var tools = Self.tools + [BuddyInboxReview.tool,BuddyInboxReview.finishTool] + ConversationService.directServiceTools
             if permitted(job, tool: "projectFiles") { tools += BuddyProjectFiles.tools }
-            try p.send(["command": "start", "apiKey": key, "budget": budget, "cwd": folder.appendingPathComponent("Files").path, "home": home.path, "prompt": prompt, "instructions": instructions, "tools": tools])
+            try p.send(["command": "start", "model":job["model"] as? String ?? "claude-sonnet-4-6", "apiKey": key, "budget": budget, "cwd": folder.appendingPathComponent("Files").path, "home": home.path, "prompt": prompt, "instructions": instructions, "tools": tools])
         } else {
-            var options = BuddyTurnOptions(); options.proposalsEnabled = false; options.fileScope = scope; options.actorId = agentID; options.instructions = instructions; options.extraTools = Self.tools.filter { $0["name"] as? String != "buddy_connected_services" };options.inboxEvidence=inboxEvidence;options.inboxRoutine=(job["routineID"] as? String).map{$0+":"+(job["inboxQuery"] as? String ?? "")+":"+(job["goal"] as? String ?? "")}
+            var options = BuddyTurnOptions();options.selectedModel=job["model"] as? String; options.proposalsEnabled = false; options.fileScope = scope; options.actorId = agentID; options.instructions = instructions; options.extraTools = Self.tools.filter { $0["name"] as? String != "buddy_connected_services" };options.inboxEvidence=inboxEvidence;options.inboxRoutine=(job["routineID"] as? String).map{$0+":"+(job["inboxQuery"] as? String ?? "")+":"+(job["goal"] as? String ?? "")}
             options.proposalScope = BuddyProposalScope(workspace: workspace, chat: id, actorId: agentID, replyRunId: runID!)
             _ = try service.send(["runId": runID!, "key": workspace + ":" + agentID, "agent": ["name": a["name"] ?? "Buddy", "role": a["role"] ?? "", "description": a["description"] ?? ""], "text": prompt], options: options)
         }

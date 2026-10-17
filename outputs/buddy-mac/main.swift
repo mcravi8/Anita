@@ -49,7 +49,7 @@ import AppKit
                 return result
             }
             let choice = try self.ai.settings.current(workspace.workspace)
-            return try await BuddyWorkerClient.call(support: self.supportURL, payload: ["operation": "create", "workspace": workspace.workspace, "agentId": id, "requestId": (context["runId"] as? String ?? "") + ":" + (context["callId"] as? String ?? ""), "title": args["title"] ?? "", "goal": args["goal"] ?? "", "kind": args["kind"] ?? "general", "provider": choice.provider, "budgetUSD": choice.provider == "claude" ? choice.claudeBudgetUSD : 0])
+            return try await BuddyWorkerClient.call(support: self.supportURL, payload: ["operation": "create", "workspace": workspace.workspace, "agentId": id, "requestId": (context["runId"] as? String ?? "") + ":" + (context["callId"] as? String ?? ""), "title": args["title"] ?? "", "goal": args["goal"] ?? "", "kind": args["kind"] ?? "general", "budgetUSD": choice.claudeBudgetUSD])
         }
         teamwork.onEvent = { [weak self] event in self?.deliver(event) }
         ai.onEvent = { [weak self] event in
@@ -103,6 +103,7 @@ import AppKit
         let stateLiteral = savedState.flatMap { try? JSONSerialization.data(withJSONObject: [$0]) }.flatMap { String(data: $0, encoding: .utf8) } ?? "[null]"
         let bridge = """
         window.BuddyDesktop = Object.freeze({
+          agentModels: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'agentModels', payload}),
           providerSettings: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'providerSettings', payload}),
           worker: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'worker', payload}),
           initialState: \(stateLiteral)[0],
@@ -221,7 +222,7 @@ import AppKit
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }
     @objc private func about() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.16.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.17.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
@@ -229,6 +230,8 @@ import AppKit
               url.standardizedFileURL.path == Bundle.main.resourceURL?.appendingPathComponent("Web/index.html").standardizedFileURL.path,
               let body = message.body as? [String: Any], let kind = body["kind"] as? String else { replyHandler(nil, "Unsupported request."); return }
         switch kind {
+        case "agentModels":
+            Task {do {let context=try workspaceContext();let payload=body["payload"] as? [String:Any] ?? [:];replyHandler(try await ai.modelSettings(workspace:context.workspace,agents:context.agents,payload:payload),nil)}catch{replyHandler(nil,error.localizedDescription)}}
         case "providerSettings":
             Task { do { let workspace = try workspaceContext().workspace; replyHandler(try await providerRequest(body["payload"] as? [String: Any] ?? [:], workspace: workspace), nil) } catch { replyHandler(nil, error.localizedDescription) } }
         case "worker":
@@ -268,8 +271,10 @@ import AppKit
                 options.actorId = agent
                 options.extraTools = BuddyWorkerClient.tools
                 options.requiresRoutine = BuddyWorkerClient.recurringRequest(payload["text"] as? String ?? "")
-                options.instructions = "For an explicit recurring request (run this every morning/daily/weekly), call buddy_manage_routine now. Carry the relevant user brief from history into the goal. For email, choose a targeted search with follow-ups and an explicit lookback window. Default to 09:00 local for an unspecified morning, state that assumption and the saved next run. Do not create a one-off task instead. Never claim scheduled without saved=true and a routine ID. Do not schedule hypothetical examples or questions. Use list/update/pause/resume/delete for existing routines. Results and controls are in Background work. This Mac must be awake and online; a missed run catches up once. If the user explicitly asks you to run a task in the background, use buddy_start_background_task. Pass the full authorized brief and the facts needed to execute it; the worker has separate conversation context. It uses the selected default AI provider, its configured spending limit, and current agent permissions, private browser/files, and native human action reviews. Report the returned task title and tell the user results and reviews are in Background work. Don't create background work for ordinary questions, invent tasks, or claim it has finished when only queued."
+                options.instructions = "For an explicit recurring request (run this every morning/daily/weekly), call buddy_manage_routine now. Carry the relevant user brief from history into the goal. For email, choose a targeted search with follow-ups and an explicit lookback window. Default to 09:00 local for an unspecified morning, state that assumption and the saved next run. Do not create a one-off task instead. Never claim scheduled without saved=true and a routine ID. Do not schedule hypothetical examples or questions. Use list/update/pause/resume/delete for existing routines. Results and controls are in Background work. This Mac must be awake and online; a missed run catches up once. If the user explicitly asks you to run a task in the background, use buddy_start_background_task. Pass the full authorized brief and the facts needed to execute it; the worker has separate conversation context. It uses this agent’s saved provider and model, its configured spending limit, and current agent permissions, private browser/files, and native human action reviews. Report the returned task title and tell the user results and reviews are in Background work. Don't create background work for ordinary questions, invent tasks, or claim it has finished when only queued."
                 options.proposalScope = BuddyProposalScope(workspace: context.workspace, chat: agent, actorId: agent, replyRunId: payload["runId"] as? String ?? "")
+                try ai.ensureAgentDefaults(workspace:context.workspace,agents:context.agents)
+                options.historyScope=BuddyHistoryScope(workspace:context.workspace,agent:agent)
                 options.history = BuddyConversationHistory.context(try workspaceState(), target: agent, runId: payload["runId"] as? String ?? "")
                 replyHandler(try ai.send(payload, options: options), nil)
             } catch { replyHandler(nil, error.localizedDescription) }
@@ -374,6 +379,7 @@ import AppKit
                 try FileManager.default.createDirectory(at: supportURL, withIntermediateDirectories: true)
                 let previous = try? workspaceState()
                 let protected = try conversations.agentProposals.preserveApprovals(in: state, previous: previous)
+                if let workspace=protected["conversationWorkspace"] as? String,let agents=protected["agents"] as? [[String:Any]] {try ai.ensureAgentDefaults(workspace:workspace,agents:agents.compactMap{$0["id"] as? String})}
                 try JSONSerialization.data(withJSONObject: protected).write(to: stateURL, options: .atomic)
                 if let workspace = state["conversationWorkspace"] as? String, let agents = state["agents"] as? [[String: Any]], let oldAgents = previous?["agents"] as? [[String: Any]] {
                     for agent in agents where (agent["tools"] as? [String: Bool])?["projectFiles"] == false || (agent["tools"] as? [String: Bool])?["desktop"] == false {
@@ -399,6 +405,7 @@ import AppKit
     }
 
     private func providerRequest(_ payload: [String: Any], workspace: String) async throws -> [String: Any] {
+        try ai.ensureAgentDefaults(workspace:workspace)
         let operation = payload["operation"] as? String ?? "status", provider = payload["provider"] as? String ?? "chatgpt"
         var status: [String: Any]
         if operation == "status" { return try await ai.status(workspace: workspace) }

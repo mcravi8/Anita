@@ -58,8 +58,9 @@
     run.status=status;run.error=error;
     if(team)run.team=team;
     if(Array.isArray(event.files))run.files=structuredClone(event.files.filter(f=>f&&typeof f.path==='string'&&typeof f.folderId==='string'&&typeof f.revision==='string').slice(0,180));
+    if(typeof event.provider==='string')run.provider=event.provider;if(typeof event.model==='string')run.model=event.model;
     if(Array.isArray(event.coverage))run.coverage=structuredClone(event.coverage.filter(c=>c&&typeof c.id==='string'&&typeof c.query==='string'&&typeof c.partial==='boolean'&&Number.isInteger(c.read)&&Number.isInteger(c.unread)).slice(-10));
-    if(message){if(run.coverage)message.coverage=structuredClone(run.coverage);message.status=status;if(typeof event.text==='string')message.body=event.text;message.error=error;if(run.team)message.team=structuredClone(run.team);if(run.files)message.files=structuredClone(run.files);}
+    if(message){if(run.provider)message.provider=run.provider;if(run.model)message.model=run.model;if(run.coverage)message.coverage=structuredClone(run.coverage);message.status=status;if(typeof event.text==='string')message.body=event.text;message.error=error;if(run.team)message.team=structuredClone(run.team);if(run.files)message.files=structuredClone(run.files);}
     return true;
   }
   function recover(state,snapshots=[]){

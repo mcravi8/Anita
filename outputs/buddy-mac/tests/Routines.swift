@@ -7,15 +7,18 @@ import Foundation
         let w=UUID().uuidString,a=UUID().uuidString,f=ISO8601DateFormatter(),now=f.date(from:"2026-10-16T18:00:00Z")!
         let rules=try BuddyRoutineStore(directory:root),queue=try BuddyWorkerStore(directory:root)
         let args:[String:Any]=["action":"create","title":"Check assessments","goal":"Review relevant job assessment mail and reconcile completion","kind":"email","query":"in:anywhere -in:trash newer_than:90d {assessment assessments}","hour":9,"minute":0,"weekdays":[2,3,4,5,6],"timeZone":"America/Los_Angeles"]
-        let created=try rules.manage(args,workspace:w,agent:a,requestID:"user-turn",provider:"claude",budget:0.5,now:now),r=created["routine"] as! [String:Any],rid=r["id"] as! String
+        let created=try rules.manage(args,workspace:w,agent:a,requestID:"user-turn",provider:"claude",budget:0.5,model:"claude-pinned",now:now),r=created["routine"] as! [String:Any],rid=r["id"] as! String
         require(r["nextRun"] as? String=="2026-10-19T16:00:00Z","Friday after 9 schedules Monday 9 local")
         _ = try rules.manage(args,workspace:w,agent:a,requestID:"user-turn",provider:"claude",budget:0.5,now:now)
         _ = try rules.manage(args,workspace:w,agent:a,requestID:"model-repeated-tool-call",provider:"claude",budget:0.5,now:now)
         require(rules.routines.count==1,"retries and repeated calls do not duplicate a routine")
+        _ = try rules.manage(["action":"update","routineID":rid,"title":"Updated title"],workspace:w,agent:a,requestID:"new-model",provider:"chatgpt",budget:0,model:"different-model",now:now)
+        require(rules.routines[0]["model"] as? String=="claude-pinned" && rules.routines[0]["provider"] as? String=="claude","editing the agent model does not mutate an existing routine")
         let wake=f.date(from:"2026-10-22T18:00:00Z")!
         try rules.enqueueDue(store:queue,workspace:w,now:wake);try rules.enqueueDue(store:queue,workspace:w,now:wake)
         require(queue.jobs.count==1 && rules.routines[0]["nextRun"] as? String=="2026-10-23T16:00:00Z","sleep catches up once and advances past missed days without bursts")
         let id=queue.jobs[0]["id"] as! String
+        require(queue.jobs[0]["model"] as? String=="claude-pinned","routine occurrence retains its pinned model")
         require(queue.jobs[0]["inboxQuery"] as? String==args["query"] as? String && queue.jobs[0]["routineID"] as? String==rid,"native task carries saved search and stable routine memory")
         // simulate lost routine update after queue was saved
         var saved=try JSONSerialization.jsonObject(with:Data(contentsOf:root.appendingPathComponent("routines.json"))) as! [String:Any]

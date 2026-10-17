@@ -64,6 +64,12 @@ with tempfile.TemporaryDirectory(prefix='buddy-provider-test-') as temp:
  subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
  subprocess.run([str(binary),str(source/'tests/provider-server.py'),str(source/'tests/provider-claude.py'),shutil.which('python3')],check=True)
 
+with tempfile.TemporaryDirectory(prefix='buddy-model-test-') as temp:
+ binary=Path(temp)/'buddy-model-tests'
+ names=['BuddyAISettings.swift','BuddyAIRouter.swift','BuddyClaudeConversations.swift','BuddyWorkerProcess.swift','BuddyWorkerCore.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/Models.swift']
+ subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
+ subprocess.run([str(binary),str(source/'tests/model-server.py'),str(source/'tests/model-claude.py'),shutil.which('python3')],check=True)
+
 with tempfile.TemporaryDirectory(prefix='buddy-mail-test-') as temp:
  binary=Path(temp)/'buddy-mail-tests'
  names=['ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/MailVerification.swift']

@@ -9,9 +9,20 @@ import Foundation
     private let chatgpt: ConversationService
     let claude: BuddyClaudeConversations
     private var providers: [String: String] = [:]
-    private var groupProviders: [String: String] = [:]
-    init(support: URL, chatgpt: ConversationService, makeProcess: (() -> BuddyWorkerProcess)? = nil, keyReader: @escaping (String) -> String? = BuddyClaudeKey.read, keyRemover: @escaping (String) throws -> Void = { try BuddyClaudeKey.save(nil, workspace: $0) }) {
-        self.support=support;self.chatgpt=chatgpt;self.keyReader=keyReader;self.keyRemover=keyRemover
+    let agentModels:BuddyAgentModels
+    private var groupModels:[String:BuddyAgentModelSelection]=[:]
+    private var historyProviders:[String:String]=[:]
+    private var invalidHistoryProviders=false
+    private let claudeModelReader:(String) async throws -> [[String:Any]]
+    private var claudeCatalog:[String:(revision:String,at:Date,models:[[String:Any]])]=[:]
+
+    init(support: URL, chatgpt: ConversationService, makeProcess: (() -> BuddyWorkerProcess)? = nil, keyReader: @escaping (String) -> String? = BuddyClaudeKey.read, keyRemover: @escaping (String) throws -> Void = { try BuddyClaudeKey.save(nil, workspace: $0) }, claudeModelReader: @escaping (String) async throws -> [[String:Any]] = {try await BuddyAISettings.claudeModels(apiKey:$0)}) {
+        self.support=support;self.chatgpt=chatgpt;self.keyReader=keyReader;self.keyRemover=keyRemover;self.agentModels=BuddyAgentModels(support:support);self.claudeModelReader=claudeModelReader
+        let history=support.appendingPathComponent("conversation-providers.json")
+        if FileManager.default.fileExists(atPath:history.path) {
+            if let data=try? Data(contentsOf:history),data.count<=2*1024*1024,let saved=try? JSONDecoder().decode([String:String].self,from:data),saved.allSatisfy({$0.key.count<=200 && ["chatgpt","claude"].contains($0.value)}) {historyProviders=saved}
+            else {invalidHistoryProviders=true}
+        }
         let settings=BuddyAISettings(support:support);self.settings=settings
         claude=BuddyClaudeConversations(support:support,primary:chatgpt,settings:settings,makeProcess:makeProcess,keyReader:keyReader)
         chatgpt.onEvent = { [weak self] event in self?.onEvent?(event) }
@@ -21,12 +32,28 @@ import Foundation
         let workspace=options.fileScope?.workspace ?? options.fileContext?.workspace ?? options.proposalScope?.workspace ?? String((payload["key"] as? String ?? "").prefix(36))
         let choice=try settings.current(workspace),id=payload["runId"] as? String ?? ""
         if providers[id] != nil { return ["accepted":true,"runId":id] }
-        let selected=options.routingGroup.flatMap{groupProviders[$0]} ?? choice.provider
+        guard !snapshots().contains(where:{$0["key"] as? String==payload["key"] as? String && ["starting","answering","stopping"].contains($0["status"] as? String ?? "")}) else{throw BuddyFailure(message:"This agent is already answering. Your new model applies to its next reply.")}
+        var options=options
+        let agentChoice=try agentModels.selection(workspace:workspace,agent:options.actorId) ?? .initial(choice.provider)
+        let groupKey=options.routingGroup.map{$0+":"+options.actorId}
+        let pinned=groupKey.flatMap{groupModels[$0]} ?? agentChoice
+        let selected=pinned.provider
+        if options.selectedModel==nil,!pinned.model.isEmpty {options.selectedModel=pinned.model}
         guard choice.enabled(selected) else {throw BuddyFailure(message:"Connect \(selected == "claude" ? "Claude":"ChatGPT") in Settings → AI provider, then try again.")}
-        if let group=options.routingGroup {groupProviders[group]=selected}
+        if let groupKey {groupModels[groupKey]=pinned}
+        let conversationKey=payload["key"] as? String ?? ""
+        let track=options.historyScope != nil && !options.internalRun
+        let previous=historyProviders
+        if track {
+            guard !invalidHistoryProviders else{throw BuddyFailure(message:"Saved conversation routing could not be verified. Restore conversation-providers.json before switching models.")}
+            options.resetConversation=historyProviders[conversationKey] != selected
+            historyProviders[conversationKey]=selected
+            do {try FileManager.default.createDirectory(at:support,withIntermediateDirectories:true);try JSONEncoder().encode(historyProviders).write(to:support.appendingPathComponent("conversation-providers.json"),options:.atomic)}
+            catch {historyProviders=previous;throw error}
+        }
         providers[id]=selected
         do { return try selected == "claude" ? claude.send(payload,options:options):chatgpt.send(payload,options:options) }
-        catch {providers.removeValue(forKey:id);throw error}
+        catch {providers.removeValue(forKey:id);if track {historyProviders=previous;try? JSONEncoder().encode(previous).write(to:support.appendingPathComponent("conversation-providers.json"),options:.atomic)};throw error}
     }
     func stop(_ id:String) async throws->[String:Any] {try await providers[id] == "claude" ? claude.stop(id):chatgpt.stop(id)}
     func snapshots()->[[String:Any]] {chatgpt.snapshots()+claude.snapshots()}
@@ -46,7 +73,7 @@ import Foundation
         let connected=choice.provider == "claude" ? claudeConnected:gpt["connected"] as? Bool == true
         return ["provider":choice.provider,"connected":connected,"chatgpt":gpt,"claude":["connected":claudeConnected,"enabled":choice.claudeEnabled],"claudeBudgetUSD":choice.claudeBudgetUSD,"plan":gpt["plan"] ?? NSNull(),"error":connected ? "":"Connect \(choice.provider == "claude" ? "Claude":"ChatGPT") in Settings → AI provider."]
     }
-    func select(workspace:String,provider:String,budget:Double?) async throws->[String:Any] {_ = try settings.update(workspace,provider:provider,budget:budget);return try await status(workspace:workspace)}
+    func select(workspace:String,provider:String,budget:Double?) async throws->[String:Any] {try ensureAgentDefaults(workspace:workspace);_ = try settings.update(workspace,provider:provider,budget:budget);return try await status(workspace:workspace)}
     func disconnect(workspace:String,provider:String) async throws->[String:Any] {
         _ = try settings.update(workspace,enabled:(provider,false))
         if provider == "claude" {claude.stopAll();try keyRemover(workspace)}
@@ -65,5 +92,45 @@ import Foundation
     func didConnectClaude(workspace:String) async throws->[String:Any] {claude.stopAll();_ = try settings.update(workspace,enabled:("claude",true));return try await status(workspace:workspace)}
     func stopForAgent(_ key:String) async {await chatgpt.stopForAgent(key);claude.stopForAgent(key)}
     func stopFiles(workspace:String) async {await chatgpt.stopFiles(workspace:workspace);claude.stopFiles(workspace:workspace)}
+    func ensureAgentDefaults(workspace:String,agents:[String]?=nil) throws {
+        let ids:[String]
+        if let agents {ids=agents}
+        else if let data=try? Data(contentsOf:support.appendingPathComponent("workspace.json")),let state=try? JSONSerialization.jsonObject(with:data) as? [String:Any],state["conversationWorkspace"] as? String==workspace {ids=(state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String}}
+        else {return}
+        _ = try agentModels.ensure(workspace:workspace,agents:ids,provider:settings.current(workspace).provider)
+    }
+    private func modelCatalog(workspace:String,refresh:Bool) async -> (models:[[String:Any]],errors:[String:String]) {
+        guard let choice=try? settings.current(workspace) else{return ([],["settings":"AI settings are unavailable."])}
+        let gpt=Task { () -> ([[String:Any]],String?) in
+            guard choice.chatgptEnabled else{return ([],nil)}
+            do{return (try await self.chatgpt.availableModels(refresh:refresh),nil)}catch{return ([],error.localizedDescription)}
+        }
+        let claude=Task { () -> ([[String:Any]],String?) in
+            guard choice.claudeEnabled,let key=self.keyReader(workspace) else{return ([],nil)}
+            if !refresh,let cached=self.claudeCatalog[workspace],cached.revision==choice.claudeRevision,Date().timeIntervalSince(cached.at)<300{return (cached.models,nil)}
+            do {
+                let models=try await self.claudeModelReader(key)
+                let clean=models.filter{v in guard v["provider"] as? String=="claude",let id=v["id"] as? String,!id.isEmpty,BuddyAgentModelSelection.valid(id) else{return false};return true}
+                self.claudeCatalog[workspace]=(choice.claudeRevision,Date(),clean);return (clean,nil)
+            }catch{return ([],error.localizedDescription)}
+        }
+        let a=await gpt.value,b=await claude.value
+        guard let current=try? settings.current(workspace) else{return ([],["settings":"AI settings are unavailable."])}
+        var errors:[String:String]=[:];if current.chatgptEnabled,let error=a.1{errors["chatgpt"]=error};if current.claudeEnabled,let error=b.1{errors["claude"]=error}
+        return ((current.chatgptEnabled && current.chatgptRevision==choice.chatgptRevision ? a.0:[])+(current.claudeEnabled && current.claudeRevision==choice.claudeRevision && keyReader(workspace) != nil ? b.0:[]),errors)
+    }
+    func modelSettings(workspace:String,agents:[String],payload:[String:Any]) async throws -> [String:Any] {
+        try ensureAgentDefaults(workspace:workspace,agents:agents)
+        let catalog=await modelCatalog(workspace:workspace,refresh:payload["refresh"] as? Bool ?? false)
+        var selections=try agentModels.ensure(workspace:workspace,agents:agents,provider:settings.current(workspace).provider)
+        for (agent,selection) in selections where selection.model.isEmpty {
+            if let model=(catalog.models.first{$0["provider"] as? String==selection.provider && $0["isDefault"] as? Bool==true} ?? catalog.models.first{$0["provider"] as? String==selection.provider})?["id"] as? String {let value=BuddyAgentModelSelection(provider:selection.provider,model:model);try agentModels.set(workspace:workspace,agent:agent,selection:value);selections[agent]=value}
+        }
+        if payload["operation"] as? String=="set" {
+            guard let agent=payload["agentId"] as? String,agents.contains(agent),chatgpt.agentPermission?(workspace,[workspace+":"+agent])==true,let provider=payload["provider"] as? String,let model=payload["model"] as? String,catalog.models.contains(where:{$0["provider"] as? String==provider && $0["id"] as? String==model && $0["current"] as? Bool != false}),try settings.current(workspace).enabled(provider),provider != "claude" || keyReader(workspace) != nil else{throw BuddyFailure(message:"This model is unavailable or its connection is off. Refresh models or reconnect in Settings.")}
+            let value=BuddyAgentModelSelection(provider:provider,model:model);try agentModels.set(workspace:workspace,agent:agent,selection:value);selections[agent]=value
+        }
+        return ["models":catalog.models,"agents":selections.mapValues(\.payload),"errors":catalog.errors,"defaultProvider":try settings.current(workspace).provider,"saved":payload["operation"] as? String=="set"]
+    }
     func shutdown(){claude.shutdown();chatgpt.shutdown()}
 }

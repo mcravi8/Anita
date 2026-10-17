@@ -109,7 +109,7 @@ enum BuddyWorkerWire {
         let old = jobs[i]; jobs[i].merge(values) { _, new in new }; jobs[i]["updatedAt"] = ISO8601DateFormatter().string(from: Date())
         do { try persist() } catch { jobs[i] = old; throw error }; return jobs[i]
     }
-    func create(workspace: String, agent: String, requestId: String, title: String, goal: String, kind: String, provider: String, budget: Double) throws -> [String: Any] {
+    func create(workspace: String, agent: String, requestId: String, title: String, goal: String, kind: String, provider: String, budget: Double, model:String?=nil) throws -> [String: Any] {
         guard UUID(uuidString: workspace) != nil, UUID(uuidString: agent) != nil, !requestId.isEmpty, requestId.count <= 200,
               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, title.count <= 150,
               !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, goal.count <= 30000,
@@ -117,7 +117,8 @@ enum BuddyWorkerWire {
         if let old = jobs.first(where: { $0["workspace"] as? String == workspace && $0["agentId"] as? String == agent && $0["requestId"] as? String == requestId }) { return old }
         guard jobs.count < 1000, jobs.filter({ !Self.terminal.contains($0["status"] as? String ?? "") }).count < 30 else { throw BuddyWorkerFailure(message: "Finish or cancel some background tasks before adding more.") }
         let now = ISO8601DateFormatter().string(from: Date())
-        let job: [String: Any] = ["id": UUID().uuidString, "workspace": workspace, "agentId": agent, "requestId": requestId, "title": title, "goal": goal, "kind": kind, "provider": provider, "budgetUSD": budget, "status": "queued", "progress": "Queued", "createdAt": now, "updatedAt": now, "attempt": 0, "events": [[String: Any]](), "result": "", "files": [[String: Any]]()]
+        var job: [String: Any] = ["id": UUID().uuidString, "workspace": workspace, "agentId": agent, "requestId": requestId, "title": title, "goal": goal, "kind": kind, "provider": provider, "budgetUSD": budget, "status": "queued", "progress": "Queued", "createdAt": now, "updatedAt": now, "attempt": 0, "events": [[String: Any]](), "result": "", "files": [[String: Any]]()]
+        if let model,!model.isEmpty {guard model.range(of:#"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"#,options:.regularExpression) != nil else{throw BuddyWorkerFailure(message:"Invalid task model.")};job["model"]=model}
         jobs.append(job); do { try persist() } catch { jobs.removeLast(); throw error }; return job
     }
     func setPaused(_ value: Bool) throws { let old = paused; paused = value; do { try persist() } catch { paused = old; throw error } }
@@ -163,7 +164,7 @@ enum BuddyWorkerWire {
         let candidates=days.compactMap { day in calendar.nextDate(after:date,matching:DateComponents(hour:hour,minute:minute,second:0,weekday:day),matchingPolicy:.nextTime,repeatedTimePolicy:.first,direction:.forward) }
         guard let value=candidates.min() else { throw BuddyWorkerFailure(message:"Could not determine the next run.") };return value
     }
-    @discardableResult func manage(_ args:[String:Any],workspace:String,agent:String,requestID:String,provider:String,budget:Double,now:Date=Date()) throws -> [String:Any] {
+    @discardableResult func manage(_ args:[String:Any],workspace:String,agent:String,requestID:String,provider:String,budget:Double,model:String?=nil,now:Date=Date()) throws -> [String:Any] {
         let action=args["action"] as? String ?? "list"
         if action=="list" { return ["routines":routines.filter{$0["workspace"] as? String==workspace && $0["agentId"] as? String==agent}] }
         let old=routines
@@ -174,6 +175,7 @@ enum BuddyWorkerWire {
                 guard action=="create" || index != nil else { throw BuddyWorkerFailure(message:"This routine is no longer available.") }
                 guard action != "create" || routines.count<100 else { throw BuddyWorkerFailure(message:"Pause or remove old routines before adding more.") }
                 var value=index.map{routines[$0]} ?? ["id":UUID().uuidString,"workspace":workspace,"agentId":agent,"requestID":requestID,"provider":provider,"budgetUSD":budget,"hour":9,"minute":0,"weekdays":[1,2,3,4,5,6,7],"timeZone":TimeZone.current.identifier,"query":"","kind":"general"]
+                if index==nil,let model,!model.isEmpty {value["model"]=model}
                 for field in ["title","goal","hour","minute","weekdays","timeZone","query","kind"] { if let v=args[field],!(v is NSNull) { value[field]=v } }
                 try Self.validate(value)
                 value["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:value));value["status"]="active";value["lastError"]=""
@@ -202,7 +204,7 @@ enum BuddyWorkerWire {
                     if !BuddyWorkerStore.terminal.contains(status) { continue }
                 }
                 guard let due=r["nextRun"] as? String,let date=ISO8601DateFormatter().date(from:due),date<=now else { continue }
-                let job=try store.create(workspace:workspace,agent:r["agentId"] as! String,requestId:"routine:"+id+":"+due,title:r["title"] as! String,goal:r["goal"] as! String,kind:r["kind"] as! String,provider:r["provider"] as! String,budget:r["budgetUSD"] as! Double)
+                let job=try store.create(workspace:workspace,agent:r["agentId"] as! String,requestId:"routine:"+id+":"+due,title:r["title"] as! String,goal:r["goal"] as! String,kind:r["kind"] as! String,provider:r["provider"] as! String,budget:r["budgetUSD"] as! Double,model:r["model"] as? String)
                 // Queue creation is idempotent if the process dies before saving nextRun.
                 try store.update(job["id"] as! String,["routineID":id,"inboxQuery":r["query"] as! String,"previousRoutineResult":prior?["result"] ?? "","scheduledFor":due])
                 routines[i]["lastTaskID"]=job["id"];routines[i]["lastScheduledFor"]=due

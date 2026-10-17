@@ -1,0 +1,26 @@
+[
+  {
+    "agent": "morgan",
+    "prompt": "Use case: stylized-concept\nAsset type: small 3D avatar icon in a minimal personal AI messaging app.\nPrimary request: One isolated a plump lilac four-point sparkle with soft inflated rounded tips and two tiny dark dot eyes, a tiny warm smile; calm clever personality.\nStyle: sophisticated playful 3D product icon, soft inflated satin silicone, tangible rounded form, restrained gloss, Pixar quality rendering but extremely simple geometric character. No limbs, no clothing, no props.\nComposition: centered front three-quarter view, entire character visible, generous consistent margin, icon occupies about 78% of square. One character only.\nLighting: large soft studio key from upper left, delicate highlights, soft ambient occlusion. Clear rich color. Cohesive friendly desktop app aesthetic.\nBackground: genuinely transparent, no ground plane.\nConstraints: readable at 40 pixels, clean silhouette, no text, no watermark, no borders, no multiple views.",
+    "tool": "built-in image_gen",
+    "output": "assets/morgan-3d.png"
+  },
+  {
+    "agent": "atlas",
+    "prompt": "Use case: stylized-concept\nAsset type: small 3D avatar icon in a minimal personal AI messaging app.\nPrimary request: One isolated a cobalt blue squishy oval pebble character with two tiny dark dot eyes and a tiny warm smile, one subtle short rounded antenna on top; curious personality.\nStyle: sophisticated playful 3D product icon, soft inflated satin silicone, tangible rounded form, restrained gloss, Pixar quality rendering but extremely simple geometric character. No limbs, no clothing, no props.\nComposition: centered front three-quarter view, entire character visible, generous consistent margin, icon occupies about 78% of square. One character only.\nLighting: large soft studio key from upper left, delicate highlights, soft ambient occlusion. Clear rich color. Cohesive friendly desktop app aesthetic.\nBackground: genuinely transparent, no ground plane.\nConstraints: readable at 40 pixels, clean silhouette, no text, no watermark, no borders, no multiple views.",
+    "tool": "built-in image_gen",
+    "output": "assets/atlas-3d.png"
+  },
+  {
+    "agent": "nova",
+    "prompt": "Use case: stylized-concept\nAsset type: small 3D avatar icon in a minimal personal AI messaging app.\nPrimary request: One isolated a tangerine orange soft rounded cube character, with two tiny dark dot eyes and a tiny warm smile; resourceful personality.\nStyle: sophisticated playful 3D product icon, soft inflated satin silicone, tangible rounded form, restrained gloss, Pixar quality rendering but extremely simple geometric character. No limbs, no clothing, no props.\nComposition: centered front three-quarter view, entire character visible, generous consistent margin, icon occupies about 78% of square. One character only.\nLighting: large soft studio key from upper left, delicate highlights, soft ambient occlusion. Clear rich color. Cohesive friendly desktop app aesthetic.\nBackground: genuinely transparent, no ground plane.\nConstraints: readable at 40 pixels, clean silhouette, no text, no watermark, no borders, no multiple views.",
+    "tool": "built-in image_gen",
+    "output": "assets/nova-3d.png"
+  },
+  {
+    "agent": "scout",
+    "prompt": "Use case: stylized-concept\nAsset type: small 3D avatar icon in a minimal personal AI messaging app.\nPrimary request: One isolated a mint green soft rounded four-leaf clover character with two tiny dark dot eyes and a tiny warm smile; thoughtful personality.\nStyle: sophisticated playful 3D product icon, soft inflated satin silicone, tangible rounded form, restrained gloss, Pixar quality rendering but extremely simple geometric character. No limbs, no clothing, no props.\nComposition: centered front three-quarter view, entire character visible, generous consistent margin, icon occupies about 78% of square. One character only.\nLighting: large soft studio key from upper left, delicate highlights, soft ambient occlusion. Clear rich color. Cohesive friendly desktop app aesthetic.\nBackground: genuinely transparent, no ground plane.\nConstraints: readable at 40 pixels, clean silhouette, no text, no watermark, no borders, no multiple views.",
+    "tool": "built-in image_gen",
+    "output": "assets/scout-3d.png"
+  }
+]

@@ -1,0 +1,2 @@
+const {test}=require('node:test');const assert=require('node:assert/strict');const {savedFiles}=require('./buddy-files');
+test('cards show the last actual save per folder and path without mixing roots',()=>{const old={path:'brief.md',folderId:'f',revision:'v1'},latest={path:'brief.md',folderId:'f',revision:'v2',actorName:'Reviewer'},other={path:'brief.md',folderId:'other',revision:'x'};assert.deepEqual(savedFiles([old,latest,other,null,{path:'pretend'}]),[latest,other]);assert.equal(old.revision,'v1');});

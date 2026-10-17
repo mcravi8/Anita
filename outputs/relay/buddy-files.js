@@ -1,0 +1,155 @@
+(function(root){
+  'use strict';
+  function savedFiles(receipts=[]){
+    const latest=new Map();
+    for(const file of receipts){if(file&&typeof file.path==='string'&&typeof file.folderId==='string'&&typeof file.revision==='string')latest.set(`${file.folderId}:${file.path}`,file);}
+    return [...latest.values()];
+  }
+  const api={savedFiles};root.BuddyFiles=api;
+  if(typeof module!=='undefined')module.exports=api;
+  if(typeof document==='undefined')return;
+  const native=()=>!!window.BuddyDesktop?.projectFiles;
+  let folder=null,current=null,generation=0;
+  const message=error=>String(error.message||error);
+  const fileIcon=()=>`<span class="artifact-icon">${icon('file')}</span>`;
+  const bytes=n=>n<1024?`${n} B`:`${(n/1024).toFixed(1)} KB`;
+  const date=value=>new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  function cards(receipts){
+    const files=savedFiles(receipts);if(!files.length)return '';
+    return `<div class="saved-file-cards">${files.slice(0,3).map(file=>`<button class="artifact-card" data-action="project-file" data-path="${esc(file.path)}" data-folder-id="${esc(file.folderId)}">${fileIcon()}<span><strong>${esc(file.path.split('/').at(-1))}</strong><small>Saved by ${esc(file.actorName||'Your team')}</small></span>${icon('chevron')}</button>${file.warning?`<p class="file-warning">${esc(file.warning)}</p>`:''}`).join('')}${files.length>3?`<button class="drawer-bottom-link" data-action="project-files">See all ${files.length} saved files${icon('arrow')}</button>`:''}</div>`;
+  }
+  async function loadFolder(){await window.BuddyDesktop.saveState(JSON.stringify(state));folder=await window.BuddyDesktop.projectFiles(state.activeFolderId);return folder;}
+  function folderBody(){
+    return `${folder.folders?.length>1?`<label class="project-folder-select"><span class="sr-only">Connected folder</span><select aria-label="Connected folder" data-project-folder>${folder.folders.map(f=>`<option value="${esc(f.folderId)}" ${f.folderId===folder.folderId?'selected':''}>${esc(f.name)}${f.available===false?' · Unavailable':''}</option>`).join('')}</select></label>`:''}<div class="project-folder-heading"><span class="menu-icon">${icon('folder')}</span><span><strong>${esc(folder.name)}</strong><small>${folder.files.length} ${folder.files.length===1?'file':'files'}</small></span><button class="icon-button" data-action="project-new" aria-label="Create a shared file">${icon('plus')}</button></div><div class="project-file-list">${folder.files.map(file=>`<button class="menu-row" data-action="project-file" data-path="${esc(file.path)}" data-folder-id="${esc(folder.folderId)}">${fileIcon()}<span>${esc(file.path)}<small>${bytes(file.bytes)}</small></span>${icon('chevron')}</button>`).join('')||`<div class="project-empty"><p>A place for your team’s work.</p><small>Ask an agent to create a file, or start one yourself.</small><button class="border-button" data-action="project-new">New file${icon('plus')}</button></div>`}</div>${folder.limited?'<p class="connections-caption">Showing up to 200 files. Agents can open other supported files by name.</p>':''}<details class="project-folder-details"><summary>Folder & access${icon('down')}</summary><p class="project-location">${esc(folder.location)}</p><p>Agents can work with documents, spreadsheets, PDFs, text and code in connected folders. Access is on by default; remove it in an agent’s settings. Groups need every member’s access.</p><div class="project-folder-actions"><button class="border-button" data-action="project-reveal">Show in Finder</button>${folder.primary!==false?'<button class="border-button" data-action="project-choose">Change shared folder</button>':'<button class="border-button" data-action="project-disconnect">Disconnect folder</button>'}${window.BuddyDesktop?.addProjectFolder?'<button class="border-button" data-action="project-add">Connect another folder</button>':''}</div><small>Documents up to 32 MB; text and raw binary tools up to 1 MB.</small></details>`;
+  }
+  async function show(){
+    if(!native())return;
+    const token=++generation;current=null;
+    openDrawer('Files','<div data-project-list><p class="connections-loading" role="status">Opening your folder…</p></div>');
+    try{await loadFolder();if(token===generation&&document.querySelector('[data-project-list]'))document.querySelector('[data-project-list]').innerHTML=folderBody();}
+    catch(error){if(token===generation&&document.querySelector('[data-project-list]'))document.querySelector('[data-project-list]').innerHTML=`<p class="field-error" role="alert">${esc(message(error))}</p><button class="border-button" data-action="project-files">Try again</button><button class="border-button" data-action="project-primary">Open shared folder</button><button class="border-button" data-action="project-add">Connect a folder</button>`;}
+  }
+  function remember(){if(!current||!document.getElementById('project-content')||!current.editing)return;state.fileDrafts||={};state.fileDrafts[`${current.folderId}:${current.path}`]=document.getElementById('project-content').value;save();}
+  function viewer(){
+    const structured=['docx','xlsx','pdf'].includes(current.format);
+    if(structured&&current.editing){documentEditor();return;}
+
+    const key=`${current.folderId}:${current.path}`,draft=state.fileDrafts?.[key];
+    openModal(current.path.split('/').at(-1),`<div data-project-view="${esc(current.path)}"><div class="file-preview-meta"><span>${esc(current.path)}</span>${BuddyDocuments.fullPreviewAvailable(current.path)?'<button class="project-text-link" data-action="document-full-preview">Full preview</button>':''}<button class="project-text-link" data-action="project-versions">Saved versions</button></div><p class="file-changed-note" role="status" hidden>The file has changed. Your draft is still here. Open the latest version to compare.</p>${current.editing?`<label class="field"><span class="sr-only">File contents</span><textarea id="project-content" class="file-preview-text project-content" aria-label="Contents of ${esc(current.path)}">${esc(draft!==undefined?draft:current.content)}</textarea></label>`:`<div class="document-preview">${BuddyDocuments.preview(current,current.sheetIndex||0)}</div>`}${current.notice?`<p class="document-caption">${esc(current.notice)}</p>`:''}<div id="project-file-error" class="field-error" role="alert"></div><div id="project-conflict" hidden><button class="border-button" data-action="project-latest">Compare latest version</button></div><div class="modal-actions"><button class="border-button" data-action="project-files">Files</button>${current.editing?'<button class="border-button" data-action="project-edit-cancel">View saved file</button><button class="primary-button" data-action="project-save">Save changes'+icon('check')+'</button>':'<button class="border-button" data-action="project-use">Use in chat</button>'+(current.editable?'<button class="primary-button" data-action="project-edit">Edit'+icon('arrow')+'</button>':'')+'<button class="border-button" data-action="document-reveal">Show in Finder</button>'}</div></div>`,true);
+    document.getElementById('project-content')?.addEventListener('input',remember);
+  }
+  async function open(path,folderId){
+    const token=++generation;current=null;
+    openModal(path.split('/').at(-1),'<div data-project-loading><p class="connections-loading" role="status">Reading the file…</p></div>',true);
+    try{
+      const result=await window.BuddyDesktop.previewProjectFile({path,folderId});
+      if(token!==generation||!document.querySelector('[data-project-loading]'))return;
+      current={...result,editing:false};viewer();
+    }catch(error){if(token===generation&&document.querySelector('[data-project-loading]'))document.querySelector('[data-project-loading]').innerHTML=`<p class="field-error" role="alert">${esc(message(error))}</p><button class="border-button" data-action="project-file" data-path="${esc(path)}" data-folder-id="${esc(folderId)}">Try again</button><button class="border-button" data-action="project-files">Files</button>`;}
+  }
+  async function saveFile(button){
+    remember();const file=current,area=document.getElementById('project-content'),error=document.getElementById('project-file-error');if(!file||!area)return;
+    button.disabled=true;error.textContent='';
+    try{
+      const content=area.value,result=await window.BuddyDesktop.writeProjectFile({folderId:file.folderId,path:file.path,content,expectedVersion:file.version});
+      delete state.fileDrafts?.[`${file.folderId}:${file.path}`];save();
+      if(current===file&&area.isConnected){await open(file.path,file.folderId);showToast(result.warning||'File saved.');}
+    }catch(reason){if(error.isConnected){error.textContent=message(reason);document.getElementById('project-conflict').hidden=!message(reason).toLowerCase().includes('file changed');}}
+    finally{if(button.isConnected)button.disabled=false;}
+  }
+  async function compare(button){
+    remember();const file=current;button.disabled=true;
+    try{
+      const latest=await window.BuddyDesktop.readProjectFile({path:file.path,folderId:file.folderId});if(current!==file||!document.querySelector('[data-project-view]'))return;
+      const draft=state.fileDrafts[`${file.folderId}:${file.path}`];current={...latest,editing:true};
+      openModal('Keep both changes',`<div data-project-compare><p class="modal-description">Your draft is saved. Merge it with the current file below before saving.</p><details class="project-latest" open><summary>Current saved file${icon('down')}</summary><pre>${esc(latest.content)}</pre></details><label class="field"><span>Your draft</span><textarea id="project-content" class="file-preview-text project-content" aria-label="Merged file contents">${esc(draft)}</textarea></label><div id="project-file-error" class="field-error" role="alert"></div><div id="project-conflict" hidden><button class="border-button" data-action="project-latest">Compare latest version</button></div><div class="modal-actions"><button class="border-button" data-action="project-files">Keep draft & close</button><button class="primary-button" data-action="project-save">Save merged file${icon('check')}</button></div></div>`,true);
+      document.getElementById('project-content').addEventListener('input',remember);
+    }catch(reason){const error=document.getElementById('project-file-error');if(error)error.textContent=message(reason);}
+    finally{if(button.isConnected)button.disabled=false;}
+  }
+  async function newFile(){
+    try{await loadFolder();}catch(reason){showToast(message(reason));return;}
+    const selected=folder,token=++generation;current=null;state.newFileDraft||={name:'',content:''};
+    openModal('New file',`<form id="project-new-form"><p class="modal-description">Save in ${esc(selected.name)}.</p><div class="field"><label for="project-new-name">File name</label><input id="project-new-name" placeholder="e.g. brief.docx, budget.xlsx, notes.md" value="${esc(state.newFileDraft.name)}" maxlength="1000" required></div><div class="field"><label for="project-new-content">Contents</label><textarea id="project-new-content" class="project-content" placeholder="Write a first draft. For Excel, separate columns with tabs and rows with new lines.">${esc(state.newFileDraft.content)}</textarea></div><p class="field-error" id="project-new-error" role="alert"></p>${formActions('Create file')}</form>`);
+    const form=document.getElementById('project-new-form');form.addEventListener('input',()=>{state.newFileDraft={name:document.getElementById('project-new-name').value,content:document.getElementById('project-new-content').value};save();});
+    form.addEventListener('submit',async event=>{
+      event.preventDefault();const button=event.submitter,name=document.getElementById('project-new-name').value.trim(),content=document.getElementById('project-new-content').value;button.disabled=true;
+      try{const ext=name.split('.').pop().toLowerCase();
+        if(['docx','xlsx','pdf'].includes(ext)){
+          let specification=ext==='docx'?{paragraphs:content.split('\n')}:ext==='pdf'?{pages:[content]}:{sheets:[{name:'Sheet1',cells:Object.fromEntries(content.split('\n').flatMap((row,r)=>row.split('\t').map((value,c)=>[BuddyDocuments.column(c+1)+(r+1),value])))}]};
+          await window.BuddyDesktop.createProjectDocument({folderId:selected.folderId,path:name,specification});
+        }else await window.BuddyDesktop.writeProjectFile({folderId:selected.folderId,path:name,content,expectedVersion:''});delete state.newFileDraft;save();if(token===generation&&form.isConnected){await open(name,selected.folderId);showToast('File created.');}}
+      catch(reason){if(form.isConnected)document.getElementById('project-new-error').textContent=message(reason);}
+      finally{if(button.isConnected)button.disabled=false;}
+    });
+  }
+  function documentEditor(){
+    const key=`${current.folderId}:${current.path}`,saved=state.fileDocumentDrafts?.[key];
+    current.edit=current.edit||saved?.edit||BuddyDocuments.initialEdit(current,current.sheetIndex||0,current.selectedCell||'A1');
+    current.draftStale=!!saved&&saved.version!==current.version&&!current.draftReviewed;
+    openModal(current.path.split('/').at(-1),`<div class="document-editor"><p class="modal-description">${esc(current.path)}</p>${current.draftStale?'<p class="file-changed-note">The file changed after your draft. Review it against the current preview before saving.</p><button class="border-button" data-action="document-review-draft">Use this draft on the current file</button>':''}${BuddyDocuments.editor(current,current.edit)}<p class="file-changed-note" hidden>The file has changed. Your draft is still here.</p><div id="project-file-error" class="field-error" role="alert"></div><div id="project-conflict" hidden><button class="border-button" data-action="project-file" data-path="${esc(current.path)}" data-folder-id="${esc(current.folderId)}">Open latest file</button></div><div class="modal-actions"><button class="border-button" data-action="project-edit-cancel">View saved file</button><button class="primary-button" data-action="document-save" ${current.draftStale?'disabled':''}>Save change${icon('check')}</button></div></div>`,true);
+    document.querySelector('.document-editor').addEventListener('input',event=>{if(event.target.dataset.documentInput){const key=event.target.dataset.documentInput;current.edit[key]=['paragraph','page','x','y','width','height','degrees'].includes(key)?Number(event.target.value):event.target.value;rememberDocument();}});
+    document.querySelector('.document-editor').addEventListener('change',event=>{
+      if(event.target.id==='document-paragraph'){const value=event.target.value;current.edit=value==='append'?{op:'append_paragraph',text:''}:{op:'replace_paragraph',paragraph:Number(value),text:current.paragraphs.find(p=>p.id===Number(value))?.text||''};rememberDocument();documentEditor();}
+      else if(event.target.dataset.documentInput==='op'){current.edit.degrees??=0;rememberDocument();documentEditor();}
+      else if(event.target.dataset.documentInput==='page'&&current.edit.op==='set_field'){current.edit.field='';rememberDocument();documentEditor();}
+      else if(event.target.dataset.documentInput==='field'){current.edit.text=current.fields.find(f=>f.page===current.edit.page&&f.name===current.edit.field)?.value||'';rememberDocument();documentEditor();}
+      else if(current.format==='xlsx'&&['cell','sheet'].includes(event.target.dataset.documentInput)){const sheet=current.sheets.findIndex(s=>s.name===current.edit.sheet);current.edit=BuddyDocuments.initialEdit(current,sheet,current.edit.cell.toUpperCase());rememberDocument();documentEditor();}
+    });
+  }
+  function rememberDocument(){if(!current?.edit||current.draftStale)return;state.fileDocumentDrafts||={};state.fileDocumentDrafts[`${current.folderId}:${current.path}`]={version:current.version,edit:current.edit};save();}
+  async function saveDocument(button){
+    const file=current;if(file.draftStale)return;button.disabled=true;const error=document.getElementById('project-file-error');error.textContent='';
+    try{const operation=BuddyDocuments.operation(file.edit);const result=await window.BuddyDesktop.editProjectDocument({folderId:file.folderId,path:file.path,expectedVersion:file.version,operations:[operation]});delete state.fileDocumentDrafts?.[`${file.folderId}:${file.path}`];save();if(current===file){await open(file.path,file.folderId);showToast(result.warning||'Document saved.');}}
+    catch(reason){if(error.isConnected){error.textContent=message(reason);document.getElementById('project-conflict').hidden=!/changed/i.test(message(reason));}}
+    finally{if(button.isConnected)button.disabled=false;}
+  }
+  async function pdfPage(direction){const file=current,page=(file.previewPage||1)+direction;if(page<1||page>file.pageCount)return;const token=++generation;const result=await window.BuddyDesktop.previewProjectFile({path:file.path,folderId:file.folderId,page});if(current===file&&token===generation){current={...result,editing:false};viewer();}}
+  async function versions(){
+    remember();const file=current;if(!file)return;const token=++generation;
+    openModal('Saved versions','<div data-project-versions><p class="connections-loading" role="status">Opening saved versions…</p></div>');
+    try{
+      const entries=await window.BuddyDesktop.projectVersions({path:file.path,folderId:file.folderId});if(token!==generation||!document.querySelector('[data-project-versions]'))return;
+      document.querySelector('[data-project-versions]').innerHTML=`<p class="modal-description">${esc(file.path)}. Restore puts back the contents from before a saved change.</p>${entries.map(entry=>`<div class="project-version"><span><strong>${esc(entry.actorName)} · ${entry.kind==='restored'?'Restored':entry.kind==='created'?'Created':'Edited'}</strong><small>${esc(date(entry.date))}</small></span>${entry.canRestoreBefore?`<button class="border-button" data-action="project-restore" data-id="${esc(entry.id)}">Restore before edit</button>`:''}</div>`).join('')||'<p class="connections-caption">No Buddy edits yet. The next change will save this version.</p>'}<p id="project-version-error" class="field-error" role="alert"></p><div class="modal-actions"><button class="primary-button" data-action="project-file" data-path="${esc(file.path)}" data-folder-id="${esc(file.folderId)}">Back to file${icon('arrow')}</button></div>`;
+    }catch(reason){if(document.querySelector('[data-project-versions]'))document.querySelector('[data-project-versions]').innerHTML=`<p class="field-error" role="alert">${esc(message(reason))}</p><button class="border-button" data-action="project-file" data-path="${esc(file.path)}" data-folder-id="${esc(file.folderId)}">Back to file</button>`;}
+  }
+  async function restore(button){
+    const file=current;button.disabled=true;
+    try{await window.BuddyDesktop.restoreProjectFile({path:file.path,folderId:file.folderId,receiptId:button.dataset.id,expectedVersion:file.version});if(button.isConnected){await open(file.path,file.folderId);showToast('Earlier contents restored.');}}
+    catch(reason){const error=document.getElementById('project-version-error');if(error)error.textContent=message(reason);}
+    finally{if(button.isConnected)button.disabled=false;}
+  }
+  async function changed(detail){
+    if(document.querySelector('[data-project-list]')){const token=++generation;try{await loadFolder();if(token===generation&&document.querySelector('[data-project-list]')){const el=document.querySelector('[data-project-list]'),expanded=el.querySelector('details')?.open,scroll=el.closest('.modal-body').scrollTop;el.innerHTML=folderBody();el.querySelector('details').open=expanded;el.closest('.modal-body').scrollTop=scroll;}}catch(reason){showToast(message(reason));}}
+    if(current?.editing){const receipts=detail.files||[detail.file].filter(Boolean);if(detail.type==='project-files-changed'||receipts.some(file=>file.folderId===current.folderId&&file.path===current.path&&file.revision!==current.version)){const note=document.querySelector('.file-changed-note');if(note)note.hidden=false;const conflict=document.getElementById('project-conflict');if(conflict)conflict.hidden=false;}}
+  }
+  document.addEventListener('click',async event=>{
+    const button=event.target.closest('[data-action]');if(!button||!native())return;
+    try{switch(button.dataset.action){
+      case 'project-files':remember();await show();break;
+      case 'project-file':remember();await open(button.dataset.path,button.dataset.folderId);break;
+      case 'project-new':await newFile();break;
+      case 'project-edit':current.editing=true;viewer();break;
+      case 'document-cell':if(current?.format==='xlsx'&&current.editable){current.selectedCell=button.dataset.cell;current.edit=BuddyDocuments.initialEdit(current,current.sheetIndex||0,current.selectedCell);current.editing=true;viewer();}break;
+      case 'document-review-draft':current.draftReviewed=true;current.draftStale=false;rememberDocument();documentEditor();break;
+      case 'document-save':await saveDocument(button);break;
+      case 'document-prev':await pdfPage(-1);break;
+      case 'document-next':await pdfPage(1);break;
+      case 'document-full-preview':await window.BuddyDesktop.fullProjectPreview({path:current?.path||button.dataset.path,folderId:current?.folderId||button.dataset.folderId});break;
+      case 'document-reveal':await window.BuddyDesktop.revealProjectFile({path:current.path,folderId:current.folderId});break;
+      case 'project-edit-cancel':remember();current.editing=false;viewer();break;
+      case 'project-save':await saveFile(button);break;
+      case 'project-latest':await compare(button);break;
+      case 'project-versions':await versions();break;
+      case 'project-restore':await restore(button);break;
+      case 'project-use':{const path=current.path;closeModal();if(ui.view.kind!=='chat')navigate('chat',ui.lastChat||state.agents[0]?.id);const input=document.getElementById('message-input');input.value+=`${input.value&&!input.value.endsWith(' ')?' ':''}Use the connected file “${path}” in folderId ${current.folderId}. `;input.dispatchEvent(new Event('input'));input.focus();break;}
+      case 'project-choose':case 'project-add':{remember();button.disabled=true;await window.BuddyDesktop.saveState(JSON.stringify(state));const result=await (button.dataset.action==='project-add'?window.BuddyDesktop.addProjectFolder():window.BuddyDesktop.chooseProjectFolder());if(!result.cancelled){folder=result;state.activeFolderId=result.folderId;save();await show();}break;}
+      case 'project-disconnect':{remember();button.disabled=true;await window.BuddyDesktop.disconnectProjectFolder(folder.folderId);delete state.activeFolderId;save();await show();showToast('Folder disconnected. Its files are still on your Mac.');break;}
+      case 'project-primary':delete state.activeFolderId;save();await show();break;
+      case 'project-reveal':await window.BuddyDesktop.showProjectFolder(folder?.folderId);break;
+    }}catch(reason){showToast(message(reason));}finally{if(button.isConnected)button.disabled=false;}
+  });
+  document.addEventListener('change',async event=>{if(event.target.id==='document-sheet'){current.sheetIndex=Number(event.target.value);viewer();return;}if(!event.target.matches('[data-project-folder]'))return;remember();state.activeFolderId=event.target.value;save();await show();});
+  window.addEventListener('buddy-conversation',event=>{if(['file','project-files-changed'].includes(event.detail?.type)||event.detail?.files?.length)changed(event.detail);});
+  Object.assign(api,{native,show,open,newFile,cards});
+})(typeof globalThis!=='undefined'?globalThis:this);

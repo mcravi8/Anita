@@ -1,0 +1,36 @@
+# Publish only maintained source and repository documentation.
+/*
+!/.gitignore
+!/README.md
+!/outputs/
+/outputs/*
+!/outputs/buddy-mac/
+!/outputs/relay/
+
+# Generated binaries and temporary build files.
+**/*.app/
+**/*.zip
+**/*.icns
+**/.DS_Store
+**/__pycache__/
+**/*.pyc
+**/.build/
+**/node_modules/
+**/*.log
+
+# Local runtime state and credentials.
+**/.env
+**/.env.*
+**/auth.json
+**/credentials.json
+**/workspace.json
+**/conversations.json
+**/conversation-policies.json
+**/connection-access.json
+**/computer-access.json
+**/connected-actions.json
+**/project-folders.json
+**/connected-folders.json
+**/ProjectHistory/
+**/Projects/
+**/Archives/

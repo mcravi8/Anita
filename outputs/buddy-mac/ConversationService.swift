@@ -50,13 +50,13 @@ struct BuddyFailure: LocalizedError {
     private var sessionsURL: URL { support.appendingPathComponent("conversations.json") }
     private var workingURL: URL { support.appendingPathComponent("Conversations", isDirectory: true) }
 
-    init(support: URL, projectFiles: BuddyProjectFiles? = nil, executable: URL? = nil, grantsSupport: URL? = nil) {
+    init(support: URL, projectFiles: BuddyProjectFiles? = nil, executable: URL? = nil, grantsSupport: URL? = nil, computerSupport: URL? = nil) {
         self.support = support
         self.grantsSupport = grantsSupport ?? support
         self.executableOverride = executable
         self.projectFiles = projectFiles ?? BuddyProjectFiles(support: support)
         self.agentProposals = BuddyAgentProposals(support: support)
-        self.computer = BuddyComputer(support: support)
+        self.computer = BuddyComputer(support: computerSupport ?? support)
         if FileManager.default.fileExists(atPath: actionJournalURL.path) {
             if let data = try? Data(contentsOf: actionJournalURL), let records = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] {
                 inputRecords = records
@@ -141,7 +141,7 @@ struct BuddyFailure: LocalizedError {
                 }
             }
         }
-        _ = try await request("initialize", ["clientInfo": ["name": "buddy_desktop", "title": "Buddy", "version": "0.12.0"], "capabilities": ["experimentalApi": true]])
+        _ = try await request("initialize", ["clientInfo": ["name": "buddy_desktop", "title": "Buddy", "version": "0.13.0"], "capabilities": ["experimentalApi": true]])
         try write(["method": "initialized"])
         let config = try await request("config/read", ["includeLayers": false])["config"] as? [String: Any] ?? [:]
         restrictions = ["project_doc_max_bytes": 0, "web_search": "disabled", "developer_instructions": ""]
@@ -150,9 +150,9 @@ struct BuddyFailure: LocalizedError {
         }
     }
 
-    func connection() async throws -> [String: Any] {
+    func connection(refresh: Bool = false) async throws -> [String: Any] {
         try await connect()
-        let result = try await request("account/read", ["refreshToken": false])
+        let result = try await request("account/read", ["refreshToken": refresh])
         let account = result["account"] as? [String: Any] ?? [:]
         let connected = account["type"] as? String == "chatgpt"
         return ["connected": connected, "plan": account["planType"] ?? NSNull(), "error": connected ? "" : "Sign in with ChatGPT to start chatting."]

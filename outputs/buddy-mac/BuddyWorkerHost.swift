@@ -19,9 +19,11 @@ import Darwin
     private var delegatedResult: ((Result<[String: Any], Error>) -> Void)?
     private var startedAt = Date()
     private var authorization = Data()
+    private var providerRevision = "initial"
     private var lastProgressSave = Date.distantPast
     private let executableOverride: URL?
     init(support: URL, executable: URL? = nil) { self.support = support; self.executableOverride = executable }
+    private var providerSettings: BuddyAISettings { BuddyAISettings(support: support) }
     private var root: URL { support.appendingPathComponent("Worker", isDirectory: true) }
     private var workspace: String { (try? state()["conversationWorkspace"] as? String) ?? "" }
     private func state() throws -> [String: Any] { guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: support.appendingPathComponent("workspace.json"))) as? [String: Any] else { throw BuddyWorkerFailure(message: "Open Buddy and finish setting up your first agent.") }; return value }
@@ -30,7 +32,7 @@ import Darwin
         guard state["conversationWorkspace"] as? String == workspace, let agent = (state["agents"] as? [[String: Any]])?.first(where: { $0["id"] as? String == id }) else { throw BuddyWorkerFailure(message: "This agent is no longer in your workspace.") }; return agent
     }
     private func permitted(_ job: [String: Any], tool: String? = nil) -> Bool {
-        guard let id = job["agentId"] as? String, let workspace = job["workspace"] as? String, let a = try? agent(id, workspace: workspace) else { return false }
+        guard let id = job["agentId"] as? String, let workspace = job["workspace"] as? String, let a = try? agent(id, workspace: workspace), (try? providerSettings.current(workspace).enabled(job["provider"] as? String ?? "")) == true else { return false }
         guard let tool else { return true }; return (a["tools"] as? [String: Bool])?[tool] != false
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -85,11 +87,13 @@ import Darwin
         let operation = request["operation"] as? String ?? "status"
         if operation == "status" {
             let jobs = store.jobs.filter { $0["workspace"] as? String == current }.map { job -> [String: Any] in var out = job; out.removeValue(forKey: "goal"); out.removeValue(forKey: "events"); out.removeValue(forKey: "reviews"); out.removeValue(forKey: "result"); return out }
-            return ["online": true, "paused": store.paused, "tasks": jobs, "claudeConnected": BuddyClaudeKey.read(current) != nil, "nodeAvailable": BuddyWorkerProcess.runtime != nil, "computer": "This Mac · private browser and files"]
+            return ["online": true, "paused": store.paused, "tasks": jobs, "claudeConnected": try providerSettings.current(current).claudeEnabled && BuddyClaudeKey.read(current) != nil, "defaultProvider": try providerSettings.current(current).provider, "claudeBudgetUSD": try providerSettings.current(current).claudeBudgetUSD, "nodeAvailable": BuddyWorkerProcess.runtime != nil, "computer": "This Mac · private browser and files"]
         }
         if operation == "create" {
             let id = request["agentId"] as? String ?? ""; _ = try agent(id, workspace: current)
-            let provider = request["provider"] as? String ?? "chatgpt", budget = request["budgetUSD"] as? Double ?? 0
+            let choice = try providerSettings.current(current)
+            let provider = request["provider"] as? String ?? choice.provider, budget = request["budgetUSD"] as? Double ?? (provider == "claude" ? choice.claudeBudgetUSD : 0)
+            guard choice.enabled(provider) else { throw BuddyWorkerFailure(message: "Connect this provider in Settings → AI provider before starting a task.") }
             if provider == "claude" { guard BuddyClaudeKey.read(current) != nil, budget > 0 else { throw BuddyWorkerFailure(message: "Connect your Claude API key and choose a task spending limit first.") } }
             let job = try store.create(workspace: current, agent: id, requestId: request["requestId"] as? String ?? "", title: request["title"] as? String ?? "", goal: request["goal"] as? String ?? "", kind: request["kind"] as? String ?? "general", provider: provider, budget: budget)
             return ["task": job]
@@ -125,7 +129,7 @@ import Darwin
                 do { try store.update(id, ["reviews": reviews, "status": "running", "progress": accepted ? "Running the approved operation" : "Operation declined"]); decision(accepted) }
                 catch { decision(false); throw error }; return ["accepted": true]
             }
-            guard let service else { throw BuddyWorkerFailure(message: "This connection is no longer waiting.") }
+            guard try providerSettings.current(current).chatgptEnabled, let service else { service?.shutdown(); throw BuddyWorkerFailure(message: "ChatGPT is disconnected. This connection action was not approved.") }
             let result = try service.answerInput(workspace: current, payload: request); try store.update(id, ["status": "running", "progress": "Continuing after your review"]); return result
         }
         if operation == "browser" {
@@ -160,7 +164,9 @@ import Darwin
     }
     private func tick() async {
         if let id = active, let job = try? store.job(id) {
-            if !permitted(job) || authorizationData(job) != authorization { await stop(id, status: "paused"); return }
+            if let choice = try? providerSettings.current(job["workspace"] as? String ?? ""), choice.revision(job["provider"] as? String ?? "") != providerRevision { await stop(id, status: "paused"); return }
+            if job["provider"] as? String == "claude", delegatedResult != nil, (try? providerSettings.current(job["workspace"] as? String ?? "").chatgptEnabled) != true { service?.shutdown() }
+            if !permitted(job) || (try? providerSettings.current(job["workspace"] as? String ?? "").enabled(job["provider"] as? String ?? "")) != true || authorizationData(job) != authorization { await stop(id, status: "paused"); return }
             if Date().timeIntervalSince(startedAt) > 3600 { await stop(id, status: "paused"); return }
             return
         }
@@ -170,8 +176,9 @@ import Darwin
     private func execute(_ job: [String: Any]) async throws {
         let id = job["id"] as! String, workspace = job["workspace"] as! String, agentID = job["agentId"] as! String
         let a = try agent(agentID, workspace: workspace)
+        guard try providerSettings.current(workspace).enabled(job["provider"] as? String ?? "") else { _ = try store.update(id, ["status": "paused", "progress": "This provider is disconnected. Reconnect it in Settings → AI provider, then resume."]); return }
         browser?.close(); browser = nil
-        active = id; authorization = authorizationData(job); stopped = false; startedAt = Date(); runID = UUID().uuidString
+        active = id; providerRevision = try providerSettings.current(workspace).revision(job["provider"] as? String ?? ""); authorization = authorizationData(job); stopped = false; startedAt = Date(); runID = UUID().uuidString
         let folder = directory(job); try FileManager.default.createDirectory(at: folder.appendingPathComponent("Files"), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try store.update(id, ["status": "running", "progress": "Starting " + (job["provider"] as? String == "claude" ? "Claude" : "ChatGPT"), "attempt": (job["attempt"] as? Int ?? 0) + 1])
         let f = files(job); privateFiles = f; scope = try f.scope(workspace)
@@ -260,7 +267,7 @@ import Darwin
         let id = job["id"] as! String
         guard active == id, !stopped, permitted(job) else { throw BuddyWorkerFailure(message: "This background task stopped or its access was removed.") }
         if name == "buddy_connected_services" {
-            guard job["provider"] as? String == "claude", let service, delegatedResult == nil, let request = args["request"] as? String, request.count <= 15000 else { throw BuddyWorkerFailure(message: "This connection request is unavailable.") }
+            guard try providerSettings.current(job["workspace"] as? String ?? "").chatgptEnabled, job["provider"] as? String == "claude", let service, delegatedResult == nil, let request = args["request"] as? String, request.count <= 15000 else { throw BuddyWorkerFailure(message: "This connection request is unavailable.") }
             let agentID = job["agentId"] as! String, workspace = job["workspace"] as! String
             let a = try agent(agentID, workspace: workspace), run = UUID().uuidString
             var options = BuddyTurnOptions(); options.proposalsEnabled = false; options.actorId = agentID; options.internalRun = true

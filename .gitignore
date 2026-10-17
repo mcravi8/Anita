@@ -35,3 +35,7 @@
 **/ProjectHistory/
 **/Projects/
 **/Archives/
+
+# Provider preferences and optional Claude runtime state.
+**/ai-providers.json
+**/Claude/

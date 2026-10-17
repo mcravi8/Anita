@@ -133,6 +133,7 @@ import Foundation
         try check(job)
         let childId = UUID().uuidString
         var options = BuddyTurnOptions()
+        options.routingGroup = job.request.runId
         options.permissionKeys = job.request.permissionKeys; options.toolsEnabled = tools
         options.actorId = agent.id
         if tools { options.proposalScope = BuddyProposalScope(workspace: job.request.workspace, chat: job.request.groupId, actorId: agent.id, replyRunId: job.request.runId) }

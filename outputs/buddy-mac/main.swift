@@ -8,7 +8,8 @@ import AppKit
     private let supportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Buddy", isDirectory: true)
     private var stateURL: URL { supportURL.appendingPathComponent("workspace.json") }
     private lazy var conversations = ConversationService(support: supportURL)
-    private lazy var teamwork = BuddyTeamService(conversations: conversations)
+    private lazy var ai = BuddyAIRouter(support: supportURL, chatgpt: conversations)
+    private lazy var teamwork = BuddyTeamService(conversations: ai)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .aqua)
@@ -41,11 +42,15 @@ import AppKit
             let workspace = try self.workspaceContext()
             guard workspace.agents.contains(id) else { throw BuddyWorkerFailure(message: "This agent is no longer available.") }
             _ = try await BuddyWorkerClient.start(support: self.supportURL, workspace: workspace.workspace)
-            return try await BuddyWorkerClient.call(support: self.supportURL, payload: ["operation": "create", "workspace": workspace.workspace, "agentId": id, "requestId": (context["runId"] as? String ?? "") + ":" + (context["callId"] as? String ?? ""), "title": args["title"] ?? "", "goal": args["goal"] ?? "", "kind": args["kind"] ?? "general", "provider": "chatgpt", "budgetUSD": 0])
+            let choice = try self.ai.settings.current(workspace.workspace)
+            return try await BuddyWorkerClient.call(support: self.supportURL, payload: ["operation": "create", "workspace": workspace.workspace, "agentId": id, "requestId": (context["runId"] as? String ?? "") + ":" + (context["callId"] as? String ?? ""), "title": args["title"] ?? "", "goal": args["goal"] ?? "", "kind": args["kind"] ?? "general", "provider": choice.provider, "budgetUSD": choice.provider == "claude" ? choice.claudeBudgetUSD : 0])
         }
         teamwork.onEvent = { [weak self] event in self?.deliver(event) }
-        conversations.onEvent = { [weak self] event in
+        ai.onEvent = { [weak self] event in
             guard let self else { return }
+            if event["type"] as? String == "connection" {
+                Task { if let workspace = try? self.workspaceContext().workspace, let status = try? await self.ai.status(workspace: workspace) { self.deliver(status.merging(["type": "connection"]) { _, new in new }) } }; return
+            }
             if event["type"] as? String == "tool-input" { _ = self.teamwork.consume(event); self.deliver(event); return }
             if event["type"] as? String == "proposal" { self.deliver(event); return }
             if !self.teamwork.consume(event) { self.deliver(event) }
@@ -92,6 +97,7 @@ import AppKit
         let stateLiteral = savedState.flatMap { try? JSONSerialization.data(withJSONObject: [$0]) }.flatMap { String(data: $0, encoding: .utf8) } ?? "[null]"
         let bridge = """
         window.BuddyDesktop = Object.freeze({
+          providerSettings: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'providerSettings', payload}),
           worker: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'worker', payload}),
           initialState: \(stateLiteral)[0],
           saveState: value => window.webkit.messageHandlers.buddy.postMessage({kind: 'saveState', value}),
@@ -135,7 +141,7 @@ import AppKit
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func applicationWillTerminate(_ notification: Notification) { teamwork.shutdown(); conversations.shutdown() }
+    func applicationWillTerminate(_ notification: Notification) { teamwork.shutdown(); ai.shutdown() }
     private func deliver(_ event: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: event), let json = String(data: data, encoding: .utf8) else { return }
         webView?.evaluateJavaScript("window.dispatchEvent(new CustomEvent('buddy-conversation', {detail: \(json)}))", completionHandler: nil)
@@ -209,7 +215,7 @@ import AppKit
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }
     @objc private func about() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.12.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by your ChatGPT subscription.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.13.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by your ChatGPT subscription.")])
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
@@ -217,32 +223,28 @@ import AppKit
               url.standardizedFileURL.path == Bundle.main.resourceURL?.appendingPathComponent("Web/index.html").standardizedFileURL.path,
               let body = message.body as? [String: Any], let kind = body["kind"] as? String else { replyHandler(nil, "Unsupported request."); return }
         switch kind {
+        case "providerSettings":
+            Task { do { let workspace = try workspaceContext().workspace; replyHandler(try await providerRequest(body["payload"] as? [String: Any] ?? [:], workspace: workspace), nil) } catch { replyHandler(nil, error.localizedDescription) } }
         case "worker":
             do {
                 let context = try workspaceContext(); var payload = body["payload"] as? [String: Any] ?? [:]; payload["workspace"] = context.workspace
-                if payload["operation"] as? String == "connectClaude" { replyHandler(try BuddyWorkerClient.connectClaude(workspace: context.workspace), nil); return }
-                if payload["operation"] as? String == "disconnectClaude" { try BuddyClaudeKey.save(nil, workspace: context.workspace); replyHandler(["connected": false], nil); return }
+                if ["connectClaude", "disconnectClaude"].contains(payload["operation"] as? String ?? "") {
+                    Task { do { let result = try await providerRequest(["operation": payload["operation"] as? String == "connectClaude" ? "connect" : "disconnect", "provider": "claude"], workspace: context.workspace); replyHandler(["connected": (result["claude"] as? [String: Any])?["connected"] ?? false], nil) } catch { replyHandler(nil, error.localizedDescription) } }; return
+                }
                 Task { do {
                     if payload["operation"] as? String == "start" { replyHandler(try await BuddyWorkerClient.start(support: supportURL, workspace: context.workspace), nil) }
                     else { replyHandler(try await BuddyWorkerClient.call(support: supportURL, payload: payload), nil) }
                 } catch { replyHandler(nil, error.localizedDescription) } }
             } catch { replyHandler(nil, error.localizedDescription) }
         case "connectionStatus":
-            Task { do { replyHandler(try await conversations.connection(), nil) } catch { replyHandler(nil, error.localizedDescription) } }
+            Task { do { let workspace = try workspaceContext().workspace; replyHandler(try await ai.status(workspace: workspace), nil) } catch { replyHandler(nil, error.localizedDescription) } }
         case "computerStatus":
             Task { do { replyHandler(try await conversations.computerStatus(), nil) } catch { replyHandler(nil, error.localizedDescription) } }
         case "setComputerAccess":
             guard let enabled = body["enabled"] as? Bool else { replyHandler(nil, "Choose whether to connect this Mac."); return }
             Task { do { replyHandler(try await conversations.setComputerAccess(enabled), nil) } catch { replyHandler(nil, error.localizedDescription) } }
         case "signIn":
-            Task {
-                do {
-                    let login = try await conversations.signIn()
-                    guard let value = login["authUrl"] as? String, let url = URL(string: value), url.scheme == "https", ["auth.openai.com", "chatgpt.com"].contains(url.host ?? "") else { replyHandler(nil, "ChatGPT didn’t provide a sign-in page. Try again."); return }
-                    NSWorkspace.shared.open(url)
-                    replyHandler(["started": true], nil)
-                } catch { replyHandler(nil, error.localizedDescription) }
-            }
+            Task { do { let workspace = try workspaceContext().workspace; replyHandler(try await providerRequest(["operation": "connect", "provider": "chatgpt"], workspace: workspace), nil) } catch { replyHandler(nil, error.localizedDescription) } }
         case "sendMessage":
             guard let payload = body["payload"] as? [String: Any] else { replyHandler(nil, "Invalid message."); return }
             do {
@@ -259,23 +261,23 @@ import AppKit
                 options.fileScope = try conversations.projectFiles.scope(context.workspace)
                 options.actorId = agent
                 options.extraTools = BuddyWorkerClient.tools
-                options.instructions = "If the user explicitly asks you to run a task in the background, use buddy_start_background_task. Pass the full authorized brief and the facts needed to execute it; the worker has separate conversation context. It uses the ChatGPT subscription and current agent permissions, private browser/files, and native human action reviews. Report the returned task title and tell the user results and reviews are in Background work. Don't create background work for ordinary questions, invent tasks, or claim it has finished when only queued."
+                options.instructions = "If the user explicitly asks you to run a task in the background, use buddy_start_background_task. Pass the full authorized brief and the facts needed to execute it; the worker has separate conversation context. It uses the selected default AI provider, its configured spending limit, and current agent permissions, private browser/files, and native human action reviews. Report the returned task title and tell the user results and reviews are in Background work. Don't create background work for ordinary questions, invent tasks, or claim it has finished when only queued."
                 options.proposalScope = BuddyProposalScope(workspace: context.workspace, chat: agent, actorId: agent, replyRunId: payload["runId"] as? String ?? "")
                 options.history = BuddyConversationHistory.context(try workspaceState(), target: agent, runId: payload["runId"] as? String ?? "")
-                replyHandler(try conversations.send(payload, options: options), nil)
+                replyHandler(try ai.send(payload, options: options), nil)
             } catch { replyHandler(nil, error.localizedDescription) }
         case "stopMessage":
             guard let runID = body["runId"] as? String else { replyHandler(nil, "Invalid reply."); return }
-            Task { do { replyHandler(try await (teamwork.contains(runID) ? teamwork.stop(runID) : conversations.stop(runID)), nil) } catch { replyHandler(nil, error.localizedDescription) } }
-        case "activeRuns": replyHandler(conversations.snapshots() + teamwork.snapshots(), nil)
+            Task { do { replyHandler(try await (teamwork.contains(runID) ? teamwork.stop(runID) : ai.stop(runID)), nil) } catch { replyHandler(nil, error.localizedDescription) } }
+        case "activeRuns": replyHandler(ai.snapshots() + teamwork.snapshots(), nil)
         case "toolInputs":
-            do { let context = try workspaceContext(); replyHandler(["requests": conversations.pendingInputs(workspace: context.workspace)], nil) }
+            do { let context = try workspaceContext(); replyHandler(["requests": ai.pendingInputs(workspace: context.workspace)], nil) }
             catch { replyHandler(nil, error.localizedDescription) }
         case "answerToolInput":
             do {
                 let context = try workspaceContext()
                 guard let payload = body["payload"] as? [String: Any] else { throw BuddyFailure(message: "Review this action first.") }
-                replyHandler(try conversations.answerInput(workspace: context.workspace, payload: payload), nil)
+                replyHandler(try ai.answerInput(workspace: context.workspace, payload: payload), nil)
             } catch { replyHandler(nil, error.localizedDescription) }
         case "agentProposals":
             do { let context = try workspaceContext(); replyHandler(["proposals": try conversations.agentProposals.list(context.workspace)], nil) }
@@ -337,7 +339,7 @@ import AppKit
                 Task { do {
                     let context = try self.workspaceContext()
                     let selected = kind == "addProjectFolder" ? try self.conversations.projectFiles.addFolder(context.workspace, to: url) : try self.conversations.projectFiles.connect(context.workspace, to: url)
-                    await self.teamwork.stopFiles(workspace: context.workspace); await self.conversations.stopFiles(workspace: context.workspace)
+                    await self.teamwork.stopFiles(workspace: context.workspace); await self.ai.stopFiles(workspace: context.workspace)
                     guard let id = selected["folderId"] as? String else { throw BuddyFailure(message: "Reopen Files to see the connected folder.") }
                     replyHandler(try self.conversations.projectFiles.list(BuddyFileScope(workspace: context.workspace, folderId: id)), nil)
                     self.deliver(["type": "project-files-changed"])
@@ -348,7 +350,7 @@ import AppKit
                 let context = try workspaceContext()
                 guard let id = body["folderId"] as? String else { throw BuddyFailure(message: "Choose the folder to disconnect.") }
                 try conversations.projectFiles.removeFolder(context.workspace, folderId: id)
-                await teamwork.stopFiles(workspace: context.workspace); await conversations.stopFiles(workspace: context.workspace)
+                await teamwork.stopFiles(workspace: context.workspace); await ai.stopFiles(workspace: context.workspace)
                 replyHandler(["disconnected": true], nil)
                 deliver(["type": "project-files-changed"])
             } catch { replyHandler(nil, error.localizedDescription) } }
@@ -369,7 +371,7 @@ import AppKit
                 if let workspace = state["conversationWorkspace"] as? String, let agents = state["agents"] as? [[String: Any]], let oldAgents = previous?["agents"] as? [[String: Any]] {
                     for agent in agents where (agent["tools"] as? [String: Bool])?["projectFiles"] == false || (agent["tools"] as? [String: Bool])?["desktop"] == false {
                         guard let id = agent["id"] as? String, let old = oldAgents.first(where: { $0["id"] as? String == id }), ((agent["tools"] as? [String: Bool])?["projectFiles"] == false && (old["tools"] as? [String: Bool])?["projectFiles"] != false) || ((agent["tools"] as? [String: Bool])?["desktop"] == false && (old["tools"] as? [String: Bool])?["desktop"] != false) else { continue }
-                        Task { await self.teamwork.stopForAgent(workspace + ":" + id); await self.conversations.stopForAgent(workspace + ":" + id) }
+                        Task { await self.teamwork.stopForAgent(workspace + ":" + id); await self.ai.stopForAgent(workspace + ":" + id) }
                     }
                 }
                 replyHandler(["saved": true], nil)
@@ -387,6 +389,30 @@ import AppKit
             }
         default: replyHandler(nil, "Unsupported request.")
         }
+    }
+
+    private func providerRequest(_ payload: [String: Any], workspace: String) async throws -> [String: Any] {
+        let operation = payload["operation"] as? String ?? "status", provider = payload["provider"] as? String ?? "chatgpt"
+        var status: [String: Any]
+        if operation == "status" { return try await ai.status(workspace: workspace) }
+        if operation == "select" { status = try await ai.select(workspace: workspace, provider: provider, budget: payload["claudeBudgetUSD"] as? Double) }
+        else if operation == "disconnect" { status = try await ai.disconnect(workspace: workspace, provider: provider) }
+        else if ["connect", "reconnect"].contains(operation) {
+            guard ["chatgpt", "claude"].contains(provider) else { throw BuddyFailure(message: "Choose ChatGPT or Claude.") }
+            if provider == "claude" {
+                let connected = try BuddyWorkerClient.connectClaude(workspace: workspace)
+                if connected["cancelled"] as? Bool == true { return try await ai.status(workspace: workspace).merging(["cancelled": true]) { _, new in new } }
+                status = try await ai.didConnectClaude(workspace: workspace)
+            } else {
+                let result = try await ai.connectChatGPT(workspace: workspace)
+                status = result["status"] as? [String: Any] ?? [:]
+                if let login = result["login"] as? [String: Any] {
+                    guard let value = login["authUrl"] as? String, let url = URL(string: value), url.scheme == "https", ["auth.openai.com", "chatgpt.com"].contains(url.host ?? "") else { throw BuddyFailure(message: "ChatGPT didn’t provide a valid sign-in page. Try again.") }
+                    NSWorkspace.shared.open(url); status["started"] = true
+                }
+            }
+        } else { throw BuddyFailure(message: "Unsupported provider setting.") }
+        deliver(status.merging(["type": "connection"]) { _, new in new }); return status
     }
 
     private func workspaceState() throws -> [String: Any] {

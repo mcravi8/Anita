@@ -51,6 +51,12 @@ with tempfile.TemporaryDirectory(prefix='buddy-worker-test-') as temp:
 
 with tempfile.TemporaryDirectory(prefix='buddy-worker-integration-') as temp:
  binary=Path(temp)/'buddy-worker-integration'
- names=['BuddyWorkerCore.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyWorkerClient.swift','ConversationService.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/WorkerIntegration.swift']
+ names=['BuddyWorkerCore.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyWorkerClient.swift','BuddyAISettings.swift','ConversationService.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/WorkerIntegration.swift']
  subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
  subprocess.run([str(binary),str(source/'tests/worker-server.py')],check=True)
+
+with tempfile.TemporaryDirectory(prefix='buddy-provider-test-') as temp:
+ binary=Path(temp)/'buddy-provider-tests'
+ names=['BuddyAISettings.swift','BuddyAIRouter.swift','BuddyClaudeConversations.swift','BuddyWorkerProcess.swift','BuddyWorkerCore.swift','ConversationService.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/Providers.swift']
+ subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
+ subprocess.run([str(binary),str(source/'tests/provider-server.py'),str(source/'tests/provider-claude.py'),shutil.which('python3')],check=True)

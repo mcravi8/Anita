@@ -1,7 +1,7 @@
 import AppKit
 
 @MainActor enum BuddyWorkerClient {
-    static var tools: [[String: Any]] { [["type": "function", "name": "buddy_start_background_task", "description": "Queue a durable background task for this agent, only when the user explicitly requests background work. The worker uses its own browser/files on this Mac and the ChatGPT subscription. Return the accepted task ID/title; results and pending reviews appear in Background work.", "inputSchema": ["type": "object", "additionalProperties": false, "properties": ["title": ["type": "string"], "goal": ["type": "string"], "kind": ["type": "string", "enum": ["research", "applications", "email", "general"]]], "required": ["title", "goal", "kind"]]]] }
+    static var tools: [[String: Any]] { [["type": "function", "name": "buddy_start_background_task", "description": "Queue a durable background task for this agent, only when the user explicitly requests background work. The worker uses its own browser/files on this Mac and the selected AI provider. Return the accepted task ID/title; results and pending reviews appear in Background work.", "inputSchema": ["type": "object", "additionalProperties": false, "properties": ["title": ["type": "string"], "goal": ["type": "string"], "kind": ["type": "string", "enum": ["research", "applications", "email", "general"]]], "required": ["title", "goal", "kind"]]]] }
     static func call(support: URL, payload: [String: Any]) async throws -> [String: Any] {
         try await withCheckedThrowingContinuation { c in DispatchQueue.global(qos: .utility).async { do { c.resume(returning: try BuddyWorkerWire.call(support: support, request: payload)) } catch { c.resume(throwing: error) } } }
     }
@@ -34,7 +34,7 @@ import AppKit
         } }
     }
     static func connectClaude(workspace: String) throws -> [String: Any] {
-        let alert = NSAlert(); alert.messageText = "Connect Claude API credits"; alert.informativeText = "Paste a Claude Console API key. Buddy stores it in macOS Keychain. Each task has a spending limit. API credits are used before paid balance; disable Console auto-reload if you want to avoid purchased usage. The SDK limit is estimated and may be exceeded by the final request."
+        let alert = NSAlert(); alert.messageText = "Connect Claude API credits"; alert.informativeText = "Paste a Claude Console API key. Buddy stores it in macOS Keychain. Each conversation turn or background task has an estimated spending limit. API credits are used before paid balance; disable Console auto-reload if you want to avoid purchased usage. The SDK limit is estimated and may be exceeded by the final request."
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 370, height: 26)); field.placeholderString = "Claude Console API key"; alert.accessoryView = field
         alert.addButton(withTitle: "Connect"); alert.addButton(withTitle: "Cancel"); alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return ["cancelled": true] }

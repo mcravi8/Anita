@@ -12,7 +12,8 @@ A personal AI workspace with configurable agents, individual chats, and group te
 - Word paragraph editing, Excel cell and formula editing, PDF forms and annotations, Markdown, HTML, and code.
 - Reviewed control of applications on the connected Mac.
 - Durable background tasks with a separate local browser and files, saved results, approvals, and pause/resume.
-- Optional Claude Agent SDK connection using Console/API credits with explicit task budgets.
+- Workspace settings for choosing ChatGPT or Claude, with independent connect, disconnect, and reconnect controls.
+- Claude Agent SDK conversations, group work, and background tasks using Console/API credits with explicit estimated limits.
 
 Independent cloud computers and an always-on remote worker are future work. The local Mac must remain available for local operations. The browser-only frontend is a preview; real conversations and tools run in the native app.
 

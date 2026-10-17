@@ -1,4 +1,4 @@
-# Buddy for Mac · 0.11.0
+# Buddy for Mac · 0.13.0
 
 Buddy is a personal Mac app with minimal direct messages, 3D avatars, and agents whose names, roles, instructions, shapes, and colors you can change independently.
 
@@ -8,9 +8,9 @@ Open Buddy in Applications. Text conversations now use your existing ChatGPT sig
 
 ## Connection
 
-This personal build requires the Codex CLI and a ChatGPT sign-in on the same Mac. Buddy discovers Codex in `/opt/homebrew/bin`, `/usr/local/bin`, or `~/.local/bin`. If needed, open Workspace settings → ChatGPT → Sign in with ChatGPT. Sign-in finishes in the browser; credentials remain managed by Codex. Buddy does not read, copy, display, or save the authentication token.
+Choose ChatGPT or Claude in Settings → AI provider. ChatGPT and connected-service features require the Codex CLI and a ChatGPT sign-in on the same Mac. Claude conversations use a Claude Console API key stored in Keychain. Buddy discovers Codex in `/opt/homebrew/bin`, `/usr/local/bin`, or `~/.local/bin`. If needed, open Settings → AI provider → ChatGPT → Connect. Sign-in finishes in the browser; credentials remain managed by Codex. Buddy does not read, copy, display, or save the authentication token.
 
-Buddy accepts ChatGPT authentication only, removes API-key environment variables from its child process, selects an available default model, and uses the account's subscription limits. It never falls back to API-key billing. Connection details are available from the small caption under the composer or Settings.
+The ChatGPT connection accepts subscription authentication, removes API-key environment variables from its child process, selects an available default model, and uses the account's subscription limits. It never falls back to OpenAI API-key billing. The separate Claude connection uses Console API credits and its configured estimated spending limit. Connection details are available from the small caption under the composer or Settings.
 
 This integration follows OpenAI's documented app-server path for personal/local apps. It is not a commercial or hosted deployment. See [Codex App Server](https://learn.chatgpt.com/docs/app-server) and [Authentication](https://learn.chatgpt.com/docs/auth).
 
@@ -113,3 +113,12 @@ Verified with native regression tests, independent python-docx/openpyxl/pypdf re
 ## Buddy 0.12 — background work
 
 The separate macOS helper runs durable serial tasks with private Chrome profiles and task files. Background work in the sidebar opens the queue, results, exact action reviews and document previews. Tasks use ChatGPT by default; optional Claude Console/API credits connect through a native secure field and Keychain with explicit estimated task budgets. The helper survives quitting the chat app, pauses on permission changes, and never automatically replays interrupted external actions. A temporarily unavailable permitted connector no longer blocks unrelated tools or plain conversation. See [the worker guide](../buddy-worker/README.md) for dependencies, lifecycle, billing limits, and testing.
+
+
+## Buddy 0.13 — AI provider settings
+
+Settings starts with a persistent ChatGPT/Claude choice and separate connection controls. The default applies to new replies, group requests and background tasks. Existing conversation history is supplied when switching; an in-flight group or task retains its provider. There is no automatic provider fallback. ChatGPT disconnect is scoped to Buddy and preserves the shared ChatGPT/Codex account sign-in; reconnect reuses or refreshes that sign-in, opening the official login flow when needed. Claude connect/reconnect uses the native secure field and Keychain. Claude disconnect stops its active work and removes that workspace's key. Provider changes and per-agent restrictions are checked before tools and approvals.
+
+Claude direct and group turns use the pinned Agent SDK bridge with built-in tools disabled. They use Buddy's scoped file, document and agent-proposal tools, plus the explicit background-task tool in direct chat. Connected-service and Mac-app requests use a bounded ChatGPT delegation, with the existing native human reviews, current grants, receipts and uncertainty handling. ChatGPT must remain connected for those service features; Claude can chat and work on files independently. Historical native action receipts are retained and supplied as context before subsequent Claude requests.
+
+The Claude limit in Settings applies to each AI turn (group work can use several turns) or the default for a new background task. Background tasks can still override it in their own options. Limits are SDK estimates and the final request may exceed them; Console credit/balance and auto-reload controls still apply. API key values never enter web state or provider-preference files. ai-providers.json stores only provider choice, connection enablement and limits. The native fixtures verify actual provider routing, disconnect/reconnect, no silent fallback, preserved context, real scoped file saves, structured group output, and stable provider selection during existing group work.

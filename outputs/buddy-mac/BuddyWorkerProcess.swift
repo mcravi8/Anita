@@ -7,6 +7,9 @@ import Security
     private var lines = BuddyProtocolLines()
     private var next = 0
     private var pending: [Int: (Result<[String: Any], Error>) -> Void] = [:]
+    private let resourceOverride: URL?
+    private let runtimeOverride: URL?
+    init(resource: URL? = nil, runtime: URL? = nil) { self.resourceOverride=resource; self.runtimeOverride=runtime }
     var onEvent: (([String: Any]) -> Void)?
     static var runtime: URL? {
         ["/usr/local/bin/node", "/opt/homebrew/bin/node"].first(where: { FileManager.default.isExecutableFile(atPath: $0) }).map(URL.init(fileURLWithPath:))
@@ -19,7 +22,7 @@ import Security
         return FileManager.default.fileExists(atPath: shared.path) ? shared : nil
     }
     func launch(_ module: String, arguments: [String] = []) throws {
-        guard let runtime = Self.runtime, let resource = Self.resources?.appendingPathComponent(module), FileManager.default.fileExists(atPath: resource.path) else { throw BuddyWorkerFailure(message: "Install Node.js 22 or later and rebuild Buddy’s worker resources.") }
+        guard let runtime = runtimeOverride ?? Self.runtime, let resource = resourceOverride ?? Self.resources?.appendingPathComponent(module), FileManager.default.fileExists(atPath: resource.path) else { throw BuddyWorkerFailure(message: "Install Node.js 22 or later and rebuild Buddy’s worker resources.") }
         let p = Process(), incoming = Pipe(), outgoing = Pipe()
         p.executableURL = runtime; p.arguments = [resource.path] + arguments
         var environment = ProcessInfo.processInfo.environment
@@ -27,7 +30,7 @@ import Security
         p.environment = environment; p.standardInput = incoming; p.standardOutput = outgoing; p.standardError = FileHandle.nullDevice
         try p.run(); process = p; input = incoming.fileHandleForWriting
         let reader = outgoing.fileHandleForReading
-        DispatchQueue.global(qos: .utility).async { BuddyPipeReader.read(reader) { data in Task { @MainActor [weak self] in self?.receive(data) } }; Task { @MainActor [weak self] in self?.ended() } }
+        DispatchQueue.global(qos: .utility).async { BuddyPipeReader.read(reader) { data in DispatchQueue.main.async { [weak self] in self?.receive(data) } }; DispatchQueue.main.async { [weak self] in self?.ended() } }
     }
     func send(_ value: [String: Any]) throws {
         guard let input, process?.isRunning == true else { throw BuddyWorkerFailure(message: "The worker’s browser or Claude process stopped. Check the task before retrying.") }

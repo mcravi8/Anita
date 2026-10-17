@@ -19,6 +19,7 @@ struct BuddyTurnOptions {
     var proposalScope: BuddyProposalScope? = nil
     var extraTools: [[String: Any]] = []
     var proposalsEnabled = true
+    var routingGroup: String? = nil
 }
 
 @MainActor protocol BuddyConversationSending: AnyObject {

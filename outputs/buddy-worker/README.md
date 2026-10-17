@@ -2,7 +2,7 @@
 
 Buddy 0.12 runs a separate per-user macOS helper, a serial durable task queue, and a dedicated Chrome profile per agent. Task files live in `~/Library/Application Support/Buddy/Worker/Tasks/<task-id>/Files`. This is a separate local browser and file workspace, not a virtual machine or a supplied cloud computer. The Mac must be awake, signed in, and online.
 
-Open **Background work → Start worker → New task**, or explicitly ask an agent in a direct chat to run a task in the background. The default is the existing ChatGPT subscription via Codex app-server. Closing or quitting the main Buddy app does not stop the helper. Pause queue stops current work and holds queued tasks. Resume can include additional facts or instructions.
+Open **Background work → Start worker → New task**, or explicitly ask an agent in a direct chat to run a task in the background. The initial default is the existing ChatGPT subscription via Codex app-server. Settings → AI provider chooses the default for new replies and tasks and manages both connections. Closing or quitting the main Buddy app does not stop the helper. Pause queue stops current work and holds queued tasks. Resume can include additional facts or instructions.
 
 ## Installation and providers
 
@@ -15,7 +15,7 @@ python3 outputs/buddy-mac/build.py
 
 The app packages pinned worker dependencies; no browser download is needed. The Claude SDK's native runtime follows the build machine architecture. Build on the intended Mac architecture (or include the matching official `@anthropic-ai/claude-agent-sdk-darwin-*` optional dependency) for Claude support. The Swift app/helper themselves are universal.
 
-**Worker settings → Connect Claude credits** opens a native secure field. API keys are stored in macOS Keychain, never in web state, task files, or this repository. Claude uses Console API credits, not a Claude subscription login. Each Claude task requires an explicit USD budget (up to $10); the Agent SDK's limit is an estimate and a final request can exceed it. Console credits are used before purchased balance; Console billing/auto-reload controls funding after credits run out. Buddy cannot verify promotional-credit-only funding. There is no automatic provider fallback.
+**Settings → AI provider → Claude → Connect** opens a native secure field. API keys are stored in macOS Keychain, never in web state, task files, or this repository. Claude uses Console API credits, not a Claude subscription login. Each Claude task has a USD budget (up to $10); the Agent SDK's limit is an estimate and a final request can exceed it. Console credits are used before purchased balance; Console billing/auto-reload controls funding after credits run out. Buddy cannot verify promotional-credit-only funding. There is no automatic provider fallback.
 
 A Claude attempt reserves its entire remaining task allowance before dispatch. A confirmed cost releases the unused portion; an interrupted or unknown-cost attempt keeps that reservation, preventing an automatic paid retry. Reaching that limit requires an explicitly budgeted new task to continue. Claude's built-in shell, filesystem, delegation, plugins, and user/project settings are disabled; only bounded Buddy MCP tools are registered. Bounded connected-service requests use the existing ChatGPT subscription and its current connection grants, with the same human action reviews.
 
@@ -41,6 +41,6 @@ node --test outputs/buddy-worker/test/*.test.mjs
 python3 outputs/buddy-mac/run-tests.py
 ```
 
-Browser tests use an inert local form with a test-origin allowance provided directly by the test harness; production callers cannot enable that allowance. Native worker tests use an inert app-server and temporary files. No real emails or job applications are sent by automated tests. Live Claude execution requires the user to connect their API key and was not verified without it.
+Browser tests use an inert local form with a test-origin allowance provided directly by the test harness; production callers cannot enable that allowance. Native worker tests use an inert app-server and temporary files. No real emails or job applications are sent by automated tests. Live Claude execution requires the user to connect their API key; fixture tests do not use credentials or credits.
 
 Official integrations: [OpenAI app-server](https://learn.chatgpt.com/docs/app-server), [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), [Claude subscriber API credits](https://platform.claude.com/docs/en/about-claude/api-credits-for-subscribers), [Playwright persistent contexts](https://playwright.dev/docs/api/class-browsertype#browser-type-launch-persistent-context).

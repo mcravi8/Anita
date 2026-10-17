@@ -5,6 +5,7 @@ import plistlib
 import shutil
 import subprocess
 import tempfile
+from signing import identity
 
 source = Path(__file__).resolve().parent
 outputs = source.parent
@@ -12,6 +13,7 @@ frontend = outputs / 'relay'
 parser = argparse.ArgumentParser(description='Build Buddy without leaving additional searchable apps.')
 parser.add_argument('--install', action='store_true', help='Update the existing /Applications/Buddy.app after building.')
 options = parser.parse_args()
+signing_identity = identity()
 
 with tempfile.TemporaryDirectory(prefix='buddy-build-', suffix='.noindex') as temporary:
     build = Path(temporary)
@@ -28,8 +30,8 @@ with tempfile.TemporaryDirectory(prefix='buddy-build-', suffix='.noindex') as te
     plist = {
         'CFBundleName': 'Buddy', 'CFBundleDisplayName': 'Buddy',
         'CFBundleIdentifier': 'app.buddy.desktop', 'CFBundleExecutable': 'Buddy',
-        'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.14.1',
-        'CFBundleVersion': '19', 'CFBundleIconFile': 'Buddy.icns',
+        'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.15.0',
+        'CFBundleVersion': '20', 'CFBundleIconFile': 'Buddy.icns',
         'LSMinimumSystemVersion': '13.0', 'NSHighResolutionCapable': True,
         'NSPrincipalClass': 'NSApplication', 'LSApplicationCategoryType': 'public.app-category.productivity',
         'NSHumanReadableCopyright': 'Buddy · Personal teamwork edition',
@@ -39,22 +41,22 @@ with tempfile.TemporaryDirectory(prefix='buddy-build-', suffix='.noindex') as te
     sdk = subprocess.check_output(['xcrun', '--show-sdk-path'], text=True).strip()
     compiler = ['xcrun', 'swiftc', '-sdk', sdk, '-O', '-module-cache-path', str(build / 'module-cache'), '-framework', 'AppKit', '-framework', 'WebKit']
     for architecture in ['arm64', 'x86_64']:
-        subprocess.run(compiler + ['-target', f'{architecture}-apple-macosx13.0', str(build_source / 'main.swift'), str(build_source / 'BuddyFilePreview.swift'), str(build_source / 'ConversationService.swift'), str(build_source / 'BuddyMailVerification.swift'), str(build_source / 'BuddyComputer.swift'), str(build_source / 'BuddyTransport.swift'), str(build_source / 'BuddyToolInput.swift'), str(build_source / 'BuddyConnections.swift'), str(build_source / 'BuddyTeam.swift'), str(build_source / 'BuddyProjectFiles.swift'), str(build_source / 'BuddyDocuments.swift'), str(build_source / 'BuddyAgentProposals.swift'), str(build_source / 'BuddyTeamService.swift'), *[str(build_source / name) for name in ['BuddyWorkerCore.swift', 'BuddyWorkerProcess.swift', 'BuddyWorkerHost.swift', 'BuddyWorkerClient.swift', 'BuddyAISettings.swift', 'BuddyClaudeConversations.swift', 'BuddyAIRouter.swift']], '-o', str(build / architecture)], check=True)
+        subprocess.run(compiler + ['-target', f'{architecture}-apple-macosx13.0', str(build_source / 'main.swift'), str(build_source / 'BuddyFilePreview.swift'), str(build_source / 'ConversationService.swift'), str(build_source / 'BuddyInboxReview.swift'), str(build_source / 'BuddyMailVerification.swift'), str(build_source / 'BuddyComputer.swift'), str(build_source / 'BuddyTransport.swift'), str(build_source / 'BuddyToolInput.swift'), str(build_source / 'BuddyConnections.swift'), str(build_source / 'BuddyTeam.swift'), str(build_source / 'BuddyProjectFiles.swift'), str(build_source / 'BuddyDocuments.swift'), str(build_source / 'BuddyAgentProposals.swift'), str(build_source / 'BuddyTeamService.swift'), *[str(build_source / name) for name in ['BuddyWorkerCore.swift', 'BuddyWorkerProcess.swift', 'BuddyWorkerHost.swift', 'BuddyWorkerClient.swift', 'BuddyAISettings.swift', 'BuddyClaudeConversations.swift', 'BuddyAIRouter.swift']], '-o', str(build / architecture)], check=True)
     subprocess.run(['lipo', '-create', str(build / 'arm64'), str(build / 'x86_64'), '-output', str(binary)], check=True)
     helper = contents / 'Helpers' / 'Buddy Worker.app'
     helper_binary = helper / 'Contents/MacOS/BuddyWorker'
     helper_binary.parent.mkdir(parents=True)
     shutil.copyfile(binary, helper_binary); helper_binary.chmod(0o755)
-    helper_info = {'CFBundleName': 'Buddy Worker', 'CFBundleIdentifier': 'app.buddy.workerhelper', 'CFBundleExecutable': 'BuddyWorker', 'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.14.1', 'CFBundleVersion': '19', 'LSUIElement': True, 'LSMinimumSystemVersion': '13.0', 'NSPrincipalClass': 'NSApplication'}
+    helper_info = {'CFBundleName': 'Buddy Worker', 'CFBundleIdentifier': 'app.buddy.workerhelper', 'CFBundleExecutable': 'BuddyWorker', 'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.15.0', 'CFBundleVersion': '20', 'LSUIElement': True, 'LSMinimumSystemVersion': '13.0', 'NSPrincipalClass': 'NSApplication'}
     (helper / 'Contents/Info.plist').write_bytes(plistlib.dumps(helper_info))
-    subprocess.run(['codesign', '--force', '--sign', '-', '--identifier', 'app.buddy.workerhelper', str(helper)], check=True)
+    subprocess.run(['codesign', '--force', '--sign', signing_identity, '--timestamp=none', '--identifier', 'app.buddy.workerhelper', str(helper)], check=True)
     renderer = build / 'render-icon'
     subprocess.run(['xcrun', 'swiftc', '-O', '-module-cache-path', str(build / 'module-cache'), '-framework', 'AppKit', str(build_source / 'render-icon.swift'), '-o', str(renderer)], check=True)
     iconset = build / 'Buddy.iconset'
     subprocess.run([str(renderer), str(iconset)], check=True)
     subprocess.run(['iconutil', '-c', 'icns', str(iconset), '-o', str(resources / 'Buddy.icns')], check=True)
     shutil.copyfile(iconset / 'icon_512x512@2x.png', outputs / 'buddy-app-icon.png')
-    subprocess.run(['codesign', '--force', '--sign', '-', '--identifier', 'app.buddy.desktop', str(staged)], check=True)
+    subprocess.run(['codesign', '--force', '--sign', signing_identity, '--timestamp=none', '--identifier', 'app.buddy.desktop', str(staged)], check=True)
     subprocess.run(['codesign', '--verify', '--deep', '--strict', str(staged)], check=True)
     archive = build / 'Buddy-mac.zip'
     subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(staged), str(archive)], check=True)

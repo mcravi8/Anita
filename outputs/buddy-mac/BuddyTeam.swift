@@ -19,6 +19,10 @@ struct BuddyTurnOptions {
     var proposalScope: BuddyProposalScope? = nil
     var extraTools: [[String: Any]] = []
     var proposalsEnabled = true
+    var requiresRoutine = false
+    var inboxQuery: String? = nil
+    var inboxRoutine: String? = nil
+    var inboxEvidence: String? = nil
     var routingGroup: String? = nil
 }
 

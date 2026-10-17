@@ -127,3 +127,88 @@ enum BuddyWorkerWire {
         return try update(id, ["status": "queued", "progress": "Queued to continue from saved progress. Check existing external state before any send or submission."])
     }
 }
+
+/// Durable local schedules. One overdue occurrence runs after wake, never a burst of catch-up sends.
+@MainActor final class BuddyRoutineStore {
+    private let url:URL
+    private(set) var routines:[[String:Any]]
+    init(directory:URL) throws {
+        try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        url=directory.appendingPathComponent("routines.json")
+        if FileManager.default.fileExists(atPath:url.path) {
+            let data=try Data(contentsOf:url)
+            guard data.count<8*1024*1024,let saved=try JSONSerialization.jsonObject(with:data) as? [String:Any],saved["version"] as? Int==1,let values=saved["routines"] as? [[String:Any]],values.count<=100,Set(values.compactMap{$0["id"] as? String}).count==values.count else { throw BuddyWorkerFailure(message:"Buddy couldn't verify saved routines. Restore routines.json before starting the worker.") }
+            for value in values { try Self.validate(value);guard let id=value["id"] as? String,UUID(uuidString:id) != nil,let next=value["nextRun"] as? String,ISO8601DateFormatter().date(from:next) != nil else { throw BuddyWorkerFailure(message:"A saved routine has invalid timing. Repair routines.json before starting.") } }
+            routines=values
+        } else { routines=[] }
+    }
+    private func persist() throws {
+        try JSONSerialization.data(withJSONObject:["version":1,"routines":routines],options:[.sortedKeys]).write(to:url,options:.atomic)
+        try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)
+    }
+    private static func validate(_ r:[String:Any]) throws {
+        guard (r["workspace"] as? String).flatMap(UUID.init(uuidString:)) != nil,(r["agentId"] as? String).flatMap(UUID.init(uuidString:)) != nil,
+              let title=r["title"] as? String,!title.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,title.count<=150,
+              let goal=r["goal"] as? String,!goal.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,goal.count<=30000,
+              let hour=r["hour"] as? Int,(0...23).contains(hour),let minute=r["minute"] as? Int,(0...59).contains(minute),
+              let days=r["weekdays"] as? [Int],!days.isEmpty,Set(days).count==days.count,days.allSatisfy({(1...7).contains($0)}),
+              let zone=r["timeZone"] as? String,TimeZone(identifier:zone) != nil,
+              let kind=r["kind"] as? String,["email","research","applications","general"].contains(kind),
+              ["chatgpt","claude"].contains(r["provider"] as? String ?? ""),let budget=r["budgetUSD"] as? Double,budget.isFinite,(0...10).contains(budget),
+              let query=r["query"] as? String,query.count<=2000,(kind != "email" || !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty) else { throw BuddyWorkerFailure(message:"Choose a clear brief, valid local time and days. Email routines also need a relevant Gmail search.") }
+    }
+    static func next(after date:Date,rule:[String:Any]) throws -> Date {
+        guard let zone=(rule["timeZone"] as? String).flatMap(TimeZone.init(identifier:)),let hour=rule["hour"] as? Int,let minute=rule["minute"] as? Int,let days=rule["weekdays"] as? [Int] else { throw BuddyWorkerFailure(message:"This routine has invalid timing.") }
+        var calendar=Calendar(identifier:.gregorian);calendar.timeZone=zone
+        let candidates=days.compactMap { day in calendar.nextDate(after:date,matching:DateComponents(hour:hour,minute:minute,second:0,weekday:day),matchingPolicy:.nextTime,repeatedTimePolicy:.first,direction:.forward) }
+        guard let value=candidates.min() else { throw BuddyWorkerFailure(message:"Could not determine the next run.") };return value
+    }
+    @discardableResult func manage(_ args:[String:Any],workspace:String,agent:String,requestID:String,provider:String,budget:Double,now:Date=Date()) throws -> [String:Any] {
+        let action=args["action"] as? String ?? "list"
+        if action=="list" { return ["routines":routines.filter{$0["workspace"] as? String==workspace && $0["agentId"] as? String==agent}] }
+        let old=routines
+        do {
+            if action=="create" || action=="update" {
+                if action=="create",let existing=routines.first(where:{$0["workspace"] as? String==workspace && $0["requestID"] as? String==requestID}) { return ["saved":true,"routine":existing] }
+                let index=routines.firstIndex{$0["id"] as? String==args["routineID"] as? String && $0["workspace"] as? String==workspace && $0["agentId"] as? String==agent}
+                guard action=="create" || index != nil else { throw BuddyWorkerFailure(message:"This routine is no longer available.") }
+                guard action != "create" || routines.count<100 else { throw BuddyWorkerFailure(message:"Pause or remove old routines before adding more.") }
+                var value=index.map{routines[$0]} ?? ["id":UUID().uuidString,"workspace":workspace,"agentId":agent,"requestID":requestID,"provider":provider,"budgetUSD":budget,"hour":9,"minute":0,"weekdays":[1,2,3,4,5,6,7],"timeZone":TimeZone.current.identifier,"query":"","kind":"general"]
+                for field in ["title","goal","hour","minute","weekdays","timeZone","query","kind"] { if let v=args[field],!(v is NSNull) { value[field]=v } }
+                try Self.validate(value)
+                value["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:value));value["status"]="active";value["lastError"]=""
+                // Repeated tool calls cannot create duplicate copies of the exact same routine.
+                if action=="create",let existing=routines.first(where:{r in ["workspace","agentId","title","goal","query","timeZone"].allSatisfy{r[$0] as? String==value[$0] as? String} && r["hour"] as? Int==value["hour"] as? Int && r["minute"] as? Int==value["minute"] as? Int && r["weekdays"] as? [Int]==value["weekdays"] as? [Int]}) { return ["saved":true,"routine":existing] }
+                if let index { routines[index]=value } else { routines.append(value) }
+                try persist();return ["saved":true,"routine":value,"requiresMacAwake":true]
+            }
+            guard let i=routines.firstIndex(where:{$0["id"] as? String==args["routineID"] as? String && $0["workspace"] as? String==workspace && $0["agentId"] as? String==agent}) else { throw BuddyWorkerFailure(message:"This routine is no longer available.") }
+            if action=="delete" { routines.remove(at:i);try persist();return ["deleted":true] }
+            guard ["pause","resume"].contains(action) else { throw BuddyWorkerFailure(message:"Choose create, update, pause, resume, delete or list.") }
+            routines[i]["status"]=action=="pause" ? "paused":"active";routines[i]["lastError"]=""
+            if action=="resume" { routines[i]["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:routines[i])) }
+            try persist();return ["saved":true,"routine":routines[i]]
+        } catch { routines=old;throw error }
+    }
+    func enqueueDue(store:BuddyWorkerStore,workspace:String,now:Date=Date()) throws {
+        let original=routines
+        do {
+            for i in routines.indices where routines[i]["workspace"] as? String==workspace && routines[i]["status"] as? String=="active" {
+                let r=routines[i],id=r["id"] as! String
+                let prior=store.jobs.last{$0["routineID"] as? String==id}
+                if let prior {
+                    let status=prior["status"] as? String ?? ""
+                    if ["failed","interrupted","waiting_user","paused"].contains(status) { routines[i]["status"]="needs_attention";routines[i]["lastError"]="The previous run needs attention. Review it before resuming this routine.";continue }
+                    if !BuddyWorkerStore.terminal.contains(status) { continue }
+                }
+                guard let due=r["nextRun"] as? String,let date=ISO8601DateFormatter().date(from:due),date<=now else { continue }
+                let job=try store.create(workspace:workspace,agent:r["agentId"] as! String,requestId:"routine:"+id+":"+due,title:r["title"] as! String,goal:r["goal"] as! String,kind:r["kind"] as! String,provider:r["provider"] as! String,budget:r["budgetUSD"] as! Double)
+                // Queue creation is idempotent if the process dies before saving nextRun.
+                try store.update(job["id"] as! String,["routineID":id,"inboxQuery":r["query"] as! String,"previousRoutineResult":prior?["result"] ?? "","scheduledFor":due])
+                routines[i]["lastTaskID"]=job["id"];routines[i]["lastScheduledFor"]=due
+                routines[i]["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:r))
+            }
+            if !NSArray(array:original).isEqual(to:routines) { try persist() }
+        } catch { routines=original;throw error }
+    }
+}

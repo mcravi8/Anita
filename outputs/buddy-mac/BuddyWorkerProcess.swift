@@ -27,6 +27,9 @@ import Security
         p.executableURL = runtime; p.arguments = [resource.path] + arguments
         var environment = ProcessInfo.processInfo.environment
         for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "NODE_OPTIONS", "NODE_PATH", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] { environment.removeValue(forKey: key) }
+        let working = resource.deletingLastPathComponent()
+        environment["PWD"] = working.path; environment.removeValue(forKey: "OLDPWD")
+        p.currentDirectoryURL = working
         p.environment = environment; p.standardInput = incoming; p.standardOutput = outgoing; p.standardError = FileHandle.nullDevice
         try p.run(); process = p; input = incoming.fileHandleForWriting
         let reader = outgoing.fileHandleForReading

@@ -32,6 +32,12 @@
     return {run,payload:group?{kind:'group',runId,key:run.key,text,groupId:target}:{runId,key:run.key,text,agentId:target,agent:{name:agent.name,role:agent.role,description:agent.description}}};
   }
   function apply(state,event){
+    if(event.type==='routine'){
+      const run=state.runs?.[event.runId],r=event.routine;
+      if(!run||!r||typeof r.id!=='string'||r.workspace!==state.conversationWorkspace||r.agentId!==run.target||typeof r.nextRun!=='string')return false;
+      run.routines||=[];const i=run.routines.findIndex(v=>v.id===r.id);if(i<0)run.routines.push(structuredClone(r));else run.routines[i]=structuredClone(r);
+      const message=(state.messages[run.target]||[]).find(m=>m.id===run.replyId);if(message)message.routines=structuredClone(run.routines);return true;
+    }
     // A tool finishing is progress inside a reply, not the reply finishing.
     if(event.type&&event.type!=='run')return false;
     const run=state.runs?.[event.runId];
@@ -52,7 +58,8 @@
     run.status=status;run.error=error;
     if(team)run.team=team;
     if(Array.isArray(event.files))run.files=structuredClone(event.files.filter(f=>f&&typeof f.path==='string'&&typeof f.folderId==='string'&&typeof f.revision==='string').slice(0,180));
-    if(message){message.status=status;if(typeof event.text==='string')message.body=event.text;message.error=error;if(run.team)message.team=structuredClone(run.team);if(run.files)message.files=structuredClone(run.files);}
+    if(Array.isArray(event.coverage))run.coverage=structuredClone(event.coverage.filter(c=>c&&typeof c.id==='string'&&typeof c.query==='string'&&typeof c.partial==='boolean'&&Number.isInteger(c.read)&&Number.isInteger(c.unread)).slice(-10));
+    if(message){if(run.coverage)message.coverage=structuredClone(run.coverage);message.status=status;if(typeof event.text==='string')message.body=event.text;message.error=error;if(run.team)message.team=structuredClone(run.team);if(run.files)message.files=structuredClone(run.files);}
     return true;
   }
   function recover(state,snapshots=[]){

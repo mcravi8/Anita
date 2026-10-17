@@ -23,6 +23,9 @@ import Foundation
         func terminal(_ id:String)->Bool{events.contains{$0["type"] as? String == "run" && $0["runId"] as? String == id && ["completed","failed","stopped"].contains($0["status"] as? String ?? "")}}
         let first=try send("HISTORY_CHECK",options);await wait{terminal(first)}
         require(events.contains{$0["runId"] as? String == first && $0["text"] as? String == "Claude fixture answer" && $0["status"] as? String == "completed"},"selected Claude actually answers through Claude bridge with real prior history")
+        var scheduleOptions=options;scheduleOptions.requiresRoutine=true
+        let fakeSchedule=try send("Run this every morning",scheduleOptions);await wait{terminal(fakeSchedule)}
+        require(events.contains{$0["runId"] as? String==fakeSchedule && $0["status"] as? String=="failed" && ($0["error"] as? String)?.contains("No active routine")==true},"Claude cannot finish a schedule request without a native saved routine receipt")
         let file=try send("WRITE_CLAUDE",options);await wait{terminal(file)}
         let saved=try primary.projectFiles.read(options.fileScope!,path:"claude-note.md")
         require((saved["content"] as? String)?.contains("selected Claude") == true,"Claude uses the existing scoped file engine and real saved bytes")

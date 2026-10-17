@@ -13,6 +13,7 @@ import subprocess
 import stat
 import tempfile
 import zipfile
+from signing import verify_update
 
 OUTPUTS = Path(__file__).resolve().parent.parent
 INSTALLED = Path('/Applications/Buddy.app')
@@ -105,6 +106,8 @@ def update(archive, check_only=False):
             raise RuntimeError('Refusing a symlink at the installation path.')
         if INSTALLED.exists():
             verify(INSTALLED)
+            verify_update(INSTALLED, staged)
+            verify_update(INSTALLED / 'Contents/Helpers/Buddy Worker.app', staged / 'Contents/Helpers/Buddy Worker.app')
             if fingerprint(staged) == fingerprint(INSTALLED):
                 print('Buddy is already current at /Applications/Buddy.app. No changes made.')
                 return

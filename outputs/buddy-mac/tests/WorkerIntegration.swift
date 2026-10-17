@@ -28,6 +28,14 @@ import AppKit
         require((preview["content"] as? String)?.contains("Background result") == true, "file preview comes from saved worker bytes")
         let resumed = try BuddyWorkerStore(directory: support.appendingPathComponent("Worker"))
         require(try resumed.job(id)["status"] as? String == "completed", "completed task survives service recreation")
+        let routine=try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"routine","agentId":agent,"requestId":"morning","arguments":["action":"create","title":"Morning research","goal":"Research the explicitly requested topic","kind":"research"]])
+        let r=routine["routine"] as! [String:Any]
+        require(routine["saved"] as? Bool==true && (r["nextRun"] as? String).flatMap{ISO8601DateFormatter().date(from:$0)} != nil,"chat scheduling tool reaches the real worker and returns a durable next-run receipt")
+        let status=try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"status"])
+        require((status["routines"] as? [[String:Any]])?.count==1,"saved routines are discoverable in the actual background status API")
+        _ = try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"routine","agentId":agent,"arguments":["action":"pause","routineID":r["id"]!]])
+        require(try BuddyRoutineStore(directory:support.appendingPathComponent("Worker")).routines.first?["status"] as? String=="paused","direct routine pause reaches durable storage")
+        print("PASS: native IPC routine creation, actual next-run receipt, status discovery and durable pause")
         print("PASS: private Unix IPC, accepted/queued/running/completed worker journey, idempotent enqueue, subscription protocol, real saved file and preview, durable completion")
     }
 }

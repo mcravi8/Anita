@@ -44,3 +44,6 @@ python3 outputs/buddy-mac/run-tests.py
 Browser tests use an inert local form with a test-origin allowance provided directly by the test harness; production callers cannot enable that allowance. Native worker tests use an inert app-server and temporary files. No real emails or job applications are sent by automated tests. Live Claude execution requires the user to connect their API key; fixture tests do not use credentials or credits.
 
 Official integrations: [OpenAI app-server](https://learn.chatgpt.com/docs/app-server), [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), [Claude subscriber API credits](https://platform.claude.com/docs/en/about-claude/api-credits-for-subscribers), [Playwright persistent contexts](https://playwright.dev/docs/api/class-browsertype#browser-type-launch-persistent-context).
+
+
+Private browser sign-in is available in Settings → Browser sign-in and through the worker’s buddy_browser_signin tool. Chrome owns password storage and autofill; Buddy receives session results. New account creation requests a human choice and private Chrome. Supported email-code forms use a restricted native Gmail lookup after consent for that website. The Mac app guide describes supported forms, sender/recipient checks, private handoff recovery, and current verification limits.

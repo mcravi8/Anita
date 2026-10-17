@@ -42,6 +42,12 @@ import Darwin
         try Data([0, 255, 1]).write(to: root.appendingPathComponent("binary.bin")); require(try files.read(scope, path: "binary.bin")["format"] as? String == "binary", "binary files return metadata")
         require((try files.list(scope)["files"] as! [[String: Any]]).allSatisfy { !["link.txt", "hard.txt", "pipe.txt"].contains($0["path"] as! String) }, "unsafe entries excluded from listing")
         print("PASS: folder boundaries, symlinks, hard links, devices, hidden paths, file limits, and permission preservation")
+        let vault=support.appendingPathComponent("Worker/Browsers/fixture/Default")
+        try fm.createDirectory(at:vault,withIntermediateDirectories:true);try "synthetic private data".write(to:vault.appendingPathComponent("Login Data"),atomically:true,encoding:.utf8)
+        let broad=try files.addFolder(workspace,to:support),broadScope=BuddyFileScope(workspace:workspace,folderId:broad["folderId"] as! String)
+        rejects("private_credentials"){_ = try files.read(broadScope,path:"Worker/Browsers/fixture/Default/Login Data")}
+        require(!(try files.list(broadScope)["files"] as! [[String:Any]]).contains{$0["path"] as? String=="Worker/Browsers/fixture/Default/Login Data"},"private browser/password databases are excluded even under a broad connected parent")
+        try files.removeFolder(workspace,folderId:broadScope.folderId)
         let desktop = support.appendingPathComponent("Local desktop")
         try fm.createDirectory(at: desktop, withIntermediateDirectories: true)
         let connected = try files.addFolder(workspace, to: desktop), connectedID = connected["folderId"] as! String

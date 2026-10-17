@@ -11,7 +11,7 @@ async function start(config){
       const id=String(++next);pending.set(id,resolve);write({type:'call',id,tool:def.name,arguments:args});
     }));
   });
-  const safeEnv={PATH:process.env.PATH,HOME:config.home,TMPDIR:process.env.TMPDIR,ANTHROPIC_API_KEY:config.apiKey,CLAUDE_CONFIG_DIR:config.home,CLAUDE_AGENT_SDK_CLIENT_APP:'Buddy/0.13.0',DISABLE_AUTOUPDATER:'1',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1'};
+  const safeEnv={PATH:process.env.PATH,HOME:config.home,TMPDIR:process.env.TMPDIR,ANTHROPIC_API_KEY:config.apiKey,CLAUDE_CONFIG_DIR:config.home,CLAUDE_AGENT_SDK_CLIENT_APP:'Buddy/0.14.0',DISABLE_AUTOUPDATER:'1',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1'};
   const names=config.tools.map(t=>'mcp__buddy__'+t.name);
   session=query({prompt:config.prompt,options:{cwd:config.cwd,env:safeEnv,settingSources:[],strictMcpConfig:true,plugins:[],tools:[],allowedTools:names,permissionMode:'dontAsk',persistSession:false,maxTurns:60,maxBudgetUsd:config.budget,...(config.outputSchema?{outputFormat:{type:'json_schema',schema:config.outputSchema}}:{}),model:config.model||'claude-sonnet-4-6',systemPrompt:config.instructions,mcpServers:{buddy:createSdkMcpServer({name:'buddy',version:'1.0.0',tools})},canUseTool:async name=>names.includes(name)?{behavior:'allow'}:{behavior:'deny',message:'Only Buddy tools are available.'}}});
   for await(const message of session){

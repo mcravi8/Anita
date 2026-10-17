@@ -31,7 +31,8 @@ import AppKit
             }
         }
         conversations.computerPermission = { [weak self] workspace, keys in
-            guard let self, let state = try? self.workspaceState(), state["conversationWorkspace"] as? String == workspace, let agents = state["agents"] as? [[String: Any]], !keys.isEmpty else { return false }
+            guard let self,!FileManager.default.fileExists(atPath:self.supportURL.appendingPathComponent("Worker/PrivateSignIn.json").path) else{return false}
+            guard let state = try? self.workspaceState(), state["conversationWorkspace"] as? String == workspace, let agents = state["agents"] as? [[String: Any]], !keys.isEmpty else { return false }
             return keys.allSatisfy { key in
                 guard let agent = agents.first(where: { workspace + ":" + ($0["id"] as? String ?? "") == key }) else { return false }
                 return (agent["tools"] as? [String: Bool])?["desktop"] != false
@@ -215,7 +216,7 @@ import AppKit
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }
     @objc private func about() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.13.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by your ChatGPT subscription.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.14.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {

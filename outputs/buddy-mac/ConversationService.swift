@@ -141,7 +141,7 @@ struct BuddyFailure: LocalizedError {
                 }
             }
         }
-        _ = try await request("initialize", ["clientInfo": ["name": "buddy_desktop", "title": "Buddy", "version": "0.13.0"], "capabilities": ["experimentalApi": true]])
+        _ = try await request("initialize", ["clientInfo": ["name": "buddy_desktop", "title": "Buddy", "version": "0.14.0"], "capabilities": ["experimentalApi": true]])
         try write(["method": "initialized"])
         let config = try await request("config/read", ["includeLayers": false])["config"] as? [String: Any] ?? [:]
         restrictions = ["project_doc_max_bytes": 0, "web_search": "disabled", "developer_instructions": ""]
@@ -232,6 +232,32 @@ struct BuddyFailure: LocalizedError {
     func connectionCatalog(workspace: String, agents: [String], refresh: Bool) async throws -> [String: Any] {
         let apps = try await loadCatalog(refresh: refresh)
         return ["apps": apps.map(\.summary), "access": try grants.snapshot(workspace: workspace, agents: agents, catalog: apps)]
+    }
+
+    func emailVerification(workspace: String, agent: String, origin: String, recipient: String, since: Date, excluding: Set<String>, length: Int) async throws -> BuddyMailVerification.Match {
+        guard BuddyMailVerification.email(recipient), let host=URL(string:origin)?.host,host.range(of:#"^[a-zA-Z0-9.-]+$"#,options:.regularExpression) != nil else{throw BuddyFailure(message:"Check the verification website and email address.")}
+        let key=workspace+":"+agent, apps=try await loadCatalog()
+        guard let mail=apps.first(where:{$0.name=="Gmail"&&$0.available}),try grants.allowed(for:key,catalog:apps).contains(mail.id),connectionFilter?(mail) != false else{throw BuddyFailure(message:"Enable Gmail for this agent before email verification.")}
+        let names=["get_profile","search_email_ids","read_email"]
+        guard names.allSatisfy({mail.readableTools.contains($0)}) else{throw BuddyFailure(message:"The required Gmail read tools are unavailable.")}
+        var config=restrictions
+        config["apps"]=["_default":["enabled":false,"destructive_enabled":false,"open_world_enabled":false],mail.id:["enabled":true,"default_tools_enabled":false,"destructive_enabled":false,"open_world_enabled":false,"approvals_reviewer":"user","tools":Dictionary(uniqueKeysWithValues:names.map{($0,["enabled":true,"approval_mode":"auto"] as [String:Any])})]]
+        config["features.apps"]=true
+        let result=try await request("thread/start",["cwd":workingURL.path,"modelProvider":"openai","approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"read-only","ephemeral":true,"config":config,"baseInstructions":"Native Gmail verification lookup only. No model turn, sending, changes, or other services."])
+        guard let thread=(result["thread"] as? [String:Any])?["id"] as? String else{throw BuddyFailure(message:"Could not start the private verification lookup.")}
+        defer{Task{_ = try? await self.request("thread/unsubscribe",["threadId":thread])}}
+        func call(_ tool:String,_ args:[String:Any]) async throws->[String:Any]{
+            guard names.contains(tool),agentPermission?(workspace,[key])==true,try grants.allowed(for:key,catalog:apps).contains(mail.id) else{throw BuddyFailure(message:"Verification stopped because Gmail access changed.")}
+            return try BuddyMailVerification.object(await request("mcpServer/tool/call",["threadId":thread,"server":"codex_apps","tool":"gmail."+tool,"arguments":args]))
+        }
+        let profile=try await call("get_profile",[:])
+        guard (profile["emailAddress"] as? String ?? profile["email"] as? String)?.lowercased()==recipient.lowercased() else{throw BuddyFailure(message:"The connected Gmail account does not match the email address on this sign-in page. Continue in private Chrome.")}
+        let query="to:\(recipient) from:(@\(host)) after:\(Int(since.addingTimeInterval(-60).timeIntervalSince1970)) -in:spam -in:trash"
+        let search=try await call("search_email_ids",["query":query,"max_results":5,"label_ids":NSNull(),"next_page_token":""])
+        let ids=((search["message_ids"] as? [String]) ?? (search["messages"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String}).filter{!excluding.contains($0)}
+        var messages:[[String:Any]]=[]
+        for id in ids.prefix(5){messages.append(try await call("read_email",["message_id":id,"format":"full"]))}
+        return try BuddyMailVerification.match(messages,origin:origin,recipient:recipient,since:since,excluding:excluding,length:length)
     }
 
     func setConnectionAccess(key: String, connection: String, allowed: Bool) async throws -> [String: Any] {

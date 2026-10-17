@@ -137,12 +137,14 @@ struct BuddyFileReceipt: Codable {
     }
     private func rootDescriptor(_ scope: BuddyFileScope) throws -> Int32 {
         let url = try location(scope)
+        try checkCredentialBoundary(url)
         let fd = Darwin.open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw failure("folder_unavailable", "The shared folder is unavailable. Reconnect it in Files.") }
         return fd
     }
     private func parent(_ scope: BuddyFileScope, _ path: String, create: Bool = false) throws -> (Int32, String) {
         let parts = try components(path)
+        try checkCredentialBoundary(try location(scope).appendingPathComponent(path))
         var fd = try rootDescriptor(scope)
         do {
             for name in parts.dropLast() {
@@ -156,6 +158,12 @@ struct BuddyFileReceipt: Codable {
             }
             return (fd, parts.last!)
         } catch { Darwin.close(fd); throw error }
+    }
+    private func checkCredentialBoundary(_ url:URL) throws {
+        let home=fm.homeDirectoryForCurrentUser
+        let protected=[support.appendingPathComponent("Worker/Browsers"),home.appendingPathComponent("Library/Application Support/Buddy/Worker/Browsers"),home.appendingPathComponent("Library/Application Support/Google/Chrome"),home.appendingPathComponent("Library/Keychains")]
+        let path=url.standardizedFileURL.resolvingSymlinksInPath().path
+        guard !protected.contains(where:{let root=$0.standardizedFileURL.resolvingSymlinksInPath().path;return path==root||path.hasPrefix(root+"/")}) else{throw failure("private_credentials","Chrome profiles and password storage are private. Use Browser sign-in in Settings.")}
     }
     private func bytes(_ parent: Int32, _ name: String) throws -> Data? {
         let fd = openat(parent, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
@@ -220,6 +228,7 @@ struct BuddyFileReceipt: Codable {
                 var meta = stat()
                 guard fstatat(fd, name, &meta, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
                 let path = prefix + name
+                if (try? checkCredentialBoundary(try location(scope).appendingPathComponent(path))) == nil {continue}
                 if (meta.st_mode & S_IFMT) == S_IFDIR {
                     let child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                     if child >= 0 { walk(child, prefix: path + "/", depth: depth + 1); Darwin.close(child) }

@@ -2,7 +2,7 @@
   'use strict';
   function normalize(value={}) {
     const seen=new Set();
-    const apps=(Array.isArray(value.apps)?value.apps:[]).filter(a=>a&&typeof a.id==='string'&&!seen.has(a.id)&&seen.add(a.id)).map(a=>({id:a.id,name:String(a.name||'Connected service'),available:a.available===true&&((Number(a.readToolCount)||0)+(Number(a.actionToolCount)||0))>0,readToolCount:Math.max(0,Number(a.readToolCount)||0),actionToolCount:Math.max(0,Number(a.actionToolCount)||0)}));
+    const apps=(Array.isArray(value.apps)?value.apps:[]).filter(a=>a&&typeof a.id==='string'&&!seen.has(a.id)&&seen.add(a.id)).map(a=>({id:a.id,name:String(a.name||'Connected service'),iconUrl:typeof a.iconUrl==='string'?a.iconUrl:'',available:a.available===true&&((Number(a.readToolCount)||0)+(Number(a.actionToolCount)||0))>0,readToolCount:Math.max(0,Number(a.readToolCount)||0),actionToolCount:Math.max(0,Number(a.actionToolCount)||0)}));
     const access={};
     for(const [agent,ids] of Object.entries(value.access||{}))access[agent]=Array.isArray(ids)?[...new Set(ids.filter(id=>apps.some(a=>a.id===id)))]:[];
     return {apps,access};
@@ -26,7 +26,8 @@ if(typeof document!=='undefined') {
   function connectionSymbol(app){
     const name=app.name.toLowerCase();
     const kind=name.includes('gmail')?'inbox':name.includes('drive')?'folder':name.includes('calendar')?'tasks':name.includes('contacts')?'people':'globe';
-    return `<span class="connection-mark ${kind}">${icon(kind)}</span>`;
+    const logo=BuddyBrands.logo(app);
+    return `<span class="connection-mark ${logo?'branded':kind}">${icon(kind)}${logo}</span>`;
   }
   function connectionsRow(app){
     const agents=connectionsState.agentId?[findAgent(connectionsState.agentId)].filter(Boolean):state.agents;

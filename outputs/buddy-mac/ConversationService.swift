@@ -221,7 +221,7 @@ struct BuddyFailure: LocalizedError {
             return installed.compactMap { runtime in
                 guard let id = runtime["id"] as? String else { return nil }
                 let info = metadata.first { $0["id"] as? String == id } ?? [:]
-                return BuddyConnection(id: id, name: info["name"] as? String ?? runtime["runtimeName"] as? String ?? "Connected service", enabled: runtime["enabled"] as? Bool == true, callable: runtime["callable"] as? Bool == true, tools: info["toolSummaries"] as? [[String: Any]] ?? [])
+                return BuddyConnection(id: id, name: info["name"] as? String ?? runtime["runtimeName"] as? String ?? "Connected service", enabled: runtime["enabled"] as? Bool == true, callable: runtime["callable"] as? Bool == true, tools: info["toolSummaries"] as? [[String: Any]] ?? [], iconURL: info["iconUrl"] as? String)
             }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         }
         catalogTask = task

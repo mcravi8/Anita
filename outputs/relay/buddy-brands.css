@@ -1,0 +1,12 @@
+.brand-logo{display:block;width:28px;height:28px;object-fit:contain;flex-shrink:0;filter:none}
+.connection-mark.branded{position:relative;background:#fff;border:1px solid #eeedf1;color:#8a8491}
+.connection-mark.branded>.icon{position:absolute;width:21px;height:21px}
+.connection-mark.branded>.brand-logo{position:relative;width:27px;height:27px;background:#fff}
+.connection-mark.branded:has(>.brand-logo)>.icon{visibility:hidden}
+.provider-symbol>.brand-logo{width:27px;height:27px}
+.provider-row>div.provider-identity{display:flex;flex-direction:row;align-items:center;gap:11px}
+.provider-identity>span:last-child{display:flex;flex-direction:column;gap:5px}
+.provider-identity .brand-logo{width:23px;height:23px}
+.preview-status .brand-logo{width:14px;height:14px;margin-right:5px;display:inline-block;vertical-align:middle}
+@media(max-width:600px){.connection-mark.branded>.brand-logo{width:24px;height:24px}}
+@media(max-width:430px){.provider-symbol>.brand-logo{width:22px;height:22px}}

@@ -61,6 +61,11 @@ import Foundation
         try await set(a,"claude","claude-other")
         let claude=try await send("CLAUDE_TURN")
         require(claude["model"] as? String=="claude-other" && (claude["context"] as? String)?.contains("EARLY_REAL_DETAIL")==true,"Claude receives explicit agent model and same saved conversation")
+        let delegated=try await send("DELEGATE_CHECK")
+        let receipt=delegated["delegate"] as? [String:Any] ?? [:]
+        require(receipt["status"] as? String=="completed","Claude service delegation must succeed after an explicit per-agent Claude model is selected: \(receipt)")
+        let delegatedAnswer=try JSONSerialization.jsonObject(with:Data((receipt["text"] as! String).utf8)) as! [String:Any]
+        require(delegated["model"] as? String=="claude-other" && delegatedAnswer["model"] as? String=="gpt-alpha","Claude keeps its model while its service delegate independently selects the OpenAI account default")
         let active=Task{try await send("PINNED_TURN")}
         for _ in 0..<100 {if events.contains(where:{$0["text"] as? String=="Fixture active"}){break};try await Task.sleep(nanoseconds:10_000_000)}
         try await set(a,"chatgpt","gpt-beta")

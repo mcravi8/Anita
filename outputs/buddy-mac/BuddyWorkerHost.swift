@@ -311,6 +311,7 @@ import Darwin
         service.extraToolHandler = { [weak self] tool, args, _ in guard let self else { throw BuddyWorkerFailure(message: "Worker stopped.") }; return try await self.tool(tool, args, job: job) }
         service.onEvent = { [weak self] event in self?.event(event, job: job) }
         let instructions = """
+        \(BuddyRuntimeCapabilities.guidance(provider:job["provider"] as? String ?? "chatgpt",model:job["model"] as? String ?? (job["provider"] as? String=="claude" ? "claude-sonnet-4-6":"OpenAI account default")))
         \(BuddyInboxReview.guidance)
         You are \(a["name"] as? String ?? "Buddy"), a background worker in Buddy. \(a["role"] as? String ?? "")
         User configuration: \(a["description"] as? String ?? "")

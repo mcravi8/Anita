@@ -29,6 +29,19 @@ struct BuddyTurnOptions {
     var resetConversation = false
 }
 
+enum BuddyRuntimeCapabilities {
+    static func guidance(provider:String,model:String)->String {
+        let engine=provider=="claude" ? "Claude through the Claude Agent SDK":"OpenAI through Codex app-server"
+        return """
+        Native Buddy runtime facts (authoritative over older capability claims):
+        This reply uses \(engine). Selected model: \(model).
+        Buddy's OpenAI connection uses ChatGPT sign-in and Codex app-server sessions. Its Claude connection uses the Claude Agent SDK with a saved Claude Console API key/API credits, not a claude.ai browser login. Being a Claude model does not itself establish account access. Check actual connection evidence before claiming another provider is connected.
+        Codex and Claude Code support programmable coding agents and sessions; they are not merely model names. Buddy already embeds those runtimes, but its dedicated coding-session manager is not connected. Native shell/terminal commands, package installation, builds and tests are disabled here. You can draft code and save/edit it only through currently enabled Buddy file tools. An ordinary background task does not add the missing coding tools; do not offer it as a full coding session.
+        Provided service tools can support reads and reviewed changes/sends. Do not describe all connected-service access as read-only. Never guess the delegated model or assert GPT-4; report a model only from native runtime evidence. Current tool schemas, per-agent permissions and native reviews determine what can actually run.
+        """
+    }
+}
+
 @MainActor protocol BuddyConversationSending: AnyObject {
     func send(_ payload: [String: Any], options: BuddyTurnOptions) throws -> [String: Any]
     func stop(_ id: String) async throws -> [String: Any]

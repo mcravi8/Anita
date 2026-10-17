@@ -2,6 +2,7 @@
 """Offline app-server fixture: reports actual model, thread and migrated context."""
 import json, sys
 seq = 0
+runtime = {}
 def out(value): print(json.dumps(value), flush=True)
 for line in sys.stdin:
     m = json.loads(line); p = m.get('params', {}); method = m.get('method'); result = {}
@@ -17,8 +18,12 @@ for line in sys.stdin:
     elif method in ['thread/start','thread/fork']:
         seq += 1; result = {'thread': {'id': 'thread-'+str(seq)}}
     elif method == 'thread/resume': result = {'thread': {'id': p['threadId']}}
+    elif method == 'thread/inject_items':
+        runtime[p['threadId']] = json.dumps(p['items'])
     elif method == 'turn/start':
         assert p['model'] in ['gpt-alpha','gpt-beta'], p
+        assert 'Selected model: '+p['model'] in runtime.get(p['threadId'],''), runtime
+        assert 'dedicated coding-session manager is not connected' in runtime.get(p['threadId'],''), runtime
         assert p['effort'] == ('medium' if p['model']=='gpt-alpha' else 'low'), p
         seq += 1; turn='turn-'+str(seq); tid=p['threadId']
         result = {'model':p['model'], 'thread':tid, 'context':'\n'.join(x.get('text','') for x in p['input'])}

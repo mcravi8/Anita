@@ -2,6 +2,7 @@
 /*
 !/.gitignore
 !/README.md
+!/AGENTS.md
 !/outputs/
 /outputs/*
 !/outputs/buddy-mac/
@@ -16,6 +17,8 @@
 **/__pycache__/
 **/*.pyc
 **/.build/
+**/.buddy-install.lock
+**/*.pending
 **/node_modules/
 **/*.log
 

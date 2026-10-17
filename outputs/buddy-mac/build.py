@@ -1,4 +1,6 @@
 from pathlib import Path
+import argparse
+import os
 import plistlib
 import shutil
 import subprocess
@@ -6,10 +8,12 @@ import tempfile
 
 source = Path(__file__).resolve().parent
 outputs = source.parent
-app = outputs / 'Buddy.app'
 frontend = outputs / 'relay'
+parser = argparse.ArgumentParser(description='Build Buddy without leaving additional searchable apps.')
+parser.add_argument('--install', action='store_true', help='Update the existing /Applications/Buddy.app after building.')
+options = parser.parse_args()
 
-with tempfile.TemporaryDirectory(prefix='buddy-build-') as temporary:
+with tempfile.TemporaryDirectory(prefix='buddy-build-', suffix='.noindex') as temporary:
     build = Path(temporary)
     build_source = build / 'Source'
     shutil.copytree(source, build_source, ignore=shutil.ignore_patterns('tests', '__pycache__'))
@@ -52,11 +56,17 @@ with tempfile.TemporaryDirectory(prefix='buddy-build-') as temporary:
     shutil.copyfile(iconset / 'icon_512x512@2x.png', outputs / 'buddy-app-icon.png')
     subprocess.run(['codesign', '--force', '--sign', '-', '--identifier', 'app.buddy.desktop', str(staged)], check=True)
     subprocess.run(['codesign', '--verify', '--deep', '--strict', str(staged)], check=True)
-    if app.exists():
-        old_plist = plistlib.loads((app / 'Contents' / 'Info.plist').read_bytes())
-        if old_plist.get('CFBundleIdentifier') != 'app.buddy.desktop':
-            raise RuntimeError('Refusing to replace an unrelated app.')
-        shutil.rmtree(app)
-    shutil.copytree(staged, app)
-subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(outputs / 'Buddy-mac.zip')], check=True)
-print(f'Built and verified {app}')
+    archive = build / 'Buddy-mac.zip'
+    subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(staged), str(archive)], check=True)
+    # Only the archive leaves temporary staging. Loose build/test app bundles must
+    # never accumulate beside the one installed application.
+    pending = outputs / '.Buddy-mac.zip.pending'
+    try:
+        shutil.copyfile(archive, pending)
+        os.replace(pending, outputs / 'Buddy-mac.zip')
+    finally:
+        pending.unlink(missing_ok=True)
+print(f'Built and verified {outputs / "Buddy-mac.zip"}')
+if options.install:
+    import sys
+    subprocess.run([sys.executable, str(source / 'install.py')], check=True)

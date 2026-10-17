@@ -31,10 +31,10 @@ Requires macOS 13 or later, Xcode command-line tools, Python 3, Node.js 22+, and
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund --prefix outputs/buddy-worker
-python3 outputs/buddy-mac/build.py
+python3 outputs/buddy-mac/build.py --install
 ```
 
-The build produces `outputs/Buddy.app` and `outputs/Buddy-mac.zip`, with Apple Silicon and Intel support and an ad-hoc signature. Real conversations also require the supported Codex CLI/app-server and ChatGPT sign-in; see the [native app documentation](outputs/buddy-mac/README.md).
+Quit Buddy before installing an update. This updates the single `/Applications/Buddy.app`, with Apple Silicon and Intel support and an ad-hoc signature. Build staging is temporary and excluded from search; packages and rollback copies are ZIP archives. Agents, chats, files, browser profiles, and Keychain credentials stay in their existing locations. To produce only `outputs/Buddy-mac.zip`, omit `--install`; to install that archive later, run `python3 outputs/buddy-mac/install.py`. Do not create separate check apps or unpack builds elsewhere. Real conversations also require the supported Codex CLI/app-server and ChatGPT sign-in; see the [native app documentation](outputs/buddy-mac/README.md).
 
 ## Preview the frontend
 

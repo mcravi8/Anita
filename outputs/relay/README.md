@@ -14,7 +14,7 @@ Then open `http://127.0.0.1:4173`. There are no dependencies or build steps.
 
 ## Try the interface
 
-- Set up your first Buddy: name and purpose are visible first, with appearance and role available on request. Start chatting saves one new agent and opens their empty DM. Fresh workspaces start without sample agents. Setup choices persist across reloads; existing workspaces retain their chats and files, with Back to my chats and Settings → Your first Buddy available to resume later.
+- Set up your first Buddy: choose a name and look. Start chatting saves the agent and immediately opens its job interview in the DM. In the Mac app, Claude asks relevant follow-ups and generates editable instructions once the brief is clear. Fresh workspaces start without sample agents. Setup choices and answers persist across reloads.
 - Use the plus beside Chats to create an agent or a group.
 - Click the conversation title or three dots for agent/group details and instructions.
 - Pick a 3D shape and one of seven colors independently from the agent's name, role, instructions, and tool preferences.
@@ -56,6 +56,7 @@ The native Mac integration exposes only pending suggestion creation to model tur
 - `buddy-proposals.js` / `.test.js`: live native suggestion discovery, reply cards, reviewed decisions, and verified agent registration.
 - `buddy-files.js` / `.css` / `.test.js`: native shared-file interface and receipt/conflict checks.
 - `buddy-onboarding.js` / `.css` / `.test.js`: empty initial workspace, migration, resumable setup, and atomic first-agent registration.
+- `buddy-agent-setup.js` / `.test.js`: immediate first question, native interview snapshots, retry/stop, profile updates and manual edits.
 - `assets/`: four transparent 3D avatar PNGs and the exact generation prompts in `prompts.json`. Created with built-in image generation; original output images were copied into this project unchanged.
 - `assets/buddy-logo.svg`: vector logo with the agents' glossy eyes and smile on a white background, also used as the browser icon.
 

@@ -131,6 +131,10 @@ function configuredAvatar(value,small=false,title='') {
   const c=RelayTeam.appearance(value),shape=RelayTeam.shapeOptions.find(s=>s.id===c.avatarShape);
   return `<span class="avatar ${small?'small':''}" ${title?`title="${esc(title)}"`:''}><img src="${avatarAssets[shape.asset]}" style="filter:${avatarFilter(c.avatarShape,c.avatarColor)}" alt="" width="48" height="48" draggable="false"></span>`;
 }
+function thinkingAvatar(value,small=false){
+  return `<span class="agent-thinking ${small?'small':''}" role="status" aria-label="${esc(value?.name||'Your team')} is working">${configuredAvatar(value||{},small)}<span class="agent-thoughts" aria-hidden="true"><i></i><i></i><i></i></span></span>`;
+}
+function agentIsThinking(target){const run=BuddyChat.active(state,target)||BuddyAgentSetup.active(state,target);return !!run&&!window.BuddyActions?.pending(state,run.runId)?.length;}
 const avatar=(agentId,small=false)=>{const a=findAgent(agentId);return a?configuredAvatar(a,small,a.name):`<span class="avatar user ${small?'small':''}">Y</span>`;};
 function avatarPicker(value={}) {
   const c=RelayTeam.config(value);
@@ -162,27 +166,29 @@ function bindConfig(prefix) {
   document.getElementById(`${prefix}-name`).addEventListener('input',update);
 }
 function newAgent(templateId) {
-  const template=findAgent(templateId),c=template?RelayTeam.config(RelayTeam.copy(template)):{avatarShape:'star',avatarColor:'lilac'};
-  if(template){c.name='';c.avatarColor=template.avatarColor==='red'?'lilac':'red';}
-  openModal(template?'Create a similar agent':'Create an agent',`<p class="modal-description">${template?`Start with ${esc(template.name)}’s configuration, then make it your own.`:'Choose a look, a name, and what they should help with.'}</p><form id="agent-form" class="agent-config-form">${configFields(c,'agent',{groups:true})}<p class="field-error" id="agent-error" role="alert"></p>${formActions('Create agent')}</form>`);
-  bindConfig('agent');
-  document.getElementById('agent-form').addEventListener('submit',event=>{
-    event.preventDefault();
+  const template=findAgent(templateId),c=template?RelayTeam.config(template):{avatarShape:'star',avatarColor:'lilac'};
+  c.name='';if(template)c.avatarColor=template.avatarColor==='red'?'lilac':'red';
+  openModal(template?'Create a similar agent':'Create an agent',`<p class="modal-description">Give them a name and a look. They'll ask about their job in chat.</p><form id="agent-form" class="agent-config-form">${avatarPicker(c)}<div class="field"><label for="agent-name">Name</label><input id="agent-name" maxlength="40" required autocomplete="off" placeholder="What should we call them?"></div><p class="field-error" id="agent-error" role="alert"></p>${formActions('Start chatting')}</form>`);
+  const form=document.getElementById('agent-form');
+  const read=()=>({name:document.getElementById('agent-name').value,role:'Getting started',description:BuddyAgentSetup.bootstrap,avatarShape:document.querySelector('[name=avatar-shape]:checked')?.value,avatarColor:document.querySelector('[name=avatar-color]:checked')?.value,tools:{web:true,projectFiles:true,desktop:true},groupIds:[]});
+  const update=()=>{const value=read();document.getElementById('config-avatar-preview').innerHTML=configuredAvatar(value);document.getElementById('config-preview-name').textContent=value.name.trim()||'Your new agent';for(const image of form.querySelectorAll('[data-shape-preview]'))image.style.filter=avatarFilter(image.dataset.shapePreview,value.avatarColor);};
+  form.addEventListener('input',update);form.addEventListener('change',update);
+  form.addEventListener('submit',async event=>{
+    event.preventDefault();const button=form.querySelector('[type=submit]');if(button.disabled)return;
     try {
-      const agent=RelayTeam.createAgent(state,readConfig('agent'),{actor:'user'});
-      save();closeModal();navigate('chat',agent.id);
-      if(storageAvailable)showToast(`${agent.name} has joined your team.`);
-    }catch(error){document.getElementById('agent-error').textContent=error.message;}
+      const candidate=RelayTeam.copy(state),agent=RelayTeam.createAgent(candidate,read(),{actor:'user'});agent.setupSeed=template?.description||'';BuddyAgentSetup.seed(candidate,agent);
+      button.disabled=true;await persistWorkspace(candidate);state=candidate;closeModal();navigate('chat',agent.id);BuddyAgentSetup.ensure(agent.id);
+    }catch(error){document.getElementById('agent-error').textContent=error.message;button.disabled=false;}
   });
 }
 function agentInfo(agentId) {
   const a=findAgent(agentId);if(!a)return;
-  openModal(`${a.name}’s settings`,`<form id="bot-settings" class="agent-config-form">${configFields(a,'edit')}${window.BuddyModels?.settings(a.id)||''}<p class="field-error" id="bot-error" role="alert"></p>${formActions()}</form>`);
+  openModal(`${a.name}’s settings`,`<form id="bot-settings" class="agent-config-form">${a.setupStatus==='pending'?`<p class="modal-description">Your Buddy is still learning the job. Continue the questions, or write their instructions here.</p><button type="button" class="small-link" data-continue-setup="${esc(a.id)}">Continue setup in chat${icon('arrow')}</button>`:''}${configFields(a,'edit')}${window.BuddyModels?.settings(a.id)||''}<p class="field-error" id="bot-error" role="alert"></p>${formActions()}</form>`);
   bindConfig('edit');window.BuddyModels?.mount();
-  document.getElementById('bot-settings').addEventListener('submit',event=>{
+  document.getElementById('bot-settings').addEventListener('submit',async event=>{
     event.preventDefault();
-    try{RelayTeam.updateAgent(state,a.id,readConfig('edit'));save();closeModal();render();if(storageAvailable)showToast('Agent settings saved.');}
-    catch(error){document.getElementById('bot-error').textContent=error.message;}
+    try{const config=RelayTeam.validate(state,readConfig('edit'),a.id);const button=event.submitter;if(button)button.disabled=true;await BuddyAgentSetup.edit(a.id,config);RelayTeam.updateAgent(state,a.id,config);await persistWorkspace(state);closeModal();render();if(storageAvailable)showToast('Agent settings saved.');}
+    catch(error){document.getElementById('bot-error').textContent=error.message;if(event.submitter)event.submitter.disabled=false;}
   });
 }
 const findProposal=proposalId=>state.proposals.find(p=>p.id===proposalId);
@@ -255,12 +261,12 @@ async function persistWorkspace(value){
 }
 function save(){if(workspaceReadError)return false;persistWorkspace(state).catch(()=>{storageAvailable=false;showToast('Buddy couldn’t save your workspace. Keep the app open and try again.');});return true;}
 
-function navigate(kind,target){if(kind==='files'&&window.BuddyFiles?.native())return BuddyFiles.show();ui.view={kind,target};if(kind==='chat')ui.lastChat=target;ui.mobile=false;state.lastView=ui.view;save();render();document.querySelector('#main h1')?.focus({preventScroll:true});}
+function navigate(kind,target){if(kind==='files'&&window.BuddyFiles?.native())return BuddyFiles.show();ui.view={kind,target};if(kind==='chat')ui.lastChat=target;ui.mobile=false;state.lastView=ui.view;save();render();document.querySelector('#main h1')?.focus({preventScroll:true});if(kind==='chat')BuddyAgentSetup.ensure(target);}
 function chatSummary(targetId, fallback) {
   const draft=state.drafts[targetId];
   if(draft?.trim())return `Draft: ${draft.trim()}`;
   const last=(state.messages[targetId]||[]).filter(m=>m.who).at(-1);
-  return last ? `${last.who==='you'?'You: ':''}${(last.body&&(last.who==='you'?last.body:BuddyMarkdown.preview(last.body)))|| (BuddyChat.busy(last.status)?(window.BuddyActions?.pending(state,last.runId)?.length?'Needs your review':last.team?teamPhase(last.team.phase):'Thinking…'):'')}` : fallback;
+  return last ? `${last.who==='you'?'You: ':''}${(last.body&&(last.who==='you'?last.body:BuddyMarkdown.preview(last.body)))|| (BuddyChat.busy(last.status)?(window.BuddyActions?.pending(state,last.runId)?.length?'Needs your review':last.team?teamPhase(last.team.phase):''):'')}` : fallback;
 }
 function groupAvatar(groupId, small=false) {
   const g=findGroup(groupId);
@@ -273,7 +279,7 @@ function sidebar() {
   return `<aside class="sidebar ${ui.mobile?'mobile-open':''}" aria-label="Chats">
     <header class="sidebar-header"><div class="buddy-brand">${buddyLogo()}<h2>Buddy</h2></div><div class="sidebar-header-actions">${pendingProposals().length?`<button class="icon-button pending-suggestions-button" data-action="proposals" aria-label="Review ${pendingProposals().length} agent suggestions" title="Agent suggestions">${icon('people')}<span>${pendingProposals().length}</span></button>`:''}<button class="icon-button" data-action="new-chat" aria-label="New chat" title="New chat">${icon('plus')}</button><button class="icon-button mobile-sidebar-close" data-action="menu" aria-label="Close chats">${icon('close')}</button></div></header>
     <label class="chat-search">${icon('search')}<input id="chat-search" aria-label="Search chats" placeholder="Search" value="${esc(ui.chatFilter)}" autocomplete="off"></label>
-    <nav class="chat-list" aria-label="Conversations">${filtered.map(x=>{const messages=(state.messages[x.id]||[]).filter(m=>m.who),last=messages.at(-1);return `<button class="chat-row ${ui.view.kind==='chat'&&ui.view.target===x.id?'selected':''}" data-action="chat" data-id="${esc(x.id)}" aria-label="Open ${esc(x.name)} chat" ${ui.view.kind==='chat'&&ui.view.target===x.id?'aria-current="page"':''}>${x.isGroup?groupAvatar(x.id):avatar(x.id)}<span class="chat-row-copy"><span class="chat-row-top"><strong>${esc(x.name)}</strong><time>${last?.time?esc(last.time):''}</time></span><span class="chat-snippet ${state.drafts[x.id]?.trim()?'has-draft':''}">${esc(chatSummary(x.id,x.isGroup?'Start a conversation':x.role))}</span></span></button>`;}).join('')}${!filtered.length?'<div class="chat-list-empty">No chats found.<br><button class="small-link" data-action="clear-chat-search">Clear search</button></div>':''}</nav>
+    <nav class="chat-list" aria-label="Conversations">${filtered.map(x=>{const messages=(state.messages[x.id]||[]).filter(m=>m.who),last=messages.at(-1);return `<button class="chat-row ${agentIsThinking(x.id)?'is-working':''} ${ui.view.kind==='chat'&&ui.view.target===x.id?'selected':''}" data-action="chat" data-id="${esc(x.id)}" aria-label="Open ${esc(x.name)} chat" ${ui.view.kind==='chat'&&ui.view.target===x.id?'aria-current="page"':''}>${x.isGroup?groupAvatar(x.id):avatar(x.id)}<span class="chat-row-copy"><span class="chat-row-top"><strong>${esc(x.name)}</strong><time>${last?.time?esc(last.time):''}</time></span><span class="chat-snippet ${state.drafts[x.id]?.trim()?'has-draft':''}">${esc(chatSummary(x.id,x.isGroup?'Start a conversation':x.role))}</span></span></button>`;}).join('')}${!filtered.length?'<div class="chat-list-empty">No chats found.<br><button class="small-link" data-action="clear-chat-search">Clear search</button></div>':''}</nav>
     <footer class="sidebar-footer"><button class="worker-nav" data-action="background-work">${icon('spark')}<span>Background work</span><span class="worker-badge" data-worker-badge hidden></span></button><button class="workspace-button" data-action="settings" aria-label="Workspace settings">${buddyLogo(true)}<span>Your workspace</span>${icon('settings')}</button><button class="preview-status" data-action="connection">${BuddyBrands.logo(chatConnection.provider)}${chatConnection.connected?`${providerName()} connected`:window.BuddyDesktop?`Connect ${providerName()}`:'Frontend preview'}${icon('info','small-icon')}</button></footer>
   </aside>`;
 }
@@ -288,9 +294,12 @@ function messageHTML(m) {
     const review=window.BuddyActions?.pending(state,m.runId).length>0;
     const waiting=BuddyChat.busy(m.status)&&!m.body&&!review;
     const team=!!m.team,partial=m.team?.partial;
-    const label=team?teamPhase(m.team.phase):`${a.name} is thinking`;
+    const indicator=a||findAgent(messageGroup?.members?.[0]);
     const retryable=['failed','stopped'].includes(m.status)||m.status==='completed'&&partial;
-    return `<div class="message bot-message ${team?'team-reply':''}">${team?(a?avatar(a.id,true):groupAvatar(messageGroup?.id||ui.view.target,true)):''}<div class="bot-bubble">${team?`<span class="team-reply-author">${esc(a?.name||'Your team')}</span>`:''}<div class="reply-content">${BuddyMarkdown.render(m.body)}</div>${waiting?`<div class="reply-waiting" role="status">${m.status==='stopping'?'Stopping':esc(label)}</div>`:''}${window.BuddyActions?.cards(m.runId)||''}${window.BuddyFiles?.cards(m.files||[])||''}${reviewCoverage(m.coverage)}${routineReceipts(m.routines)}${m.workerTaskID?`<button class="routine-result-link" data-worker-task="${esc(m.workerTaskID)}">View task${icon('chevron')}</button>`:''}${(m.proposalIds||[]).map(proposalCard).join('')}${m.error?`<div class="reply-error" role="alert">${esc(replyErrorText(m.error))}</div>`:''}<div class="reply-status">${review?'Waiting for your review':m.status==='completed'?(partial?'Some work couldn’t finish':esc(m.time)):m.status==='stopped'?'Stopped':m.status==='failed'?'Couldn’t finish':m.status==='stopping'?(waiting?'':'Stopping…'):team?(waiting?'':esc(label)):m.status==='starting'?'Starting reply…':'Answering…'}${team?`<button class="teamwork-link" data-action="teamwork" data-id="${esc(m.runId)}" aria-label="View teamwork for this reply">${icon('people')}Teamwork</button>`:''}${retryable?`<button data-action="retry-message" data-id="${esc(m.runId)}">Try again</button>`:''}</div></div></div>`;
+    const working=BuddyChat.busy(m.status)&&!review;
+    const status=review?'Waiting for your review':m.status==='completed'?(partial?'Some work couldn’t finish':esc(m.time)):m.status==='stopped'?'Stopped':m.status==='failed'?'Couldn’t finish':m.status==='stopping'?'Stopping…':working?thinkingAvatar(indicator,true):'';
+    return `<div class="message bot-message ${team?'team-reply':''}">${team?(a?avatar(a.id,true):groupAvatar(messageGroup?.id||ui.view.target,true)):''}<div class="bot-bubble ${waiting?'thinking-only':''}">${team?`<span class="team-reply-author">${esc(a?.name||'Your team')}</span>`:''}<div class="reply-content">${BuddyMarkdown.render(m.body)}</div>${waiting?thinkingAvatar(indicator):''}${window.BuddyActions?.cards(m.runId)||''}${window.BuddyFiles?.cards(m.files||[])||''}${reviewCoverage(m.coverage)}${routineReceipts(m.routines)}${m.workerTaskID?`<button class="routine-result-link" data-worker-task="${esc(m.workerTaskID)}">View task${icon('chevron')}</button>`:''}${m.setupComplete?`<button class="routine-result-link" data-action="agent-info" data-id="${esc(a.id)}">View instructions${icon('chevron')}</button>`:''}${(m.proposalIds||[]).map(proposalCard).join('')}${m.error?`<div class="reply-error" role="alert">${esc(replyErrorText(m.error))}</div>`:''}${!waiting?`<div class="reply-status">${status}${team?`<button class="teamwork-link" data-action="teamwork" data-id="${esc(m.runId)}" aria-label="View teamwork for this reply">${icon('people')}Teamwork</button>`:''}${m.setupRetry?`<button data-setup-retry="${esc(a.id)}">Try again</button>`:retryable?`<button data-action="retry-message" data-id="${esc(m.runId)}">Try again</button>`:''}</div>`:''}</div></div>`;
+
   }
   return `<div class="message bot-message">${group?avatar(a.id,true):''}<div class="bot-bubble">${group?`<button class="message-author" style="color:${RelayTeam.colorOptions.find(c=>c.id===a.avatarColor).text}" data-action="agent-info" data-id="${esc(a.id)}">${esc(a.name)}</button>`:''}<p>${esc(m.body).replace(/\n/g,'<br>')}</p>${m.assignments?`<details class="message-details"><summary>${icon('tasks')}See the plan${icon('down')}</summary><div class="assignments">${m.assignments.map(taskId=>{const t=findTask(taskId);return t?`<button class="assignment" data-action="task" data-id="${esc(t.id)}">${avatar(t.agent,true)}<span>${esc(t.title)}<small>${esc(agentName(t.agent))} · ${taskState(t.state)}</small></span>${icon('chevron')}</button>`:'';}).join('')}</div></details>`:''}${m.sources?`<button class="inline-file" data-action="file" data-id="references">${icon('file')}Visual direction${icon('chevron')}</button>`:''}${m.file?artifactHTML(m.file):''}${m.proposalId?proposalCard(m.proposalId):''}${m.group?`<button class="chat-link" data-action="chat" data-id="${esc(m.group)}">${groupAvatar(m.group,true)}${esc(findGroup(m.group)?.name||'Group chat')}${icon('chevron')}</button>`:''}<time>${esc(m.time)}</time></div></div>`;
 }
@@ -310,9 +319,9 @@ function conversationMessages(messages){
   if(live&&samples.length)return `<details class="sample-history"><summary>Example conversation${icon('down')}</summary>${samples.map(messageHTML).join('')}</details><div class="live-divider">Your conversation</div>${messages.filter(m=>!samples.includes(m)).map(messageHTML).join('')}`;
   return messages.map(messageHTML).join('');
 }
-function connectionLabel(){return !storageAvailable?'Changes aren’t being saved':chatConnection.checking?`Connecting to ${providerName()}…`:chatConnection.connected?(chatConnection.provider==='claude'?'Powered by Claude API credits':'Powered by your ChatGPT subscription'):window.BuddyDesktop?`Connect ${providerName()}`:'Frontend preview';}
+function connectionLabel(){if(BuddyAgentSetup.required(findAgent(ui.view.target)))return 'Setup with Claude';return !storageAvailable?'Changes aren’t being saved':chatConnection.checking?`Connecting to ${providerName()}…`:chatConnection.connected?(chatConnection.provider==='claude'?'Powered by Claude API credits':'Powered by your ChatGPT subscription'):window.BuddyDesktop?`Connect ${providerName()}`:'Frontend preview';}
 function sendControl(target,draft){
-  const running=BuddyChat.active(state,target);
+  const running=BuddyChat.active(state,target)||BuddyAgentSetup.active(state,target);
   return running?`<button type="button" class="send-button stop-button" id="send-message" data-action="stop-message" data-id="${esc(running.runId)}" aria-label="Stop reply" title="Stop reply (⌘.)" ${running.status==='stopping'?'disabled':''}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg></button>`:`<button type="submit" class="send-button" id="send-message" aria-label="Send message" ${draft.trim()?'':'disabled'}>${icon('up')}</button>`;
 }
 function conversation() {
@@ -322,7 +331,7 @@ function conversation() {
   const sample=messages.some(m=>m.id?.startsWith('dm-sample-')||/^m[1-6]$/.test(m.id)||findProposal(m.proposalId)?.sample);
   return `<section class="center conversation"><header class="conversation-header"><button class="icon-button mobile-menu-button" data-action="menu" aria-label="Open chats">${icon('chevron')}</button><button class="conversation-title" data-action="chat-details" aria-label="${esc(target.name)} details">${g?groupAvatar(g.id):avatar(a.id)}<span><h1 tabindex="-1">${esc(target.name)}</h1><span class="conversation-subtitle">${g?`${g.members.length} agents, you` : esc(a.role)}</span></span></button><div class="header-tools"><button class="icon-button" data-action="workspace-details" data-section="files" aria-label="Shared files and tasks" title="Shared files and tasks">${icon('folder')}</button><button class="icon-button" data-action="chat-details" aria-label="Conversation details" title="Conversation details">${icon('more')}</button></div></header>
     <div class="chat-body" id="chat-body"><div class="chat-thread">${messages.length?`<div class="date-divider">${sample&&!messages.some(m=>m.live)?'Today · sample conversation':'Today'}</div><div id="messages">${conversationMessages(messages)}</div>`:`<div class="empty-chat">${g?groupAvatar(g.id):avatar(a.id)}<h2>${g?esc(g.name):`Say hi to ${esc(a.name)}.`}</h2><p>${g?'Your team, in one conversation.':esc(a.role)}</p><button class="suggestion" data-action="suggest" data-text="${g?'Let’s plan our next project.':'What can you help me with?'}">${g?'Plan something together':'What can you help me with?'}${icon('arrow')}</button></div>`}</div></div>
-    <div class="composer-wrap"><form class="composer" id="composer" aria-label="Message ${esc(target.name)}">${attachments.length?`<div class="attachments">${attachments.map((a,index)=>`<span class="attachment-chip">${icon('paperclip')}${esc(a.name)}<button type="button" data-action="remove-attachment" data-index="${index}" aria-label="Remove ${esc(a.name)}">${icon('close')}</button></span>`).join('')}</div>`:''}<div class="composer-line"><button type="button" class="icon-button" data-action="attach" aria-label="${window.BuddyDesktop?.projectFiles?'Add a shared file':'Attach a file'}">${icon('plus')}</button><textarea id="message-input" aria-label="Message ${esc(target.name)}" placeholder="Message ${g?'the group':esc(a.name)}…" rows="1">${esc(draft)}</textarea><button type="button" class="icon-button mention-button" data-action="mention" aria-label="Mention an agent">${icon('at')}</button>${sendControl(target.id,draft)}</div>${!g?`<div class="composer-model-row">${window.BuddyModels?.slot(a.id)||`<div class="agent-model-slot" data-agent-model="${esc(a.id)}"></div>`}</div>`:''}<input type="file" id="attachment-input" hidden multiple></form><button class="composer-hint" data-action="connection">${esc(connectionLabel())}</button></div>
+    <div class="composer-wrap"><form class="composer" id="composer" aria-label="Message ${esc(target.name)}">${attachments.length?`<div class="attachments">${attachments.map((a,index)=>`<span class="attachment-chip">${icon('paperclip')}${esc(a.name)}<button type="button" data-action="remove-attachment" data-index="${index}" aria-label="Remove ${esc(a.name)}">${icon('close')}</button></span>`).join('')}</div>`:''}<div class="composer-line"><button type="button" class="icon-button" data-action="attach" aria-label="${window.BuddyDesktop?.projectFiles?'Add a shared file':'Attach a file'}">${icon('plus')}</button><textarea id="message-input" aria-label="Message ${esc(target.name)}" placeholder="Message ${g?'the group':esc(a.name)}…" rows="1">${esc(draft)}</textarea><button type="button" class="icon-button mention-button" data-action="mention" aria-label="Mention an agent">${icon('at')}</button>${sendControl(target.id,draft)}</div>${!g?`<div class="composer-model-row">${window.BuddyModels?.slot(a.id)||`<div class="agent-model-slot" data-agent-model="${esc(a.id)}"></div>`}</div>`:''}<input type="file" id="attachment-input" hidden multiple></form><button class="composer-hint" data-action="connection">${esc(connectionLabel())}</button>${a&&BuddyAgentSetup.required(a)&&(state.agentSetup?.[a.id]?.messages||[]).some(m=>m.who==='you')&&!BuddyAgentSetup.active(state,a.id)?`<button type="button" class="composer-hint" data-setup-finish="${esc(a.id)}">Finish setup with what I’ve shared</button>`:''}</div>
   </section>`;
 }
 function startChat() {
@@ -385,7 +394,8 @@ function bindView(){const chatSearch=document.getElementById('chat-search');if(c
 }
 async function sendMessage(retryOf){
   const target=retryOf?state.runs[retryOf]?.target:ui.view.target;
-  if(!target||BuddyChat.active(state,target))return;
+  if(!target||BuddyChat.active(state,target)||BuddyAgentSetup.active(state,target))return;
+  if(BuddyAgentSetup.required(findAgent(target))){await BuddyAgentSetup.send(target);return;}
   if(!window.BuddyDesktop?.sendMessage){showToast('Open the Buddy Mac app to chat with your agents.');return;}
   if(!findAgent(target)&&!findGroup(target)){showToast('This chat is no longer available.');return;}
   try {
@@ -397,17 +407,18 @@ async function sendMessage(retryOf){
 }
 function refreshLiveChat(target){
   const row=[...document.querySelectorAll('.chat-row')].find(x=>x.dataset.id===target),snippet=row?.querySelector('.chat-snippet');
-  if(snippet)snippet.textContent=chatSummary(target,findAgent(target)?.role||'Start a conversation');
+  if(snippet)snippet.textContent=chatSummary(target,findAgent(target)?.role||'Start a conversation');row?.classList.toggle('is-working',agentIsThinking(target));
   refreshTeamworkDetails();
   if(ui.view.kind!=='chat'||ui.view.target!==target)return;
   const body=document.getElementById('chat-body'),nearBottom=body&&body.scrollHeight-body.scrollTop-body.clientHeight<120;
   const focus=document.activeElement,focusId=focus?.id,selectionStart=focus?.selectionStart,selectionEnd=focus?.selectionEnd;
   const messages=document.getElementById('messages');if(messages){const samplesOpen=messages.querySelector('.sample-history')?.open;messages.innerHTML=conversationMessages(state.messages[target]||[]);const examples=messages.querySelector('.sample-history');if(examples&&samplesOpen)examples.open=true;}
-  const button=document.getElementById('send-message'),running=BuddyChat.active(state,target);if(button){if(running&&button.classList.contains('stop-button')&&button.dataset.id===running.runId)button.disabled=running.status==='stopping';else if(!running&&!button.classList.contains('stop-button'))button.disabled=!(state.drafts[target]||'').trim();else button.outerHTML=sendControl(target,state.drafts[target]||'');}
+  const button=document.getElementById('send-message'),running=BuddyChat.active(state,target)||BuddyAgentSetup.active(state,target);if(button){if(running&&button.classList.contains('stop-button')&&button.dataset.id===running.runId)button.disabled=running.status==='stopping';else if(!running&&!button.classList.contains('stop-button'))button.disabled=!(state.drafts[target]||'').trim();else button.outerHTML=sendControl(target,state.drafts[target]||'');}
   const restored=focusId&&document.getElementById(focusId);if(restored&&restored!==focus){restored.focus({preventScroll:true});if(typeof selectionStart==='number')restored.setSelectionRange(selectionStart,selectionEnd);}
   if(nearBottom&&body)body.scrollTop=body.scrollHeight;
 }
 async function stopMessage(runId){
+  if(runId?.startsWith('setup:'))return BuddyAgentSetup.stop(runId.slice(6));
   const run=state.runs[runId];if(!run||!BuddyChat.busy(run.status))return;
   BuddyChat.apply(state,{runId,status:'stopping'});save();refreshLiveChat(run.target);
   try {await window.BuddyDesktop.stopMessage(runId);}
@@ -517,7 +528,7 @@ document.addEventListener('keydown',e=>{
   const modal=document.querySelector('.modal');
   const focusContainer=modal||(ui.mobile?document.querySelector('.sidebar.mobile-open'):null);
   if(e.key==='Escape'){if(modal)closeModal();else if(ui.mobile){ui.mobile=false;render();document.querySelector('.mobile-menu-button')?.focus();}return;}
-  if((e.metaKey||e.ctrlKey)&&e.key==='.'){const running=BuddyChat.active(state,ui.view.target);if(running){e.preventDefault();stopMessage(running.runId);}return;}
+  if((e.metaKey||e.ctrlKey)&&e.key==='.'){const running=BuddyChat.active(state,ui.view.target)||BuddyAgentSetup.active(state,ui.view.target);if(running){e.preventDefault();stopMessage(running.runId);}return;}
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();searchModal();return;}
   if(focusContainer&&e.key==='Tab'){const focusable=[...focusContainer.querySelectorAll('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),a[href]')].filter(x=>x.offsetParent!==null);const first=focusable[0],last=focusable.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}
 });
@@ -528,6 +539,7 @@ window.addEventListener('online',()=>{showToast('You’re back online.');checkCo
 save();
 render();
 BuddyOnboarding.boot();
+BuddyAgentSetup.boot();
 BuddyProposals.boot();
 
 if(window.BuddyDesktop?.activeRuns){

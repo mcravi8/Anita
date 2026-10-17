@@ -16,3 +16,17 @@
 
 .inbox-coverage{font-size:11px;line-height:1.6;margin-top:12px;color:#696373}.inbox-coverage.partial{color:#9a563e}.inbox-coverage summary{cursor:pointer;min-height:32px;padding:5px 0}.inbox-coverage p{margin:7px 0}.inbox-coverage code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;padding:8px 10px;background:#eae7ef;border-radius:7px;color:#514a5e}.inbox-coverage summary:focus-visible{outline:2px solid #a18ace;outline-offset:3px;border-radius:4px}.routine-receipt{display:flex;align-items:center;gap:10px;margin-top:12px;padding:12px 0;border-top:1px solid #e4e0e9;font-size:12px}.routine-receipt>.icon{width:18px;height:18px;flex-shrink:0}.routine-receipt>span{flex:1;min-width:0}.routine-receipt strong,.routine-receipt small{display:block;overflow-wrap:anywhere}.routine-receipt small{font-size:11px;color:#756e80;margin-top:3px}.routine-receipt button{border:0;background:none;color:#7465b4;cursor:pointer;min-height:36px;font:inherit}.routine-receipt button:focus-visible{outline:2px solid #a18ace}
 .routine-result-link{display:flex;align-items:center;gap:5px;font:inherit;font-size:12px;min-height:36px;background:none;border:0;padding:4px 0;color:#7465b4;cursor:pointer}.routine-result-link>.icon{width:13px;height:13px}.routine-result-link:focus-visible{outline:2px solid #a18ace;border-radius:4px}
+
+/* The agent itself communicates real pending work. */
+.agent-thinking{position:relative;display:inline-flex;align-items:center;justify-content:center;width:78px;height:70px;isolation:isolate;vertical-align:middle}
+.agent-thinking>.avatar{width:56px;height:56px;overflow:visible;flex-shrink:0}
+.agent-thinking>.avatar img{transform-origin:50% 72%;animation:buddy-consider 2.6s ease-in-out infinite;will-change:transform}
+.agent-thoughts{position:absolute;top:3px;right:0;display:flex;align-items:flex-end;gap:3px;height:17px;transform:rotate(-18deg)}
+.agent-thoughts i{display:block;width:4px;height:4px;border-radius:50%;background:#b8adcc;animation:buddy-thought 2.6s ease-in-out infinite;opacity:.45}
+.agent-thoughts i:nth-child(2){width:6px;height:6px;animation-delay:.2s}.agent-thoughts i:nth-child(3){width:8px;height:8px;animation-delay:.4s}
+.agent-thinking.small{width:32px;height:28px}.agent-thinking.small>.avatar{width:24px;height:24px}.agent-thinking.small .agent-thoughts{top:-3px;right:-4px;gap:2px;height:8px}.agent-thinking.small .agent-thoughts i{width:2px;height:2px}.agent-thinking.small .agent-thoughts i:nth-child(2){width:3px;height:3px}.agent-thinking.small .agent-thoughts i:nth-child(3){width:4px;height:4px}
+.bot-bubble.thinking-only:has(.reply-content){min-width:78px;background:transparent;padding:2px 2px 6px}
+.chat-row.is-working>.avatar img{animation:buddy-consider 2.6s ease-in-out infinite;transform-origin:50% 72%}
+@keyframes buddy-consider{0%,100%{transform:translateY(0) rotate(-4deg)}30%{transform:translateY(-3px) rotate(5deg)}60%{transform:translateY(-1px) rotate(5deg)}80%{transform:translateY(-3px) rotate(-4deg)}}
+@keyframes buddy-thought{0%,100%{opacity:.3;transform:translateY(1px) scale(.85)}45%,65%{opacity:.9;transform:translateY(-2px) scale(1)}}
+@media(prefers-reduced-motion:reduce){.agent-thinking>.avatar img,.agent-thoughts i,.chat-row.is-working>.avatar img{animation:none;will-change:auto}.agent-thoughts i{opacity:.7}}

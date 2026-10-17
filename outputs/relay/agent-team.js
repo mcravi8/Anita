@@ -97,7 +97,7 @@ const RelayTeam = (() => {
   function createAgent(state,value,{actor='user',sourceProposalId=null}={}) {
     if(actor!=='user')throw new Error('Only you can add an agent to the team.');
     const c=validate(state,value);
-    const agent={id:uid(),name:c.name,role:c.role,description:c.description,avatarShape:c.avatarShape,avatarColor:c.avatarColor,tools:copy(c.tools),status:'Ready to connect',sourceProposalId};
+    const agent={id:uid(),name:c.name,role:c.role,description:c.description,avatarShape:c.avatarShape,avatarColor:c.avatarColor,tools:copy(c.tools),status:'Ready to connect',sourceProposalId,setupStatus:'pending',setupSeed:c.description};
     state.agents.push(agent);
     state.messages[agent.id]=[];
     for(const group of state.groups)if(c.groupIds.includes(group.id)&&!group.members.includes(agent.id))group.members.push(agent.id);

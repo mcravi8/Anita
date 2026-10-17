@@ -9,6 +9,7 @@ import AppKit
     private var stateURL: URL { supportURL.appendingPathComponent("workspace.json") }
     private lazy var conversations = ConversationService(support: supportURL)
     private lazy var ai = BuddyAIRouter(support: supportURL, chatgpt: conversations)
+    private lazy var agentSetup = BuddyAgentSetup(support:supportURL)
     private lazy var teamwork = BuddyTeamService(conversations: ai)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -17,6 +18,7 @@ import AppKit
             NSApp.applicationIconImage = NSImage(contentsOf: icon)
         }
         makeMenus()
+        agentSetup.onEvent = { [weak self] event in self?.deliver(event) }
         conversations.agentPermission = { [weak self] workspace, keys in
             guard let self, let state = try? self.workspaceState(), state["conversationWorkspace"] as? String == workspace,
                   let agents = state["agents"] as? [[String: Any]], !keys.isEmpty else { return false }
@@ -106,6 +108,7 @@ import AppKit
         let stateLiteral = savedState.flatMap { try? JSONSerialization.data(withJSONObject: [$0]) }.flatMap { String(data: $0, encoding: .utf8) } ?? "[null]"
         let bridge = """
         window.BuddyDesktop = Object.freeze({
+          agentSetup: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'agentSetup', payload}),
           agentModels: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'agentModels', payload}),
           providerSettings: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'providerSettings', payload}),
           worker: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'worker', payload}),
@@ -151,7 +154,7 @@ import AppKit
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func applicationWillTerminate(_ notification: Notification) { teamwork.shutdown(); ai.shutdown() }
+    func applicationWillTerminate(_ notification: Notification) { agentSetup.shutdown(); teamwork.shutdown(); ai.shutdown() }
     private func deliver(_ event: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: event), let json = String(data: data, encoding: .utf8) else { return }
         webView?.evaluateJavaScript("window.dispatchEvent(new CustomEvent('buddy-conversation', {detail: \(json)}))", completionHandler: nil)
@@ -225,7 +228,7 @@ import AppKit
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }
     @objc private func about() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.18.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.19.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
@@ -233,6 +236,8 @@ import AppKit
               url.standardizedFileURL.path == Bundle.main.resourceURL?.appendingPathComponent("Web/index.html").standardizedFileURL.path,
               let body = message.body as? [String: Any], let kind = body["kind"] as? String else { replyHandler(nil, "Unsupported request."); return }
         switch kind {
+        case "agentSetup":
+            do {let context=try workspaceContext();replyHandler(try agentSetup.request(workspace:context.workspace,payload:body["payload"] as? [String:Any] ?? [:]),nil)}catch{replyHandler(nil,error.localizedDescription)}
         case "agentModels":
             Task {do {let context=try workspaceContext();let payload=body["payload"] as? [String:Any] ?? [:];replyHandler(try await ai.modelSettings(workspace:context.workspace,agents:context.agents,payload:payload),nil)}catch{replyHandler(nil,error.localizedDescription)}}
         case "providerSettings":
@@ -263,12 +268,16 @@ import AppKit
                 if payload["kind"] as? String == "group" {
                     guard let data = try? Data(contentsOf: stateURL), let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw BuddyFailure(message: "Buddy couldn’t load this group. Reopen the app and try again.") }
                     var request = try BuddyTeamRequest.from(workspace: state, payload: payload)
+                    let agents=state["agents"] as? [[String:Any]] ?? []
+                    guard request.members.allSatisfy({member in agents.first(where:{$0["id"] as? String==member.id})?["setupStatus"] as? String != "pending" || agentSetup.ready(workspace:request.workspace,agent:member.id)}) else {throw BuddyFailure(message:"Finish each agent's setup before starting group work.")}
                     request.fileScope = try conversations.projectFiles.scope(request.workspace)
                     replyHandler(try teamwork.send(request), nil)
                     return
                 }
                 let context = try workspaceContext()
                 guard let agent = payload["agentId"] as? String, context.agents.contains(agent), payload["key"] as? String == context.workspace + ":" + agent else { throw BuddyFailure(message: "This agent is no longer in the workspace. Reopen the chat.") }
+                let currentAgent=(try workspaceState()["agents"] as? [[String:Any]] ?? []).first{$0["id"] as? String==agent}
+                guard currentAgent?["setupStatus"] as? String != "pending" || agentSetup.ready(workspace:context.workspace,agent:agent) else {throw BuddyFailure(message:"Finish this agent's questions or edit its instructions in settings first.")}
                 var options = BuddyTurnOptions()
                 options.fileScope = try conversations.projectFiles.scope(context.workspace)
                 options.actorId = agent
@@ -279,7 +288,9 @@ import AppKit
                 try ai.ensureAgentDefaults(workspace:context.workspace,agents:context.agents)
                 options.historyScope=BuddyHistoryScope(workspace:context.workspace,agent:agent)
                 options.history = BuddyConversationHistory.context(try workspaceState(), target: agent, runId: payload["runId"] as? String ?? "")
-                replyHandler(try ai.send(payload, options: options), nil)
+                var routed=payload
+                if let currentAgent {routed["agent"]=["name":currentAgent["name"] ?? "Buddy","role":currentAgent["role"] ?? "","description":currentAgent["description"] ?? ""]}
+                replyHandler(try ai.send(routed, options: options), nil)
             } catch { replyHandler(nil, error.localizedDescription) }
         case "stopMessage":
             guard let runID = body["runId"] as? String else { replyHandler(nil, "Invalid reply."); return }
@@ -381,7 +392,7 @@ import AppKit
             do {
                 try FileManager.default.createDirectory(at: supportURL, withIntermediateDirectories: true)
                 let previous = try? workspaceState()
-                let protected = try conversations.agentProposals.preserveApprovals(in: state, previous: previous)
+                let protected = try agentSetup.protect(conversations.agentProposals.preserveApprovals(in: state, previous: previous))
                 if let workspace=protected["conversationWorkspace"] as? String,let agents=protected["agents"] as? [[String:Any]] {try ai.ensureAgentDefaults(workspace:workspace,agents:agents.compactMap{$0["id"] as? String})}
                 try JSONSerialization.data(withJSONObject: protected).write(to: stateURL, options: .atomic)
                 if let workspace = state["conversationWorkspace"] as? String, let agents = state["agents"] as? [[String: Any]], let oldAgents = previous?["agents"] as? [[String: Any]] {
@@ -413,7 +424,7 @@ import AppKit
         var status: [String: Any]
         if operation == "status" { return try await ai.status(workspace: workspace) }
         if operation == "select" { status = try await ai.select(workspace: workspace, provider: provider, budget: payload["claudeBudgetUSD"] as? Double) }
-        else if operation == "disconnect" { status = try await ai.disconnect(workspace: workspace, provider: provider) }
+        else if operation == "disconnect" {if provider=="claude"{agentSetup.shutdown()};status = try await ai.disconnect(workspace: workspace, provider: provider) }
         else if ["connect", "reconnect"].contains(operation) {
             guard ["chatgpt", "claude"].contains(provider) else { throw BuddyFailure(message: "Choose ChatGPT or Claude.") }
             if provider == "claude" {

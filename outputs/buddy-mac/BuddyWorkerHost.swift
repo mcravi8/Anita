@@ -171,6 +171,7 @@ import Darwin
         }
         if operation == "create" {
             let id = request["agentId"] as? String ?? ""; let a = try agent(id, workspace: current)
+            guard a["setupStatus"] as? String != "pending" else {throw BuddyWorkerFailure(message:"Finish this agent's setup in their chat before starting background work.")}
             let coding=request["kind"] as? String=="coding"
             if coding {guard (a["tools"] as? [String:Bool])?["projectFiles"] != false else {throw BuddyWorkerFailure(message:"Enable this agent's file access before starting a coding session.")}}
             let choice = try providerSettings.current(current)
@@ -326,6 +327,7 @@ import Darwin
     private func execute(_ job: [String: Any]) async throws {
         let id = job["id"] as! String, workspace = job["workspace"] as! String, agentID = job["agentId"] as! String
         let a = try agent(agentID, workspace: workspace)
+        guard a["setupStatus"] as? String != "pending" else {throw BuddyWorkerFailure(message:"Finish this agent's setup in their chat before running this task.")}
         guard try providerSettings.current(workspace).enabled(job["provider"] as? String ?? "") else { _ = try store.update(id, ["status": "paused", "progress": "This provider is disconnected. Reconnect it in Settings → AI provider, then resume."]); return }
         browser?.close(); browser = nil
         active = id; providerRevision = try providerSettings.current(workspace).revision(job["provider"] as? String ?? ""); authorization = authorizationData(job); stopped = false; startedAt = Date(); runID = UUID().uuidString

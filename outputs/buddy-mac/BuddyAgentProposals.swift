@@ -151,7 +151,7 @@ struct BuddyAgentProposal: Codable {
         saved[index].draft = config; saved[index].revision += 1
         if action == "save" { try persist(saved); return ["proposal": saved[index].payload, "saved": true] }
         var agent = config.payload; agent.removeValue(forKey: "groupIds")
-        agent["id"] = id; agent["status"] = "Ready"; agent["sourceProposalId"] = id; agent["approvedAt"] = now
+        agent["id"] = id; agent["status"] = "Ready"; agent["sourceProposalId"] = id; agent["approvedAt"] = now; agent["setupStatus"] = "pending"; agent["setupSeed"] = config.description
         var agents = current["agents"] as? [[String: Any]] ?? []; agents.append(agent); current["agents"] = agents
         var messages = current["messages"] as? [String: [[String: Any]]] ?? [:]; messages[id] = []; current["messages"] = messages
         var groups = current["groups"] as? [[String: Any]] ?? []

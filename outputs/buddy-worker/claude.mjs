@@ -4,6 +4,8 @@ import {z} from 'zod';
 import {ClaudeSession} from './claude-session.mjs';
 const write=x=>process.stdout.write(JSON.stringify(x)+'\n');
 const host=new ClaudeSession({startup,tool,createSdkMcpServer,fromJSONSchema:z.fromJSONSchema,write});
+process.on('SIGTERM',()=>{host.close();process.exit(0);});
+process.on('SIGINT',()=>{host.close();process.exit(0);});
 for await(const line of createInterface({input:process.stdin})){
   try{
     const value=JSON.parse(line);

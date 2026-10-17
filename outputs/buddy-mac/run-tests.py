@@ -7,6 +7,11 @@ os.environ['CLANG_MODULE_CACHE_PATH'] = str(source.parent.parent / 'work/backgro
 snapshot=tempfile.TemporaryDirectory(prefix='buddy-test-source-')
 shutil.copytree(source,Path(snapshot.name)/'Source',ignore=shutil.ignore_patterns('__pycache__'))
 source=Path(snapshot.name)/'Source'
+with tempfile.TemporaryDirectory(prefix='buddy-agent-setup-',suffix='.noindex') as temp:
+ binary=Path(temp)/'buddy-agent-setup-tests'
+ names=['BuddyAgentSetup.swift','BuddyAISettings.swift','BuddyWorkerProcess.swift','BuddyWorkerCore.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/AgentSetup.swift']
+ subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
+ subprocess.run([str(binary),str(source/'tests/agent-setup-claude.py'),shutil.which('python3')],check=True)
 with tempfile.TemporaryDirectory(prefix='buddy-transport-test-') as temp:
  binary=Path(temp)/'buddy-transport-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyTransport.swift'),str(source/'BuddyConnections.swift'),str(source/'tests/main.swift'),'-o',str(binary)],check=True)
@@ -111,3 +116,5 @@ with tempfile.TemporaryDirectory(prefix='buddy-direct-services-') as temp:
  subprocess.run([str(binary),str(source/'tests/direct-server.py')],check=True)
 
 subprocess.run([sys.executable,str(source/'tests/test_signing.py')],check=True)
+
+subprocess.run([sys.executable,'-m','unittest','discover','-s',str(source/'tests'),'-p','test_reset_agents.py'],check=True)

@@ -5,6 +5,7 @@ A personal AI workspace with configurable agents, individual chats, and group te
 ## Features
 
 - Configurable agents with independent conversations, roles, appearances, instructions, and access settings.
+- Adaptive setup in each new agent's chat; Claude turns the answers into editable job-specific instructions.
 - Group coordination with assignments, dependent handoffs, and one shared response.
 - ChatGPT sign-in through the local Codex app-server, using subscription allowances.
 - Connected services for research, email, and other supported tools, with action reviews.

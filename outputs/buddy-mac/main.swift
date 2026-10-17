@@ -36,6 +36,13 @@ import AppKit
                 return (agent["tools"] as? [String: Bool])?["desktop"] != false
             }
         }
+        conversations.extraToolHandler = { [weak self] tool, args, context in
+            guard let self, tool == "buddy_start_background_task", let id = context["agentId"] as? String else { throw BuddyWorkerFailure(message: "Background work is unavailable for this turn.") }
+            let workspace = try self.workspaceContext()
+            guard workspace.agents.contains(id) else { throw BuddyWorkerFailure(message: "This agent is no longer available.") }
+            _ = try await BuddyWorkerClient.start(support: self.supportURL, workspace: workspace.workspace)
+            return try await BuddyWorkerClient.call(support: self.supportURL, payload: ["operation": "create", "workspace": workspace.workspace, "agentId": id, "requestId": (context["runId"] as? String ?? "") + ":" + (context["callId"] as? String ?? ""), "title": args["title"] ?? "", "goal": args["goal"] ?? "", "kind": args["kind"] ?? "general", "provider": "chatgpt", "budgetUSD": 0])
+        }
         teamwork.onEvent = { [weak self] event in self?.deliver(event) }
         conversations.onEvent = { [weak self] event in
             guard let self else { return }
@@ -85,6 +92,7 @@ import AppKit
         let stateLiteral = savedState.flatMap { try? JSONSerialization.data(withJSONObject: [$0]) }.flatMap { String(data: $0, encoding: .utf8) } ?? "[null]"
         let bridge = """
         window.BuddyDesktop = Object.freeze({
+          worker: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'worker', payload}),
           initialState: \(stateLiteral)[0],
           saveState: value => window.webkit.messageHandlers.buddy.postMessage({kind: 'saveState', value}),
           exportFile: (name, content) => window.webkit.messageHandlers.buddy.postMessage({kind: 'exportFile', name, content}),
@@ -201,7 +209,7 @@ import AppKit
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }
     @objc private func about() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.11.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by your ChatGPT subscription.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.12.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by your ChatGPT subscription.")])
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
@@ -209,6 +217,16 @@ import AppKit
               url.standardizedFileURL.path == Bundle.main.resourceURL?.appendingPathComponent("Web/index.html").standardizedFileURL.path,
               let body = message.body as? [String: Any], let kind = body["kind"] as? String else { replyHandler(nil, "Unsupported request."); return }
         switch kind {
+        case "worker":
+            do {
+                let context = try workspaceContext(); var payload = body["payload"] as? [String: Any] ?? [:]; payload["workspace"] = context.workspace
+                if payload["operation"] as? String == "connectClaude" { replyHandler(try BuddyWorkerClient.connectClaude(workspace: context.workspace), nil); return }
+                if payload["operation"] as? String == "disconnectClaude" { try BuddyClaudeKey.save(nil, workspace: context.workspace); replyHandler(["connected": false], nil); return }
+                Task { do {
+                    if payload["operation"] as? String == "start" { replyHandler(try await BuddyWorkerClient.start(support: supportURL, workspace: context.workspace), nil) }
+                    else { replyHandler(try await BuddyWorkerClient.call(support: supportURL, payload: payload), nil) }
+                } catch { replyHandler(nil, error.localizedDescription) } }
+            } catch { replyHandler(nil, error.localizedDescription) }
         case "connectionStatus":
             Task { do { replyHandler(try await conversations.connection(), nil) } catch { replyHandler(nil, error.localizedDescription) } }
         case "computerStatus":
@@ -240,6 +258,8 @@ import AppKit
                 var options = BuddyTurnOptions()
                 options.fileScope = try conversations.projectFiles.scope(context.workspace)
                 options.actorId = agent
+                options.extraTools = BuddyWorkerClient.tools
+                options.instructions = "If the user explicitly asks you to run a task in the background, use buddy_start_background_task. Pass the full authorized brief and the facts needed to execute it; the worker has separate conversation context. It uses the ChatGPT subscription and current agent permissions, private browser/files, and native human action reviews. Report the returned task title and tell the user results and reviews are in Background work. Don't create background work for ordinary questions, invent tasks, or claim it has finished when only queued."
                 options.proposalScope = BuddyProposalScope(workspace: context.workspace, chat: agent, actorId: agent, replyRunId: payload["runId"] as? String ?? "")
                 options.history = BuddyConversationHistory.context(try workspaceState(), target: agent, runId: payload["runId"] as? String ?? "")
                 replyHandler(try conversations.send(payload, options: options), nil)
@@ -414,8 +434,13 @@ import AppKit
 
 MainActor.assumeIsolated {
     let app = NSApplication.shared
-    let delegate = BuddyApp()
-    app.setActivationPolicy(.regular)
-    app.delegate = delegate
-    withExtendedLifetime(delegate) { app.run() }
+    if CommandLine.arguments.contains("--worker") {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Buddy", isDirectory: true)
+        let delegate = BuddyWorkerHost(support: support)
+        app.setActivationPolicy(.prohibited); app.delegate = delegate
+        withExtendedLifetime(delegate) { app.run() }
+    } else {
+        let delegate = BuddyApp(); app.setActivationPolicy(.regular); app.delegate = delegate
+        withExtendedLifetime(delegate) { app.run() }
+    }
 }

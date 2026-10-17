@@ -31,7 +31,10 @@ struct BuddyFileReceipt: Codable {
     private struct Folder: Codable { let path: String; let id: String }
     private let support: URL
     private let fm = FileManager.default
-    init(support: URL) { self.support = support }
+    private let privateRoot: URL?
+    private let privateFolderID: String?
+    init(support: URL, privateRoot: URL? = nil, privateFolderID: String? = nil) { self.support = support; self.privateRoot = privateRoot; self.privateFolderID = privateFolderID }
+
     private func failure(_ code: String, _ message: String) -> BuddyFileFailure { BuddyFileFailure(code: code, message: message) }
     private func checkedWorkspace(_ workspace: String) throws {
         guard UUID(uuidString: workspace) != nil else { throw failure("invalid_workspace", "This workspace is unavailable. Reopen Buddy.") }
@@ -44,6 +47,7 @@ struct BuddyFileReceipt: Codable {
     }
     private func folder(_ workspace: String) throws -> Folder {
         try checkedWorkspace(workspace)
+        if let privateRoot, let privateFolderID { return Folder(path: privateRoot.path, id: privateFolderID) }
         if let selected = try folders()[workspace] { return selected }
         let root = support.appendingPathComponent("Projects", isDirectory: true).appendingPathComponent(workspace, isDirectory: true)
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -51,10 +55,17 @@ struct BuddyFileReceipt: Codable {
     }
     private func additionalFolders() throws -> [String: [Folder]] {
         let url = support.appendingPathComponent("connected-folders.json")
-        guard fm.fileExists(atPath: url.path) else { return [:] }
+        var saved: [String: [Folder]] = [:]
         do {
-            let saved = try JSONDecoder().decode([String: [Folder]].self, from: Data(contentsOf: url))
-            guard saved.allSatisfy({ UUID(uuidString: $0.key) != nil && $0.value.count <= 12 && Set($0.value.map(\.id)).count == $0.value.count && $0.value.allSatisfy({ UUID(uuidString: $0.id) != nil && $0.path.hasPrefix("/") }) }) else { throw failure("folder_settings", "Invalid connected folders.") }
+            if fm.fileExists(atPath: url.path) { saved = try JSONDecoder().decode([String: [Folder]].self, from: Data(contentsOf: url)) }
+            if privateRoot != nil {
+                let stateURL = support.appendingPathComponent("workspace.json")
+                if let state = try JSONSerialization.jsonObject(with: Data(contentsOf: stateURL)) as? [String: Any], let workspace = state["conversationWorkspace"] as? String {
+                    let original = try folders()[workspace] ?? Folder(path: support.appendingPathComponent("Projects/" + workspace).path, id: workspace)
+                    saved[workspace, default: []].insert(original, at: 0)
+                }
+            }
+            guard saved.allSatisfy({ UUID(uuidString: $0.key) != nil && $0.value.count <= 13 && Set($0.value.map(\.id)).count == $0.value.count && $0.value.allSatisfy({ UUID(uuidString: $0.id) != nil && $0.path.hasPrefix("/") }) }) else { throw failure("folder_settings", "Invalid connected folders.") }
             return saved
         } catch { throw failure("folder_settings", "Buddy couldn’t read its connected folders. Your files haven’t changed.") }
     }
@@ -235,7 +246,7 @@ struct BuddyFileReceipt: Codable {
         catch { throw failure("history_unavailable", "Saved versions are unavailable. Buddy won’t overwrite this file until its version history can be read.") }
     }
     private func persist(_ entries: [BuddyFileReceipt], workspace: String) throws { try JSONEncoder().encode(entries).write(to: historyRoot(workspace).appendingPathComponent("receipts.json"), options: .atomic) }
-    // All Buddy writes are serialized on the main actor. A full-content fingerprint
+    // Buddy writers share a process lock as well as main-actor serialization. A full-content fingerprint
     // detects stale parallel edits and edits made outside Buddy before the commit.
     func write(_ scope: BuddyFileScope, path: String, content: String, expectedVersion: String, actor: String, actorName: String, kind: String? = nil) throws -> [String: Any] {
         let data = Data(content.utf8)
@@ -245,6 +256,13 @@ struct BuddyFileReceipt: Codable {
         return try writeBytes(scope,path:path,data:data,expectedVersion:expectedVersion,actor:actor,actorName:actorName,kind:kind)
     }
     func writeBytes(_ scope: BuddyFileScope, path: String, data: Data, expectedVersion: String, actor: String, actorName: String, kind: String? = nil) throws -> [String:Any] {
+        let lockURL = support.appendingPathComponent("project-write.lock")
+        try fm.createDirectory(at: support, withIntermediateDirectories: true)
+        let lock = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard lock >= 0 else { throw failure("write_failed", "Couldn’t lock the shared file history.") }
+        defer { Darwin.close(lock) }
+        guard flock(lock, LOCK_EX) == 0 else { throw failure("write_failed", "Couldn’t lock the shared file history.") }
+        defer { flock(lock, LOCK_UN) }
         guard data.count <= Self.maximumBytes else { throw failure("file_too_large", "Buddy supports files up to 32 MB.") }
         let (fd, name) = try parent(scope, path, create: expectedVersion.isEmpty); defer { Darwin.close(fd) }
         let previous = try bytes(fd, name), currentHash = Self.hash(previous)

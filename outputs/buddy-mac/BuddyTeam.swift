@@ -17,6 +17,8 @@ struct BuddyTurnOptions {
     var history = ""
     var actorId = ""
     var proposalScope: BuddyProposalScope? = nil
+    var extraTools: [[String: Any]] = []
+    var proposalsEnabled = true
 }
 
 @MainActor protocol BuddyConversationSending: AnyObject {

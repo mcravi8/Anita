@@ -11,6 +11,8 @@ A personal AI workspace with configurable agents, individual chats, and group te
 - Connected-folder files with version checks, recoverable edits, and in-app previews.
 - Word paragraph editing, Excel cell and formula editing, PDF forms and annotations, Markdown, HTML, and code.
 - Reviewed control of applications on the connected Mac.
+- Durable background tasks with a separate local browser and files, saved results, approvals, and pause/resume.
+- Optional Claude Agent SDK connection using Console/API credits with explicit task budgets.
 
 Independent cloud computers and an always-on remote worker are future work. The local Mac must remain available for local operations. The browser-only frontend is a preview; real conversations and tools run in the native app.
 
@@ -19,13 +21,15 @@ Independent cloud computers and an always-on remote worker are future work. The 
 | Directory | Contents |
 | --- | --- |
 | `outputs/buddy-mac/` | Native Swift app, scoped tools, build script, and native tests |
+| `outputs/buddy-worker/` | Private Playwright browser bridge, optional Claude Agent SDK bridge, pinned dependencies and tests |
 | `outputs/relay/` | Web frontend, assets, vendored dependencies, and frontend tests |
 
 ## Build the Mac app
 
-Requires macOS 13 or later, Xcode command-line tools, and Python 3.
+Requires macOS 13 or later, Xcode command-line tools, Python 3, Node.js 22+, and Chrome for the worker browser.
 
 ```sh
+npm ci --ignore-scripts --no-audit --no-fund --prefix outputs/buddy-worker
 python3 outputs/buddy-mac/build.py
 ```
 
@@ -45,6 +49,7 @@ Frontend checks require Node.js:
 
 ```sh
 node --test outputs/relay/*.test.js
+node --test outputs/buddy-worker/test/*.test.mjs
 ```
 
 Native checks require macOS and Xcode command-line tools:
@@ -62,3 +67,5 @@ Runtime conversations, credentials, connected-folder registrations, file history
 PDF editing covers forms, annotations, page rotation, and additional pages; existing printed text is preserved. Excel recalculates formulas when opened in Excel. See the native documentation for format, size, access, and preview limits.
 
 Third-party frontend dependency licenses are included in `outputs/relay/vendor/`.
+
+See the [background worker guide](outputs/buddy-worker/README.md) for startup, provider connections, approvals, local isolation, recovery, and budget limits.

@@ -1,6 +1,8 @@
 from pathlib import Path
 import shutil,subprocess,tempfile
 source=Path(__file__).resolve().parent
+import os
+os.environ['CLANG_MODULE_CACHE_PATH'] = str(source.parent.parent / 'work/background-worker/test-module-cache')
 with tempfile.TemporaryDirectory(prefix='buddy-transport-test-') as temp:
  binary=Path(temp)/'buddy-transport-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyTransport.swift'),str(source/'BuddyConnections.swift'),str(source/'tests/main.swift'),'-o',str(binary)],check=True)
@@ -40,3 +42,15 @@ with tempfile.TemporaryDirectory(prefix='buddy-documents-test-') as temp:
  binary=Path(temp)/'buddy-document-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyDocuments.swift'),str(source/'BuddyProjectFiles.swift'),str(source/'tests/Documents.swift'),'-o',str(binary)],check=True)
  subprocess.run([str(binary),str(Path(temp)/'fixtures')],check=True)
+
+with tempfile.TemporaryDirectory(prefix='buddy-worker-test-') as temp:
+ binary=Path(temp)/'buddy-worker-tests'
+ names=['BuddyWorkerCore.swift','BuddyConnections.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','tests/Worker.swift']
+ subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
+ subprocess.run([str(binary)],check=True)
+
+with tempfile.TemporaryDirectory(prefix='buddy-worker-integration-') as temp:
+ binary=Path(temp)/'buddy-worker-integration'
+ names=['BuddyWorkerCore.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyWorkerClient.swift','ConversationService.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/WorkerIntegration.swift']
+ subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
+ subprocess.run([str(binary),str(source/'tests/worker-server.py')],check=True)

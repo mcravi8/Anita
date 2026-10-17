@@ -6,6 +6,7 @@
 /outputs/*
 !/outputs/buddy-mac/
 !/outputs/relay/
+!/outputs/buddy-worker/
 
 # Generated binaries and temporary build files.
 **/*.app/

@@ -1,0 +1,46 @@
+import Foundation
+@main struct WorkerTests {
+    @MainActor static func require(_ value: Bool, _ message: String) { if !value { fputs("FAILED: \(message)\n", stderr); exit(1) } }
+    @MainActor static func main() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("buddy-worker-tests-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspace = UUID().uuidString, agent = UUID().uuidString
+        let store = try BuddyWorkerStore(directory: root.appendingPathComponent("Worker"))
+        let first = try store.create(workspace: workspace, agent: agent, requestId: "once", title: "Fixture task", goal: "Research only", kind: "research", provider: "chatgpt", budget: 0), id = first["id"] as! String
+        let duplicate = try store.create(workspace: workspace, agent: agent, requestId: "once", title: "Other title", goal: "Other brief", kind: "research", provider: "chatgpt", budget: 0)
+        require(duplicate["id"] as? String == id && store.jobs.count == 1, "unknown response retry is idempotent")
+        try store.update(id, ["status": "waiting_review", "result": "Saved partial work", "reviews": [["id": "pending", "status": "pending"], ["id": "sent", "status": "answered"]]])
+        let recovered = try BuddyWorkerStore(directory: root.appendingPathComponent("Worker")), job = try recovered.job(id)
+        require(job["status"] as? String == "interrupted" && job["result"] as? String == "Saved partial work", "restart keeps work and never replays an active send")
+        let reviews = job["reviews"] as! [[String: Any]]
+        require(reviews[0]["status"] as? String == "expired" && reviews[1]["status"] as? String == "uncertain", "old approvals expire and accepted actions become uncertain")
+        _ = try recovered.resume(id); require(try recovered.job(id)["status"] as? String == "queued", "explicit resume queues saved work")
+        try recovered.setPaused(true); require(try BuddyWorkerStore(directory: root.appendingPathComponent("Worker")).paused, "queue pause survives restart")
+        var invalid = false; do { _ = try store.create(workspace: workspace, agent: agent, requestId: "invalid", title: "x", goal: "x", kind: "email", provider: "claude", budget: 1000) } catch { invalid = true }; require(invalid,"invalid budget cannot enter queue")
+        let support = root.appendingPathComponent("Data"), f = BuddyProjectFiles(support: support)
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: ["conversationWorkspace": workspace]).write(to: support.appendingPathComponent("workspace.json"))
+        let shared = try f.scope(workspace), own = root.appendingPathComponent("Private")
+        try FileManager.default.createDirectory(at: own, withIntermediateDirectories: true)
+        let worker = BuddyProjectFiles(support: support, privateRoot: own, privateFolderID: id), local = try worker.scope(workspace)
+        _ = try worker.write(local, path: "report.md", content: "Private result", expectedVersion: "", actor: agent, actorName: "Fixture")
+        require(!FileManager.default.fileExists(atPath: support.appendingPathComponent("Projects/" + workspace + "/report.md").path), "task files do not leak into the shared primary folder")
+        _ = try f.write(shared, path: "common.md", content: "First", expectedVersion: "", actor: agent, actorName: "Fixture")
+        let read = try worker.read(shared, path: "common.md")
+        _ = try f.write(shared, path: "common.md", content: "New foreground edit", expectedVersion: read["version"] as! String, actor: agent, actorName: "Fixture")
+        var stale = false; do { _ = try worker.write(shared, path: "common.md", content: "Stale background edit", expectedVersion: read["version"] as! String, actor: agent, actorName: "Fixture") } catch { stale = true }
+        let latest = try f.read(shared, path: "common.md"); require(stale && latest["content"] as? String == "New foreground edit", "background conflict preserves the foreground edit")
+        let other = root.appendingPathComponent("Other"); try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let connected = try f.addFolder(workspace, to: other), otherScope = BuddyFileScope(workspace: workspace, folderId: connected["folderId"] as! String)
+        _ = try worker.write(otherScope, path: "a.md", content: "Allowed", expectedVersion: "", actor: agent, actorName: "Fixture")
+        try f.removeFolder(workspace, folderId: otherScope.folderId)
+        var removed = false; do { _ = try worker.read(otherScope,path:"a.md") } catch { removed = true }; require(removed, "worker rechecks connected folder removal on every access")
+        let connection = BuddyConnection(id:"web",name:"Search",enabled:true,callable:true,tools:[["name":"search","isReadOnly":true]])
+        let grants = BuddyConnectionGrants(support: support), otherGrants = BuddyConnectionGrants(support: support)
+        _ = try grants.allowed(for: workspace + ":" + agent, catalog: [connection]); try otherGrants.set(key: workspace + ":" + agent, connection: "web", allowed: false)
+        require(try grants.allowed(for: workspace + ":" + agent, catalog: [connection]).isEmpty, "worker notices access removed by another process")
+        print("PASS: durable queue, idempotency, restart/no replay, expired approvals, pause, spending validation, private files, merge conflicts, current folder and service grants")
+        try Data("broken".utf8).write(to: root.appendingPathComponent("Worker/tasks.json"))
+        var corrupt = false; do { _ = try BuddyWorkerStore(directory: root.appendingPathComponent("Worker")) } catch { corrupt = true }; require(corrupt, "corrupt queue fails closed")
+    }
+}

@@ -25,10 +25,13 @@ struct BuddyFailure: LocalizedError {
     private var catalogFetched: Date?
     private var catalogTask: Task<[BuddyConnection], Error>?
     private var sessionPolicies: [String: String] = [:]
-    private lazy var grants = BuddyConnectionGrants(support: support)
+    private lazy var grants = BuddyConnectionGrants(support: grantsSupport)
+    private let grantsSupport: URL
+    var extraToolHandler: ((String, [String: Any], [String: Any]) async throws -> [String: Any])?
     let projectFiles: BuddyProjectFiles
     let agentProposals: BuddyAgentProposals
     let computer: BuddyComputer
+    var connectionFilter: ((BuddyConnection) -> Bool)?
     var computerPermission: ((String, [String]) -> Bool)?
     private var computerDecisions: [String: (Bool) -> Void] = [:]
     private var activeComputerCalls: [String: (run: String, app: String?, action: String?)] = [:]
@@ -47,8 +50,9 @@ struct BuddyFailure: LocalizedError {
     private var sessionsURL: URL { support.appendingPathComponent("conversations.json") }
     private var workingURL: URL { support.appendingPathComponent("Conversations", isDirectory: true) }
 
-    init(support: URL, projectFiles: BuddyProjectFiles? = nil, executable: URL? = nil) {
+    init(support: URL, projectFiles: BuddyProjectFiles? = nil, executable: URL? = nil, grantsSupport: URL? = nil) {
         self.support = support
+        self.grantsSupport = grantsSupport ?? support
         self.executableOverride = executable
         self.projectFiles = projectFiles ?? BuddyProjectFiles(support: support)
         self.agentProposals = BuddyAgentProposals(support: support)
@@ -137,7 +141,7 @@ struct BuddyFailure: LocalizedError {
                 }
             }
         }
-        _ = try await request("initialize", ["clientInfo": ["name": "buddy_desktop", "title": "Buddy", "version": "0.11.0"], "capabilities": ["experimentalApi": true]])
+        _ = try await request("initialize", ["clientInfo": ["name": "buddy_desktop", "title": "Buddy", "version": "0.12.0"], "capabilities": ["experimentalApi": true]])
         try write(["method": "initialized"])
         let config = try await request("config/read", ["includeLayers": false])["config"] as? [String: Any] ?? [:]
         restrictions = ["project_doc_max_bytes": 0, "web_search": "disabled", "developer_instructions": ""]
@@ -257,7 +261,7 @@ struct BuddyFailure: LocalizedError {
         guard !runs.values.contains(where: { $0["key"] as? String == key && ["starting", "answering", "stopping"].contains($0["status"] as? String ?? "") }) else {
             throw BuddyFailure(message: "This agent is already answering. Stop the reply or wait for it to finish.")
         }
-        runs[runID] = ["runId": runID, "key": key, "status": "starting", "text": "", "items": [String: String](), "order": [String](), "cancelled": false, "internal": options.internalRun, "finalOnly": options.finalAnswerOnly, "phases": [String: String](), "permissionKeys": options.permissionKeys ?? [key], "files": [[String: Any]](), "agentName": name, "agentId": options.actorId]
+        runs[runID] = ["runId": runID, "key": key, "status": "starting", "text": "", "items": [String: String](), "order": [String](), "cancelled": false, "internal": options.internalRun, "finalOnly": options.finalAnswerOnly, "phases": [String: String](), "permissionKeys": options.permissionKeys ?? [key], "files": [[String: Any]](), "agentName": name, "agentId": options.actorId, "proposalsEnabled": options.proposalsEnabled, "extraTools": options.extraTools.compactMap { $0["name"] as? String }]
         if let scope = options.fileScope { runs[runID]?["fileScope"] = scope }
         if let scope = options.proposalScope { runs[runID]?["proposalScope"] = scope }
         Task {
@@ -274,16 +278,17 @@ struct BuddyFailure: LocalizedError {
                 if isCancelled(runID) { finish(runID, status: "stopped"); return }
                 guard !invalidActionHistory else { throw BuddyFailure(message: "Buddy couldn’t verify its saved action history. Previous actions are preserved; restore connected-actions.json before trying again.") }
                 let apps = try await loadCatalog()
-                let allowed = options.toolsEnabled ? try grants.sharedAllowed(keys: options.permissionKeys ?? [key], catalog: apps) : []
-                let usable = apps.filter { allowed.contains($0.id) && $0.available }
+                var allowed = options.toolsEnabled ? try grants.sharedAllowed(keys: options.permissionKeys ?? [key], catalog: apps) : Set<String>()
+                if let connectionFilter { allowed = allowed.intersection(apps.filter(connectionFilter).map(\.id)) }
+                var usable = apps.filter { allowed.contains($0.id) && $0.available }
                 runs[runID]?["allowedApps"] = Array(allowed)
                 let computerWorkspace = options.proposalScope?.workspace ?? options.fileScope?.workspace ?? options.fileContext?.workspace
                 let computerAllowed = computer.enabled && computerWorkspace.map { computerPermission?($0, options.permissionKeys ?? [key]) == true } == true
                 let computerUsable = computerAllowed && options.toolsEnabled
                 if let workspace = computerWorkspace { runs[runID]?["computerWorkspace"] = workspace }
                 runs[runID]?["computerEnabled"] = computerUsable
-                let dynamicTools = (computerUsable ? BuddyComputer.tools : []) + (options.fileScope != nil ? BuddyProjectFiles.tools : []) + (options.proposalScope != nil ? BuddyAgentProposals.tools : [])
-                let policy = (!dynamicTools.isEmpty ? "native-buddy-tools-v5:\(computerUsable):" : "") + BuddyConnectionPolicy.fingerprint(catalog: apps, allowed: allowed)
+                let dynamicTools = (computerUsable ? BuddyComputer.tools : []) + (options.fileScope != nil ? BuddyProjectFiles.tools : []) + (options.proposalScope != nil && options.proposalsEnabled ? BuddyAgentProposals.tools : []) + options.extraTools
+                let policy = (!dynamicTools.isEmpty ? "native-buddy-tools-v6:\(computerUsable):\(dynamicTools.compactMap { $0["name"] as? String }.sorted().joined(separator: ",")):" : "") + BuddyConnectionPolicy.fingerprint(catalog: apps, allowed: allowed)
                 var config = restrictions
                 config["apps"] = BuddyConnectionPolicy.configuration(catalog: apps, allowed: allowed)
                 config["features.apps"] = !usable.isEmpty
@@ -298,7 +303,7 @@ struct BuddyFailure: LocalizedError {
                     params["ephemeral"] = true
                     if !dynamicTools.isEmpty { params["dynamicTools"] = dynamicTools }
                     thread = try await request("thread/start", params)
-                } else if !dynamicTools.isEmpty && !(sessionPolicies[key]?.hasPrefix("native-buddy-tools-v5:\(computerUsable):") ?? false) {
+                } else if !dynamicTools.isEmpty && !(sessionPolicies[key]?.hasPrefix("native-buddy-tools-v6:\(computerUsable):\(dynamicTools.compactMap { $0["name"] as? String }.sorted().joined(separator: ",")):") ?? false) {
                     params["dynamicTools"] = dynamicTools
                     thread = try await request("thread/start", params)
                     migratedHistory = options.history
@@ -311,7 +316,10 @@ struct BuddyFailure: LocalizedError {
                 let effective = try await request("app/installed", ["threadId": threadID, "forceRefresh": false])["apps"] as? [[String: Any]] ?? []
                 let permittedIDs = Set(usable.map(\.id))
                 guard effective.allSatisfy({ $0["callable"] as? Bool != true || permittedIDs.contains($0["id"] as? String ?? "") }) else { throw BuddyFailure(message: "Buddy couldn’t verify this agent’s connection access. Refresh Connections and try again.") }
-                guard permittedIDs.allSatisfy({ id in effective.contains { $0["id"] as? String == id && $0["callable"] as? Bool == true } }) else { throw BuddyFailure(message: "An allowed connection isn’t usable in this chat. Refresh Connections and try again.") }
+                // A temporarily offline service must not prevent unrelated tools or plain replies.
+                // Keep the full authorized grant set for review-time revocation checks, but
+                // only advertise services actually callable in this conversation.
+                usable = usable.filter { app in effective.contains { $0["id"] as? String == app.id && $0["callable"] as? Bool == true } }
                 if !options.internalRun {
                     sessions[key] = threadID
                     sessionPolicies[key] = policy
@@ -323,7 +331,7 @@ struct BuddyFailure: LocalizedError {
                 // configuration as a developer item so edits take effect even without an app restart.
                 let fileAccess = (options.fileScope ?? options.fileContext).map { scope in filePermission?(scope.workspace, options.permissionKeys ?? [key]) == true } ?? false
                 let fileGuide = fileAccess && options.fileScope == nil ? "Shared project-file access is enabled for the group’s member workers. This coordination or synthesis turn has no file tools itself. Plan requested real file work for the authorized workers; do not mistake the absence of tools in this planning step for disabled worker access. In synthesis, rely on the supplied verified save receipts." : fileAccess ? "Project file tools are available: text/Markdown/HTML/code up to 1 MB; Word DOCX paragraph creation/edits; Excel XLSX sheet/cell/formula creation/edits; PDF creation, form filling, annotations, page rotation/appending up to 32 MB; and raw base64 byte tools for any file format up to 1 MB. Use buddy_create_document and buddy_edit_document for Office/PDF. PDFs preserve existing printed text; signed/protected documents may be preview-only. Excel formulas are recalculated by Excel on open, not by Buddy. New and saved documents have in-app previews. Work only in user-connected folders. Read existing files before editing and use their current version; if file_changed, reread and merge. Claim saved files only when the tool returns saved=true. Use buddy_list_folders to discover additional connected folders, then pass their folderId to file tools. Do not read or write unrelated files. No deletion or access outside connected folders. If a requested folder is missing, ask the user to connect it using Files → Folder & access → Connect another folder." : "Project-file access is disabled for this request. Do not invoke Buddy file tools."
-                let proposalGuide = try options.proposalScope.map { scope in "Use buddy_propose_agent when the user asks for a new teammate or a clear missing specialist would help. The tool saves a pending suggestion only: the user must review and approve it. Never claim they joined, are working, or have been delegated work before approval. Prefer existing registered agents; do not repropose declined suggestions unless explicitly asked. Shape IDs are star, pebble, cube, clover; color IDs are lilac, blue (light blue), peach, mint (green), red (autumn red), gold (yellow), cobalt (blue).\n" + (try agentProposals.context(scope)) } ?? "Agent suggestions are unavailable in this step."
+                let proposalGuide = try (options.proposalsEnabled ? options.proposalScope : nil).map { scope in "Use buddy_propose_agent when the user asks for a new teammate or a clear missing specialist would help. The tool saves a pending suggestion only: the user must review and approve it. Never claim they joined, are working, or have been delegated work before approval. Prefer existing registered agents; do not repropose declined suggestions unless explicitly asked. Shape IDs are star, pebble, cube, clover; color IDs are lilac, blue (light blue), peach, mint (green), red (autumn red), gold (yellow), cobalt (blue).\n" + (try agentProposals.context(scope)) } ?? "Agent suggestions are unavailable in this step."
                 let previousActions = inputRecords.values.filter { $0["workspace"] as? String == options.proposalScope?.workspace && $0["chat"] as? String == options.proposalScope?.chat && ["answered", "uncertain", "completed"].contains($0["status"] as? String ?? "") }.suffix(20).map { record in
                     ["status": record["status"] ?? "uncertain", "tool": record["tool"] ?? [:], "finishedAt": record["finishedAt"] ?? NSNull(), "answeredAt": record["answeredAt"] ?? NSNull()] as [String: Any]
                 }
@@ -471,7 +479,8 @@ struct BuddyFailure: LocalizedError {
             throw BuddyFailure(message: "This review is no longer waiting. Nothing was approved by this click.")
         }
         // An access change is durable before interruption; validate it again at commitment.
-        let allowed = try grants.sharedAllowed(keys: keys, catalog: catalog)
+        var allowed = try grants.sharedAllowed(keys: keys, catalog: catalog)
+        if let connectionFilter { allowed = allowed.intersection(catalog.filter(connectionFilter).map(\.id)) }
         guard allowed == Set(run["allowedApps"] as? [String] ?? []) else { cancelInput(id); throw BuddyFailure(message: "Connection access changed. Ask the agent again with the current settings.") }
         let cancel = payload["cancel"] as? Bool == true
         let answers = payload["answers"] as? [String: [String]] ?? [:]
@@ -543,7 +552,8 @@ struct BuddyFailure: LocalizedError {
                   toolInputs.count < 24, inputRecords.count < 10000 else {
                 throw BuddyFailure(message: "Buddy could not display this connection’s review safely. No action was approved. Manage unsupported connection prompts in ChatGPT.")
             }
-            let allowed = try grants.sharedAllowed(keys: keys, catalog: catalog)
+            var allowed = try grants.sharedAllowed(keys: keys, catalog: catalog)
+        if let connectionFilter { allowed = allowed.intersection(catalog.filter(connectionFilter).map(\.id)) }
             guard allowed.contains(connector), Set(run["allowedApps"] as? [String] ?? []).contains(connector) else {
                 throw BuddyFailure(message: "This agent no longer has access to the requested connection. No action was approved.")
             }
@@ -587,7 +597,8 @@ struct BuddyFailure: LocalizedError {
             let preview = (run["toolPreviews"] as? [String: [String: Any]])?[itemID] ?? [:]
             let request = try BuddyToolInput(rpcID: rpcID, executionRunId: runID, replyRunId: scope.replyRunId, workspace: scope.workspace, chat: scope.chat, agentId: scope.actorId, agentName: run["agentName"] as? String ?? "Agent", params: params, tool: preview)
             if let connector = preview["connectorId"] as? String, !connector.isEmpty {
-                let allowed = try grants.sharedAllowed(keys: keys, catalog: catalog)
+                var allowed = try grants.sharedAllowed(keys: keys, catalog: catalog)
+        if let connectionFilter { allowed = allowed.intersection(catalog.filter(connectionFilter).map(\.id)) }
                 guard allowed.contains(connector) else { throw BuddyFailure(message: "This agent no longer has access to the requested connection.") }
             }
             guard inputRecords.count < 10000 else { throw BuddyFailure(message: "Buddy’s action history is full. No action was approved.") }
@@ -632,12 +643,22 @@ struct BuddyFailure: LocalizedError {
                   let turnID = run["turnId"] as? String, BuddyTurnScope.matches(params, turnID: turnID),
                   let tool = params["tool"] as? String, (params["namespace"] == nil || params["namespace"] is NSNull),
                   let arguments = params["arguments"] as? [String: Any] else { throw BuddyFileFailure(code: "access_removed", message: "This reply is no longer active or cannot use this tool. Do not retry tools in this turn.") }
+            if (run["extraTools"] as? [String] ?? []).contains(tool), let handler = extraToolHandler {
+                let count = (run["extraCalls"] as? Int ?? 0) + 1
+                guard count <= 150 else { throw BuddyFailure(message: "This task reached its browser-operation limit. Finish with saved results.") }
+                runs[runID]?["extraCalls"] = count
+                var context = run; context["callId"] = params["callId"] ?? ""; context["workspace"] = (run["fileScope"] as? BuddyFileScope)?.workspace ?? ""
+                Task {
+                    do { self.answerFileCall(message, result: try await handler(tool, arguments, context), success: true) }
+                    catch { self.answerFileCall(message, result: ["error": error.localizedDescription], success: false) }
+                }; return
+            }
             if tool.hasPrefix("buddy_desktop_") {
                 guard params["threadId"] as? String == run["threadId"] as? String else { throw BuddyFailure(message: "This computer request belongs to another conversation.") }
                 Task { await self.handleComputerCall(message, runID: runID, tool: tool, args: arguments) }; return
             }
             if tool == "buddy_propose_agent" {
-                guard let scope = run["proposalScope"] as? BuddyProposalScope, let callId = params["callId"] as? String else { throw BuddyProposalFailure(message: "This turn cannot suggest agents.") }
+                guard run["proposalsEnabled"] as? Bool == true, let scope = run["proposalScope"] as? BuddyProposalScope, let callId = params["callId"] as? String else { throw BuddyProposalFailure(message: "This turn cannot suggest agents.") }
                 let result = try agentProposals.propose(scope, executionRunId: runID, callId: callId, arguments: arguments)
                 if let proposal = result["proposal"] as? [String: Any] { onEvent?(["type": "proposal", "runId": scope.replyRunId, "proposal": proposal, "internal": run["internal"] ?? false]) }
                 answerFileCall(message, result: result, success: true); return

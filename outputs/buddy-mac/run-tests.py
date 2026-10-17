@@ -81,6 +81,11 @@ with tempfile.TemporaryDirectory(prefix='buddy-inbox-review-') as temp:
  subprocess.run(['xcrun','swiftc',str(source/'BuddyInboxReview.swift'),str(source/'tests/InboxReview.swift'),'-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)
 
+with tempfile.TemporaryDirectory(prefix='buddy-prepared-inbox-') as temp:
+ binary=Path(temp)/'prepared-tests'
+ subprocess.run(['xcrun','swiftc',str(source/'BuddyInboxReview.swift'),str(source/'tests/PreparedInbox.swift'),'-o',str(binary)],check=True)
+ subprocess.run([str(binary)],check=True)
+
 with tempfile.TemporaryDirectory(prefix='buddy-routines-') as temp:
  binary=Path(temp)/'routine-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyWorkerCore.swift'),str(source/'tests/Routines.swift'),'-o',str(binary)],check=True)
@@ -91,5 +96,11 @@ with tempfile.TemporaryDirectory(prefix='buddy-inbox-rpc-') as temp:
  names=['ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/InboxIntegration.swift']
  subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
  subprocess.run([str(binary),str(source/'tests/inbox-server.py')],check=True)
+
+with tempfile.TemporaryDirectory(prefix='buddy-direct-services-') as temp:
+ binary=Path(temp)/'direct-tests'
+ names=['ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyConnections.swift','BuddyToolInput.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/DirectServices.swift']
+ subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
+ subprocess.run([str(binary),str(source/'tests/direct-server.py')],check=True)
 
 subprocess.run([sys.executable,str(source/'tests/test_signing.py')],check=True)

@@ -11,6 +11,7 @@ import Security
     private let runtimeOverride: URL?
     init(resource: URL? = nil, runtime: URL? = nil) { self.resourceOverride=resource; self.runtimeOverride=runtime }
     var onEvent: (([String: Any]) -> Void)?
+    var isRunning: Bool { process?.isRunning == true }
     static var runtime: URL? {
         ["/usr/local/bin/node", "/opt/homebrew/bin/node"].first(where: { FileManager.default.isExecutableFile(atPath: $0) }).map(URL.init(fileURLWithPath:))
     }
@@ -33,7 +34,7 @@ import Security
         p.environment = environment; p.standardInput = incoming; p.standardOutput = outgoing; p.standardError = FileHandle.nullDevice
         try p.run(); process = p; input = incoming.fileHandleForWriting
         let reader = outgoing.fileHandleForReading
-        DispatchQueue.global(qos: .utility).async { BuddyPipeReader.read(reader) { data in DispatchQueue.main.async { [weak self] in self?.receive(data) } }; DispatchQueue.main.async { [weak self] in self?.ended() } }
+        DispatchQueue.global(qos: .utility).async { BuddyPipeReader.read(reader) { data in DispatchQueue.main.async { [weak self] in guard self?.process === p else{return};self?.receive(data) } }; DispatchQueue.main.async { [weak self] in guard self?.process === p else{return};self?.process=nil;self?.input=nil;self?.ended() } }
     }
     func send(_ value: [String: Any]) throws {
         guard let input, process?.isRunning == true else { throw BuddyWorkerFailure(message: "The worker’s browser or Claude process stopped. Check the task before retrying.") }

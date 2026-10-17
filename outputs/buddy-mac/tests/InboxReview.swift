@@ -57,6 +57,28 @@ import Foundation
         require(BuddyInboxReview.assessmentQuery("Find all outstanding assessments in my emails",role:"Email monitor",history:"") != nil,"broad assessment requests get a recorded targeted preflight")
         require(BuddyInboxReview.assessmentQuery("Check only the last 100 emails for assessments",role:"Email monitor",history:"")==nil,"explicit strict scope is never silently expanded")
         var rejected=false;do{_ = try BuddyInboxReview.message(["id":"other","payload":[:]],expected:"expected")}catch{rejected=true};require(rejected,"mismatched message IDs cannot become read evidence")
+        // Controlled network delays prove overlap, stable ordering and bounded concurrency.
+        access=true;var inFlight=0,peak=0
+        let start=Date()
+        let parallel=try await reviews.review(workspace:workspace,agent:agent,runID:UUID().uuidString,query:"fixture",purpose:"Concurrency",maxReads:8,allowed:{access}) {tool,args in
+            if tool=="get_profile" {return ["email_address":mailbox]}
+            if tool=="search_email_ids" {return ["message_ids":(1...8).map{"parallel-\($0)"}]}
+            inFlight+=1;peak=max(peak,inFlight);defer{inFlight-=1}
+            let id=args["message_id"] as! String
+            try await Task.sleep(nanoseconds:id.hasSuffix("1") ? 120_000_000:80_000_000)
+            return try await call(tool,args)
+        }
+        let duration=Date().timeIntervalSince(start)
+        require(peak==4 && duration<0.6,"four independent reads overlap rather than eight serial network waits")
+        require((parallel["messages"] as! [[String:Any]]).compactMap{$0["id"] as? String}==(1...8).map{"parallel-\($0)"},"out-of-order completions preserve deterministic source order")
+        var started=0
+        let revokedBatch=try await reviews.review(workspace:workspace,agent:agent,runID:UUID().uuidString,query:"fixture",purpose:"Revoked in flight",allowed:{access}) {tool,args in
+            if tool=="get_profile" {return ["email_address":mailbox]}
+            if tool=="search_email_ids" {return ["message_ids":(1...8).map{"parallel-\($0)"}]}
+            started+=1;try await Task.sleep(nanoseconds:30_000_000);access=false;return try await call(tool,args)
+        }
+        require(started==4 && (revokedBatch["messages"] as? [[String:Any]])?.isEmpty==true && (revokedBatch["coverage"] as? [String:Any])?["unread"] as? Int==8,"in-flight revocation discards bodies and prevents a next batch")
+        print("Concurrent fixture: 8 delayed reads in \(String(format:"%.3f",duration))s, peak \(peak) requests; source order preserved.")
         print("PASS: paginated source review, Zopa beyond 100, full MIME body, receipts without bodies, bounded partial scope, routine memory, failed-model retry, read-gap retry, account isolation and live access revocation")
     }
 }

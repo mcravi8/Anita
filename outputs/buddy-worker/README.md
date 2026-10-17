@@ -10,7 +10,7 @@ Before building, install Node.js 22+, Chrome, and the supported Codex CLI with C
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund --prefix outputs/buddy-worker
-python3 outputs/buddy-mac/build.py
+python3 outputs/buddy-mac/build.py --install
 ```
 
 The app packages pinned worker dependencies; no browser download is needed. The Claude SDK's native runtime follows the build machine architecture. Build on the intended Mac architecture (or include the matching official `@anthropic-ai/claude-agent-sdk-darwin-*` optional dependency) for Claude support. The Swift app/helper themselves are universal.
@@ -29,7 +29,7 @@ Every browser mutation (click, grouped fill, select, upload) first produces an e
 
 Private task files and current connected user folders use the existing format, size, version, backup, and link restrictions. Cross-process file commits share a lock and verify full-content versions. Folder access is loaded again on each call. Changes to an active agent or connection grants pause the task; reviews recheck the current permission set before external actions. HTML/document previews reuse Buddy's sanitized, script-free readers.
 
-Task briefs, partial/final results, file receipts, and reviews are saved locally. Only an actual service/browser result can confirm an effect. On restart, active work becomes interrupted, pending approvals expire, and previously accepted actions without receipts remain uncertain. Nothing is automatically resubmitted. Explicit Resume must reconcile external state first. Tasks are serial, limited to one hour per attempt and 150 browser calls; logged actions and pending reviews are bounded. The initial queue has no recurring schedules or remote host.
+Task briefs, partial/final results, file receipts, and reviews are saved locally. Only an actual service/browser result can confirm an effect. On restart, active work becomes interrupted, pending approvals expire, and previously accepted actions without receipts remain uncertain. Nothing is automatically resubmitted. Explicit Resume must reconcile external state first. Tasks are serial, limited to one hour per attempt and 150 browser calls; logged actions and pending reviews are bounded. Daily/weekday routines run through the local durable scheduler; no remote host is supplied.
 
 ## Runtime plumbing and checks
 
@@ -47,3 +47,5 @@ Official integrations: [OpenAI app-server](https://learn.chatgpt.com/docs/app-se
 
 
 Private browser sign-in is available in Settings → Browser sign-in and through the worker’s buddy_browser_signin tool. Chrome owns password storage and autofill; Buddy receives session results. New account creation requests a human choice and private Chrome. Supported email-code forms use a restricted native Gmail lookup after consent for that website. The Mac app guide describes supported forms, sender/recipient checks, private handoff recovery, and current verification limits.
+
+Buddy 0.16 adds direct read-only connector discovery/calls for Claude through the current ChatGPT connector transport, without a second model turn. Writes and unsupported operations retain their reviewed delegate. Native Gmail review overlaps up to four independent reads with deterministic source receipts and unchanged coverage/analysis checks. Completed email routines can supply same-day prepared answers in chat with their original checked timestamp; explicit fresh checks bypass reuse. See the Mac app guide for freshness, source, account and access requirements.

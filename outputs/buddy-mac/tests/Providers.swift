@@ -15,7 +15,8 @@ import Foundation
         invalid=false;do{_ = try settings.update(workspace,budget:Double.nan)}catch{invalid=true};require(invalid,"invalid spending limit rejected")
         let primary=ConversationService(support:root,executable:URL(fileURLWithPath:CommandLine.arguments[1]))
         primary.agentPermission={w,keys in w==workspace && keys == [key]};primary.filePermission={w,keys in w==workspace && keys == [key]};primary.computerPermission={_,_ in false}
-        let router=BuddyAIRouter(support:root,chatgpt:primary,makeProcess:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[2]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]))},keyReader:{_ in "fixture-key"},keyRemover:{_ in})
+        var processes=0
+        let router=BuddyAIRouter(support:root,chatgpt:primary,makeProcess:{processes+=1;return BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[2]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]))},keyReader:{_ in "fixture-key"},keyRemover:{_ in})
         defer{router.shutdown()}
         var events:[[String:Any]]=[];router.onEvent={events.append($0)}
         var options=BuddyTurnOptions();options.actorId=agent;options.fileScope=try primary.projectFiles.scope(workspace);options.history="Earlier ChatGPT answer"
@@ -23,6 +24,8 @@ import Foundation
         func terminal(_ id:String)->Bool{events.contains{$0["type"] as? String == "run" && $0["runId"] as? String == id && ["completed","failed","stopped"].contains($0["status"] as? String ?? "")}}
         let first=try send("HISTORY_CHECK",options);await wait{terminal(first)}
         require(events.contains{$0["runId"] as? String == first && $0["text"] as? String == "Claude fixture answer" && $0["status"] as? String == "completed"},"selected Claude actually answers through Claude bridge with real prior history")
+        let second=try send("HISTORY_CHECK second message",options);await wait{terminal(second)}
+        require(processes==1,"completed messages reuse the same authorized Claude bridge")
         var scheduleOptions=options;scheduleOptions.requiresRoutine=true
         let fakeSchedule=try send("Run this every morning",scheduleOptions);await wait{terminal(fakeSchedule)}
         require(events.contains{$0["runId"] as? String==fakeSchedule && $0["status"] as? String=="failed" && ($0["error"] as? String)?.contains("No active routine")==true},"Claude cannot finish a schedule request without a native saved routine receipt")

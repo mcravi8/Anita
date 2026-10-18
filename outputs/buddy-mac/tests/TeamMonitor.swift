@@ -31,6 +31,9 @@ import Foundation
   require(exchanges.count==1 && exchanges[0]["fromAgentId"] as? String==chief && exchanges[0]["toAgentId"] as? String==maze && exchanges[0]["status"] as? String=="completed","the actual completed peer check-in is inspectable with its true participants")
   require(exchanges[0]["input"]==nil && exchanges[0]["sources"]==nil && exchanges[0]["output"]==nil,"message history excludes internal prompts and model context")
   require((done["agentMessages"] as? [String:[String:Any]])?[maze]?["count"] as? Int==2,"the collapsed chat link counts a recorded request and response")
+  let activity=(done["agentMessages"] as! [String:[String:Any]])[maze]!["events"] as! [[String:Any]]
+  require(activity.count==2 && activity[0]["at"] as? String==exchanges[0]["createdAt"] as? String && activity[1]["at"] as? String==exchanges[0]["finishedAt"] as? String,"timeline markers retain the actual request and reply times")
+  require(activity.allSatisfy{$0["exchangeId"] as? String==exchanges[0]["id"] as? String && $0["body"]==nil && $0["input"]==nil},"timeline metadata links to real exchanges without exposing their private content")
   do{_ = try monitor.handle(["action":"messages"],state:state,jobs:jobs,actor:maze);require(false,"models cannot use the user-only full history endpoint")}catch{}
   let reopenedJournal=try BuddyTeamMonitorStore(support:root)
   require((try reopenedJournal.messages(state:state,agent:chief)["messages"] as! [[String:Any]]).count==1,"recorded messages survive reopening without replay")
@@ -41,6 +44,9 @@ import Foundation
   require(latestRows.count==40 && latestRows.first?["question"] as? String=="Fixture question 5","history starts with the most recent saved page")
   let earlierPage=try historyStore.messages(state:state,agent:chief,before:latestPage["nextCursor"] as? String)
   require((earlierPage["messages"] as! [[String:Any]]).count==5 && earlierPage["nextCursor"] is NSNull,"earlier pages retain all saved exchanges without duplicating the boundary")
+  let earliest=(earlierPage["messages"] as! [[String:Any]])[0],selectedHistory=try historyStore.messages(state:state,agent:chief,exchangeIDs:[earliest["id"] as! String])
+  require((selectedHistory["messages"] as! [[String:Any]]).count==1 && (selectedHistory["messages"] as! [[String:Any]])[0]["id"] as? String==earliest["id"] as? String,"clicking an old timeline marker opens that exchange beyond the latest page")
+  do{_ = try historyStore.messages(state:state,agent:chief,exchangeIDs:[UUID().uuidString]);require(false,"unavailable or foreign exchange IDs rejected")}catch{}
   var foreignHistory=state;foreignHistory["conversationWorkspace"]=UUID().uuidString
   require((try historyStore.messages(state:foreignHistory)["messages"] as! [[String:Any]]).isEmpty,"foreign workspace history stays inaccessible")
   let learned=(try BuddyAgentMemory.overlay(state,support:root)["agents"] as! [[String:Any]])[1]

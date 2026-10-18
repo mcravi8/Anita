@@ -42,7 +42,7 @@ import Foundation
         try memory.synchronize(raw);let state=try BuddyAgentMemory.overlay(raw,support:support),w=state["conversationWorkspace"] as! String
         let action=args["action"] as? String ?? "status",agents=state["agents"] as? [[String:Any]] ?? []
         if let actor {guard agents.contains(where:{$0["id"] as? String==actor}) else{throw BuddyWorkerFailure(message:"This agent is no longer available.")}}
-        if action=="messages" {guard actor==nil else{throw BuddyWorkerFailure(message:"The full agent-message history is available in Buddy's user interface.")};return try store.messages(state:state,agent:args["agentId"] as? String,before:args["before"] as? String)}
+        if action=="messages" {guard actor==nil else{throw BuddyWorkerFailure(message:"The full agent-message history is available in Buddy's user interface.")};return try store.messages(state:state,agent:args["agentId"] as? String,before:args["before"] as? String,exchangeIDs:args["exchangeIds"] as? [String])}
         if action=="configure" {guard actor==nil else{throw BuddyWorkerFailure(message:"Change team-wide settings in Workspace settings → Teamwork & updates.")};_ = try store.setPolicy(args,state:state)}
         else if action=="set_proactive" {
             let id=actor ?? args["agentId"] as? String ?? ""

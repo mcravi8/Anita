@@ -287,6 +287,7 @@ function sidebar() {
 }
 const taskState = s => ({queued:'To do',working:'In progress',review:'Ready for review',done:'Done',paused:'Paused',failed:'Needs attention'}[s]||'To do');
 function messageHTML(m) {
+  if(m.kind==='agent-exchange')return window.BuddyAgentMessages?.marker(m)||'';
   if(m.kind==='handoff')return `<div class="handoff">${icon('handoff')}<span>${esc(m.body)}</span></div>`;
   if(m.kind==='notice')return `<div class="message-notice">${icon('info')}<span>${esc(m.body)}</span></div>`;
   if(m.who==='you')return `<div class="message user-message"><div class="user-bubble"><p>${esc(m.body).replace(/\n/g,'<br>')}</p>${m.attachments?.length?`<div class="attachments">${m.attachments.map(a=>`<span class="attachment-chip">${icon('paperclip')}${esc(a.name)}</span>`).join('')}</div>`:''}<time>${esc(m.time)}</time></div></div>`;
@@ -320,10 +321,12 @@ function artifactHTML(fileId) {
   return `<button class="artifact-card" data-action="file" data-id="${esc(f.id)}"><span class="artifact-icon">${icon('file')}</span><span><strong>${esc(f.name)}</strong><small>${esc(f.type)} · Version ${f.revision}</small></span>${icon('chevron')}</button>`;
 }
 function conversationMessages(messages){
+  messages=window.BuddyAgentMessages?.timeline(ui.view.target,messages)||messages;
+  const item=m=>messageHTML(m).replace(/^<div\b/,`<div data-chat-item="${esc(m.id||'')}"`);
   const samples=messages.filter(m=>m.id?.startsWith('dm-sample-')||/^m[1-6]$/.test(m.id)||findProposal(m.proposalId)?.sample);
   const live=messages.some(m=>m.live);
-  if(live&&samples.length)return `<details class="sample-history"><summary>Example conversation${icon('down')}</summary>${samples.map(messageHTML).join('')}</details><div class="live-divider">Your conversation</div>${messages.filter(m=>!samples.includes(m)).map(messageHTML).join('')}`;
-  return messages.map(messageHTML).join('');
+  if(live&&samples.length)return `<details class="sample-history"><summary>Example conversation${icon('down')}</summary>${samples.map(item).join('')}</details><div class="live-divider">Your conversation</div>${messages.filter(m=>!samples.includes(m)).map(item).join('')}`;
+  return messages.map(item).join('');
 }
 function connectionLabel(){if(BuddyAgentSetup.required(findAgent(ui.view.target)))return 'Setup with Claude';return !storageAvailable?'Changes aren’t being saved':chatConnection.checking?`Connecting to ${providerName()}…`:chatConnection.connected?(chatConnection.provider==='claude'?'Powered by Claude API credits':'Powered by your ChatGPT subscription'):window.BuddyDesktop?`Connect ${providerName()}`:'Frontend preview';}
 function sendControl(target,draft){
@@ -336,7 +339,7 @@ function conversation() {
   const messages=state.messages[target.id]||[],draft=state.drafts[target.id]||'',attachments=state.attachments[target.id]||[];
   const sample=messages.some(m=>m.id?.startsWith('dm-sample-')||/^m[1-6]$/.test(m.id)||findProposal(m.proposalId)?.sample);
   return `<section class="center conversation"><header class="conversation-header"><button class="icon-button mobile-menu-button" data-action="menu" aria-label="Open chats">${icon('chevron')}</button><button class="conversation-title" data-action="chat-details" aria-label="${esc(target.name)} details">${g?groupAvatar(g.id):avatar(a.id)}<span><h1 tabindex="-1">${esc(target.name)}</h1><span class="conversation-subtitle">${g?`${g.members.length} agents, you` : esc(a.role)}</span></span></button><div class="header-tools"><button class="icon-button" data-action="workspace-details" data-section="files" aria-label="Shared files and tasks" title="Shared files and tasks">${icon('folder')}</button><button class="icon-button" data-action="chat-details" aria-label="Conversation details" title="Conversation details">${icon('more')}</button></div></header>
-    <div class="chat-body" id="chat-body"><div class="chat-thread">${messages.length?`<div class="date-divider">${sample&&!messages.some(m=>m.live)?'Today · sample conversation':'Today'}</div><div id="messages">${conversationMessages(messages)}</div>`:`<div class="empty-chat">${g?groupAvatar(g.id):avatar(a.id)}<h2>${g?esc(g.name):`Say hi to ${esc(a.name)}.`}</h2><p>${g?'Your team, in one conversation.':esc(a.role)}</p><button class="suggestion" data-action="suggest" data-text="${g?'Let’s plan our next project.':'What can you help me with?'}">${g?'Plan something together':'What can you help me with?'}${icon('arrow')}</button></div>`}<div data-agent-message-summary="${esc(target.id)}">${window.BuddyAgentMessages?.summary(target.id)||''}</div></div></div>
+    <div class="chat-body" id="chat-body"><div class="chat-thread">${messages.length||window.BuddyAgentMessages?.hasTimeline(target.id)?`<div class="date-divider">${sample&&!messages.some(m=>m.live)?'Today · sample conversation':'Today'}</div><div id="messages">${conversationMessages(messages)}</div>`:`<div class="empty-chat">${g?groupAvatar(g.id):avatar(a.id)}<h2>${g?esc(g.name):`Say hi to ${esc(a.name)}.`}</h2><p>${g?'Your team, in one conversation.':esc(a.role)}</p><button class="suggestion" data-action="suggest" data-text="${g?'Let’s plan our next project.':'What can you help me with?'}">${g?'Plan something together':'What can you help me with?'}${icon('arrow')}</button></div>`}</div></div>
     <div class="composer-wrap"><form class="composer" id="composer" aria-label="Message ${esc(target.name)}">${attachments.length?`<div class="attachments">${attachments.map((a,index)=>`<span class="attachment-chip">${icon('paperclip')}${esc(a.name)}<button type="button" data-action="remove-attachment" data-index="${index}" aria-label="Remove ${esc(a.name)}">${icon('close')}</button></span>`).join('')}</div>`:''}<div class="composer-line"><button type="button" class="icon-button" data-action="attach" aria-label="${window.BuddyDesktop?.projectFiles?'Add a shared file':'Attach a file'}">${icon('plus')}</button><textarea id="message-input" aria-label="Message ${esc(target.name)}" placeholder="Message ${g?'the group':esc(a.name)}…" rows="1">${esc(draft)}</textarea><button type="button" class="icon-button mention-button" data-action="mention" aria-label="Mention an agent">${icon('at')}</button>${sendControl(target.id,draft)}</div>${!g?`<div class="composer-model-row">${window.BuddyModels?.slot(a.id)||`<div class="agent-model-slot" data-agent-model="${esc(a.id)}"></div>`}</div>`:''}<input type="file" id="attachment-input" hidden multiple></form><button class="composer-hint" data-action="connection">${esc(connectionLabel())}</button>${a&&BuddyAgentSetup.required(a)&&(state.agentSetup?.[a.id]?.messages||[]).some(m=>m.who==='you')&&!BuddyAgentSetup.active(state,a.id)?`<button type="button" class="composer-hint" data-setup-finish="${esc(a.id)}">Finish setup with what I’ve shared</button>`:''}</div>
   </section>`;
 }
@@ -417,13 +420,15 @@ function refreshLiveChat(target){
   refreshTeamworkDetails();
   if(ui.view.kind!=='chat'||ui.view.target!==target)return;
   const body=document.getElementById('chat-body'),nearBottom=body&&body.scrollHeight-body.scrollTop-body.clientHeight<120;
+  const anchor=!nearBottom&&body?[...document.querySelectorAll('#messages > [data-chat-item]')].find(el=>el.getBoundingClientRect().bottom>body.getBoundingClientRect().top):null,anchorId=anchor?.dataset.chatItem,anchorTop=anchor?.getBoundingClientRect().top;
   const focus=document.activeElement,focusId=focus?.id,selectionStart=focus?.selectionStart,selectionEnd=focus?.selectionEnd;
   let messages=document.getElementById('messages');
-  if(!messages&&(state.messages[target]||[]).length){const thread=body?.querySelector('.chat-thread');if(thread){thread.innerHTML='<div class="date-divider">Today</div><div id="messages"></div>';messages=document.getElementById('messages');}}
+  if(!messages&&((state.messages[target]||[]).length||window.BuddyAgentMessages?.hasTimeline(target))){const thread=body?.querySelector('.chat-thread');if(thread){thread.innerHTML='<div class="date-divider">Today</div><div id="messages"></div>';messages=document.getElementById('messages');}}
   if(messages){const samplesOpen=messages.querySelector('.sample-history')?.open;messages.innerHTML=conversationMessages(state.messages[target]||[]);const examples=messages.querySelector('.sample-history');if(examples&&samplesOpen)examples.open=true;}
   const button=document.getElementById('send-message'),running=BuddyChat.active(state,target)||BuddyAgentSetup.active(state,target);if(button){if(running&&button.classList.contains('stop-button')&&button.dataset.id===running.runId)button.disabled=running.status==='stopping';else if(!running&&!button.classList.contains('stop-button'))button.disabled=!(state.drafts[target]||'').trim();else button.outerHTML=sendControl(target,state.drafts[target]||'');}
   const restored=focusId&&document.getElementById(focusId);if(restored&&restored!==focus){restored.focus({preventScroll:true});if(typeof selectionStart==='number')restored.setSelectionRange(selectionStart,selectionEnd);}
   if(nearBottom&&body)body.scrollTop=body.scrollHeight;
+  else if(anchorId&&body){const restoredAnchor=[...document.querySelectorAll('#messages > [data-chat-item]')].find(el=>el.dataset.chatItem===anchorId);if(restoredAnchor)body.scrollTop+=restoredAnchor.getBoundingClientRect().top-anchorTop;}
 }
 async function stopMessage(runId){
   if(runId?.startsWith('setup:'))return BuddyAgentSetup.stop(runId.slice(6));

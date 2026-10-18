@@ -127,11 +127,16 @@ import CryptoKit
             return BuddyAgentMemory.privateValue(row) as? [String:Any]
         }
     }
-    func messages(state:[String:Any],agent:String?=nil,before:String?=nil)throws->[String:Any] {
+    func messages(state:[String:Any],agent:String?=nil,before:String?=nil,exchangeIDs:[String]?=nil)throws->[String:Any] {
         let ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
         if let agent,!ids.contains(agent){throw BuddyWorkerFailure(message:"This agent is no longer available.")}
         let all=exchanges(state:state)
         var rows=all.filter{agent==nil || $0["fromAgentId"] as? String==agent || $0["toAgentId"] as? String==agent}
+        if let exchangeIDs {
+            let selected=Set(exchangeIDs),available=Set(rows.compactMap{$0["id"] as? String})
+            guard !selected.isEmpty,selected.count<=40,selected.isSubset(of:available) else{throw BuddyWorkerFailure(message:"This exchange is no longer available. Open Agent messages to view saved history.")}
+            rows=rows.filter{selected.contains($0["id"] as? String ?? "")}
+        }
         if let before {guard let i=rows.firstIndex(where:{$0["id"] as? String==before}) else{throw BuddyWorkerFailure(message:"This history changed. Refresh to load the saved messages.")};rows=Array(rows.prefix(i))}
         let page=Array(rows.suffix(40))
         return ["workspace":state["conversationWorkspace"] ?? "","messages":page,"nextCursor":rows.count>40 ? page.first!["id"]! : NSNull(),"messageRevision":Self.hash(all)]
@@ -150,7 +155,9 @@ import CryptoKit
             let from=row["fromAgentId"] as! String,to=row["toAgentId"] as! String
             let hasReply = !(row["body"] as? String ?? "").isEmpty || !(row["detail"] as? String ?? "").isEmpty
             let count=1+(hasReply ? 1:0)
-            for (id,peer) in [(from,to),(to,from)] {var s=summaries[id] ?? ["count":0,"peers":[String]()];s["count"]=(s["count"] as? Int ?? 0)+count;var peers=s["peers"] as? [String] ?? [];if !peers.contains(peer){peers.append(peer)};s["peers"]=peers;summaries[id]=s}
+            var events:[[String:Any]]=[["id":(row["id"] as! String)+":request","exchangeId":row["id"]!,"fromAgentId":from,"toAgentId":to,"at":row["createdAt"]!]]
+            if hasReply {events.append(["id":(row["id"] as! String)+":reply","exchangeId":row["id"]!,"fromAgentId":to,"toAgentId":from,"at":row["finishedAt"]!])}
+            for (id,peer) in [(from,to),(to,from)] {var s=summaries[id] ?? ["count":0,"peers":[String]()];s["count"]=(s["count"] as? Int ?? 0)+count;var peers=s["peers"] as? [String] ?? [];if !peers.contains(peer){peers.append(peer)};s["peers"]=peers;s["events"]=(s["events"] as? [[String:Any]] ?? [])+events;summaries[id]=s}
         }
         out["agentMessages"]=summaries
         out["agentMessageRevision"]=Self.hash(conversationRows)

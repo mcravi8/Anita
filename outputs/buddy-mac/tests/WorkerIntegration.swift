@@ -10,6 +10,12 @@ import AppKit
         let host = BuddyWorkerHost(support: support, executable: URL(fileURLWithPath: CommandLine.arguments[1]),makeCoding:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[2]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]))},makeCodingShell:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[4]),runtime:URL(fileURLWithPath:CommandLine.arguments[5]))},keyReader:{_ in "inert-fixture-key"})
         host.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer { host.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
+        let teamStatus = try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "team", "arguments": ["action": "status"]])
+        require(teamStatus["workspace"] as? String == workspace && (teamStatus["profiles"] as? [[String: Any]])?.first?["id"] as? String == agent, "team preferences cross the real private IPC connection")
+        require(teamStatus["error"] == nil && teamStatus["monitorError"] as? String == "", "healthy monitor diagnostics cannot be mistaken for a worker transport failure")
+        let savedPreference = try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "team", "arguments": ["action": "set_proactive", "agentId": agent, "enabled": true]])
+        require(savedPreference["saved"] as? Bool == true && savedPreference["proactive"] as? Bool == true, "saved team settings return a usable receipt through IPC")
+        print("PASS: team preferences and saved proactive setting receipts through actual worker IPC")
         var request: [String: Any] = ["workspace": workspace, "operation": "create", "agentId": agent, "requestId": "once", "title": "Fixture report", "goal": "Create a private report", "kind": "research", "provider": "chatgpt", "budgetUSD": 0]
         let result = try await BuddyWorkerClient.call(support: support, payload: request), job = result["task"] as! [String: Any], id = job["id"] as! String
         let duplicate = try await BuddyWorkerClient.call(support: support, payload: request)

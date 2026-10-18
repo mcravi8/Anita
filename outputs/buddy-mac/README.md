@@ -1,4 +1,4 @@
-# Buddy for Mac · 0.21.0
+# Buddy for Mac · 0.21.1
 
 Buddy is a personal Mac app with minimal direct messages, 3D avatars, and agents whose names, roles, instructions, shapes, and colors you can change independently.
 
@@ -225,3 +225,5 @@ Delegated teammates start from the creating agent’s complete, editable brief a
 The main chat receives a compact Created/Suggested card. Created teams appear in the sidebar and open their real shared group chat; instruction links open individual agent settings. Team registration does not itself start work. `team-plans.json` journals intent and receipts. Agents and group membership commit together, duplicate deliveries and same-request retries return the same plan, stale frontend saves preserve newly created work, and interrupted journal receipts reconcile against workspace provenance. There are no extra app windows or app identities.
 
 Inert native tests cover direct creation, existing membership, interview mode, exact human authorization, pending edit/approval/decline, retries, workspace isolation, preservation and real Claude/ChatGPT tool round trips. Frontend tests cover receipt deduplication, manual-edit/membership precedence and invalid/foreign receipts.
+
+The 0.21.1 update keeps monitor diagnostics separate from worker transport errors, so healthy preference snapshots and saved settings receipts load through the actual private IPC connection. Native integration fixtures cover that path.

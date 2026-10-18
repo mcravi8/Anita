@@ -12,6 +12,10 @@ import Foundation
   let factory={BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[1]),runtime:URL(fileURLWithPath:CommandLine.arguments[2]))}
   let monitor=try BuddyTeamMonitor(support:root,makeClaude:factory,keyReader:{_ in "fixture-key"})
   let first=try monitor.status(state);require(first["supervisorId"] as? String==chief,"existing Chief is selected by stable ID without creating an agent")
+  monitor.lastError="Fixture diagnostic"
+  let diagnostic=try monitor.status(state)
+  require(diagnostic["monitorError"] as? String=="Fixture diagnostic" && diagnostic["error"]==nil && (diagnostic["profiles"] as? [[String:Any]])?.count==2,"monitor diagnostics preserve the usable snapshot and never occupy the IPC failure key")
+  monitor.lastError=""
   require((first["agents"] as? [String:[String:Any]])?[maze]?["proactive"] as? Bool != true,"other agents default to quiet user updates")
   var messages=state["messages"] as! [String:[[String:Any]]];messages[maze]=[["id":"user-pref","who":"you","body":"Always keep answers concise.","createdAt":BuddyAgentMemory.timestamp(Date().addingTimeInterval(1)),"live":true]];state["messages"]=messages;try save()
   let jobs:[[String:Any]] = [["id":task,"workspace":w,"agentId":maze,"title":"Research brief","status":"waiting_user","progress":"Choose which source to prioritize.","updatedAt":"2026-10-17T12:00:00Z"]]

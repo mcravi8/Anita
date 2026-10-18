@@ -21,7 +21,9 @@ import Foundation
         try memory.synchronize(raw);_ = try store.policy(raw);let state=try BuddyAgentMemory.overlay(raw,support:support);var result=store.status(state:state),profiles=state["agents"] as? [[String:Any]] ?? []
         let settings=try BuddyAISettings(support:support).current(state["conversationWorkspace"] as! String),available=settings.claudeEnabled && keyReader(state["conversationWorkspace"] as! String) != nil
         if !available {for i in profiles.indices where profiles[i]["learningEnabled"] as? Bool != false {profiles[i]["learningError"]="Connect Claude in AI provider settings to learn preferences automatically. Your current instructions stay saved."}}
-        result["profiles"]=profiles;result["learningAvailable"]=available;result["error"]=lastError;result["online"]=true;return result
+        // The worker's top-level `error` key is a transport failure. Keep a
+        // diagnostic alongside the usable snapshot without rejecting its reply.
+        result["profiles"]=profiles;result["learningAvailable"]=available;result["monitorError"]=lastError;result["online"]=true;return result
     }
     private func response(_ raw:[String:Any],jobs:[[String:Any]],actor:String?,target:String?,now:Date)throws->[String:Any] {
         var out=try status(raw);guard let actor else{return out}

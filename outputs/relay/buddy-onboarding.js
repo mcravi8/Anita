@@ -27,7 +27,7 @@
   function connectionBody(){return chatConnection.checking?'<span class="onboarding-connection-caption" role="status">Checking connections…</span>':chatConnection.claude?.connected?`${icon('check')}<span>Claude is ready to prepare your agent</span>`:window.BuddyDesktop?.providerSettings?`<button type="button" class="onboarding-connect" data-setup-sign-in>Connect Claude${icon('arrow')}</button>`:'<span class="onboarding-connection-caption">Open Buddy for Mac to prepare instructions with Claude.</span>';}
   function refreshConnection(){const el=document.getElementById('setup-connection');if(el)el.innerHTML=connectionBody();const button=el?.querySelector('[data-setup-sign-in]');if(button)button.addEventListener('click',async()=>{button.disabled=true;try{updateConnection(await window.BuddyDesktop.providerSettings({operation:'connect',provider:'claude'}));}catch(error){document.getElementById('setup-status').textContent=String(error.message||error);}finally{if(active())refreshConnection();}});}
   function close(){document.getElementById('onboarding-root').innerHTML='';document.getElementById('app').inert=!!document.querySelector('.modal-overlay');document.getElementById('message-input')?.focus();}
-  async function dismiss(){if(committing||!state.agents.length)return;const candidate=RelayTeam.copy(state);candidate.onboarding.status='dismissed';try{await persistWorkspace(candidate);state=candidate;close();}catch(error){document.getElementById('setup-error').textContent=String(error.message||error);}}
+  async function dismiss(){if(committing||!state.agents.length)return;const base=RelayTeam.copy(state),candidate=RelayTeam.copy(state);candidate.onboarding.status='dismissed';try{await persistWorkspace(candidate);adoptState(base,candidate);close();}catch(error){document.getElementById('setup-error').textContent=String(error.message||error);}}
   function open(){
     if(committing)return;
     if(state.onboarding?.status==='completed'&&findAgent(state.onboarding.agentId)){agentInfo(state.onboarding.agentId);return;}
@@ -43,9 +43,9 @@
     document.querySelector('[data-setup-later]')?.addEventListener('click',dismiss);
     form.addEventListener('submit',async event=>{
       event.preventDefault();if(committing)return;const error=document.getElementById('setup-error'),button=form.querySelector('[type=submit]');error.textContent='';
-      let result;try{result=prepare(state,read(),RelayTeam);}catch(reason){error.textContent=reason.message;return;}
+      let result,base;try{base=RelayTeam.copy(state);result=prepare(state,read(),RelayTeam);}catch(reason){error.textContent=reason.message;return;}
       committing=true;button.textContent='Saving your Buddy…';for(const field of form.querySelectorAll('button,input,textarea'))field.disabled=true;
-      try{await persistWorkspace(result.state);state=result.state;ui.view=state.lastView;ui.lastChat=result.agent.id;ui.mobile=false;ui.chatFilter='';close();render();Interview.ensure(result.agent.id);document.getElementById('message-input')?.focus();}
+      try{await persistWorkspace(result.state);adoptState(base,result.state);ui.view=state.lastView;ui.lastChat=result.agent.id;ui.mobile=false;ui.chatFilter='';close();render();Interview.ensure(result.agent.id);document.getElementById('message-input')?.focus();}
       catch(reason){error.textContent=`${String(reason.message||reason)} Your choices are still here. Try again.`;for(const field of form.querySelectorAll('button,input,textarea'))field.disabled=false;button.innerHTML=`Start chatting${icon('arrow')}`;}
       finally{committing=false;}
     });

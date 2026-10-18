@@ -1,7 +1,8 @@
 import {spawn} from 'node:child_process';
 import {realpath,mkdir} from 'node:fs/promises';
+import {realpathSync} from 'node:fs';
 import {createInterface} from 'node:readline';
-import {fileURLToPath} from 'node:url';
+import {pathToFileURL} from 'node:url';
 
 // Commands run in a separate process from the SDK. Its environment never contains
 // the API key. Seatbelt confines descendants as well as the initial shell.
@@ -39,13 +40,17 @@ export class CodingShell {
       const terminate=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
       const timer=setTimeout(()=>{timedOut=true;terminate();},seconds*1000);
       child.once('error',error=>{if(settled)return;settled=true;clearTimeout(timer);this.child=null;reject(error);});
-      child.once('close',(exitCode,signal)=>{if(settled)return;settled=true;clearTimeout(timer);terminate();this.child=null;resolve({exitCode,signal,output:output.slice(0,64000),truncated,timedOut,durationMs:Date.now()-at,network,project});});
+      // 'close' waits for the output pipes, which a background process started in its own session can hold open for as long as it likes.
+      // So finish as soon as the shell itself has exited (after a moment for its last output), and let go of the pipes.
+      const finish=(exitCode,signal)=>{if(settled)return;settled=true;clearTimeout(timer);terminate();child.stdout.destroy();child.stderr.destroy();this.child=null;resolve({exitCode,signal,output:output.slice(0,64000),truncated,timedOut,durationMs:Date.now()-at,network,project});};
+      child.once('close',finish);
+      child.once('exit',(exitCode,signal)=>setTimeout(()=>finish(exitCode,signal),300));
     });
   }
   close(){this.closed=true;if(this.child){try{process.kill(-this.child.pid,'SIGKILL');}catch{}}}
 }
-if(process.argv[1]&&fileURLToPath(import.meta.url)===process.argv[1]) {
-  const shell=new CodingShell(),write=x=>process.stdout.write(JSON.stringify(x)+'\n');
+if(process.argv[1]&&import.meta.url===pathToFileURL(realpathSync(process.argv[1])).href) {
+  const shell=new CodingShell(),write=x=>process.stdout.write(JSON.stringify(x,(key,item)=>typeof item==='string'?item.toWellFormed():item)+'\n');
   process.on('SIGTERM',()=>{shell.close();process.exit(0);});process.on('SIGINT',()=>{shell.close();process.exit(0);});
   for await(const line of createInterface({input:process.stdin})) {
     try{const input=JSON.parse(line);if(input.command!=='run')throw Error('Unsupported coding command.');shell.run(input).then(result=>write({id:input.id,result}),error=>write({id:input.id,error:error.message}));}

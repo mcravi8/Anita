@@ -26,7 +26,7 @@ const BuddyComputerUI = (() => {
     const input=event.target.closest('[data-computer-agent]');if(!input)return;
     const agent=findAgent(input.dataset.computerAgent);if(!agent)return;
     const previous=agent.tools?.desktop!==false;agent.tools={...agent.tools,desktop:input.checked};input.disabled=true;
-    try{await window.BuddyDesktop.saveState(JSON.stringify(state));save();showToast(input.checked?`${agent.name} can use Mac apps.`:`Mac app access removed for ${agent.name}.`);}
+    try{await persistWorkspace(state);save();showToast(input.checked?`${agent.name} can use Mac apps.`:`Mac app access removed for ${agent.name}.`);}
     catch(reason){agent.tools.desktop=previous;input.checked=previous;showToast(String(reason.message||reason));}
     finally{input.disabled=false;}
   });

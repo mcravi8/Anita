@@ -19,9 +19,11 @@
     if(typeof document==='undefined')return theme;
     const el=document.documentElement;
     el.dataset.theme=theme;el.dataset.appearance=choice;el.style.colorScheme=theme;
+    // The page reads this before anything else loads, so it starts in the right theme instead of flashing the other one.
+    try{localStorage.setItem('buddy.appearance',choice);}catch{}
     const meta=document.querySelector('meta[name=theme-color]');if(meta)meta.content=theme==='dark'?'#121211':'#fbfaf8';
     root.BuddyFigures?.setDark(theme==='dark');
-    try{root.BuddyDesktop?.setAppearance?.(choice);}catch{}
+    try{Promise.resolve(root.BuddyDesktop?.setAppearance?.(choice)).catch(()=>{});}catch{}
     return theme;
   }
   function init(options){
@@ -31,11 +33,11 @@
   function choose(choice){
     if(!host||!CHOICES.includes(choice))return;
     host.state().theme=choice;host.save();apply();
-    for(const button of document.querySelectorAll('.theme-card[data-theme-choice]'))button.setAttribute('aria-checked',String(button.dataset.themeChoice===choice));
+    for(const button of document.querySelectorAll('.theme-card[data-theme-choice]'))button.setAttribute('aria-pressed',String(button.dataset.themeChoice===choice));
   }
   function section(){
     const choice=current();
-    return `<div class="appearance-settings"><div class="appearance-settings-head"><strong>Appearance</strong><p>Light, dark, or whatever your Mac is using.</p></div><div class="theme-cards" role="radiogroup" aria-label="Appearance">${PREVIEWS.map(([id,label,side,bg,bar,card,bar2,dot])=>`<button type="button" class="theme-card" role="radio" aria-checked="${id===choice}" data-theme-choice="${id}"><span class="theme-preview" style="background:${bg}" aria-hidden="true"><span class="theme-preview-side" style="background:${side}"></span><span class="theme-preview-main"><i style="background:${bar};width:62%"></i><i style="background:${bar2};width:84%"></i><b style="background:${card}"><u style="background:${dot}"></u></b></span></span><span class="theme-label">${label}</span></button>`).join('')}</div></div>`;
+    return `<div class="appearance-settings"><div class="appearance-settings-head"><strong>Appearance</strong><p>Light, dark, or whatever your Mac is using.</p></div><div class="theme-cards" role="group" aria-label="Appearance">${PREVIEWS.map(([id,label,side,bg,bar,card,bar2,dot])=>`<button type="button" class="theme-card" aria-pressed="${id===choice}" data-theme-choice="${id}"><span class="theme-preview" style="background:${bg}" aria-hidden="true"><span class="theme-preview-side" style="background:${side}"></span><span class="theme-preview-main"><i style="background:${bar};width:62%"></i><i style="background:${bar2};width:84%"></i><b style="background:${card}"><u style="background:${dot}"></u></b></span></span><span class="theme-label">${label}</span></button>`).join('')}</div></div>`;
   }
   function mount(){
     for(const button of document.querySelectorAll('.theme-card[data-theme-choice]'))button.addEventListener('click',()=>choose(button.dataset.themeChoice));

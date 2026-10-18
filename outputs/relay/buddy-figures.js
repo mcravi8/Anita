@@ -184,7 +184,7 @@
   let cfg={agent:()=>null,group:()=>null,agentIds:()=>[]};
   const sims={},modes={},focus={},focusGroup={},groupWork={};
   let handoffs=[],timers=[],mouse=null,hoverId=null,hoverPrev=null,slotPos={},poked=0;
-  let clock=0,last=0,fc=0,raf=0,started=false,dirty=true,io=null,mo=null,canvases=[],calmQuery=null;
+  let clock=0,last=0,fc=0,raf=0,started=false,dirty=true,io=null,mo=null,canvases=[],calmQuery=null,paintedField=null;
   const visible=new Set(),observed=new Set(),fresh=new Set();
   let baseCache={key:'',canvas:null};
   const sim=id=>sims[id]||(sims[id]=mkSim());
@@ -288,7 +288,7 @@
     }
     const rowEls=[...side.querySelectorAll('.chat-row[data-id]')];
     hoverId=null;
-    if(mouse){const mx=mouse.x+rect.left,my=mouse.y+rect.top;for(const el of rowEls){const r=el.getBoundingClientRect();if(mx>=r.left&&mx<=r.right&&my>=r.top&&my<=r.bottom){hoverId=el.dataset.figId;break;}}}
+    if(mouse){const mx=mouse.x+rect.left,my=mouse.y+rect.top;for(const el of rowEls){const r=el.getBoundingClientRect();if(mx>=r.left&&mx<=r.right&&my>=r.top&&my<=r.bottom){hoverId=el.dataset.id;break;}}}
     const sel=rowEls.find(el=>el.classList.contains('selected')||el.getAttribute('aria-current')==='page');
     if(sel){
       const r=sel.getBoundingClientRect(),x0=r.left-rect.left,y0=r.top-rect.top,w=r.width,h=r.height;
@@ -400,7 +400,8 @@
     if(poked){if(!calm){const m=sim('anon');m.spinT=clock;m.S.by.v-=1.2;}poked=0;}
     fc++;
     const dpr=Math.min(2,window.devicePixelRatio||1);
-    if(fieldEl&&fc%2===0)paintField(side,fieldEl,clock,dpr);
+    // A sidebar that was just rebuilt is painted at once, so a re-render never shows the dot field blank for a frame.
+    if(fieldEl&&(fieldEl!==paintedField||fc%2===0)){paintField(side,fieldEl,clock,dpr);paintedField=fieldEl;}
     let i=0;
     for(const el of canvases){
       i++;
@@ -428,7 +429,8 @@
   function stop(){cancelAnimationFrame(raf);timers.forEach(clearTimeout);timers=[];started=false;if(io)io.disconnect();if(mo)mo.disconnect();io=mo=null;observed.clear();visible.clear();fresh.clear();}
 
   const engine={mkSim,stepSim,mkR,prep,evalM,drawAv,gridFor,headCells,sdBox,sdHex,eyeSD,setDark,HUD,HUD_ORDER,EYEDX};
-  const api={avatarHTML,logoHTML,slotHTML,slotAvatarHTML,fieldHTML,setMode,getMode,setFocus,handoff,setGroupWork,poke,configure,setDark,start,stop,normShape,normColor,INK,SHAPES,LEGACY_SHAPE,LEGACY_COLOR,engine};
+  const hovered=()=>hoverId;
+  const api={hovered,avatarHTML,logoHTML,slotHTML,slotAvatarHTML,fieldHTML,setMode,getMode,setFocus,handoff,setGroupWork,poke,configure,setDark,start,stop,normShape,normColor,INK,SHAPES,LEGACY_SHAPE,LEGACY_COLOR,engine};
   if(typeof module!=='undefined'&&module.exports)module.exports=api;
   root.BuddyFigures=api;
   if(typeof document!=='undefined')start();

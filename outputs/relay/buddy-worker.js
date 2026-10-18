@@ -76,10 +76,13 @@
     try{const before=listKey(snapshot);snapshot=await request({operation:'status'});await deliverRoutineResults();error='';const message=document.querySelector('[data-worker-error]');if(message)message.textContent='';if(redraw&&document.querySelector('[data-worker-panel]')){if(view==='list'&&before!==listKey(snapshot))list();else if(view==='routine'&&routine&&before!==listKey(snapshot)){const r=snapshot.routines?.find(r=>r.id===routine.id);if(r)routineDetail(r);else{view='list';list();}}else if(view==='task'&&detail){const result=await request({operation:'detail',taskId:detail.id});detail=result.task;const live=document.querySelector('[data-worker-live]');if(live&&!(live.contains(document.activeElement)&&document.activeElement.matches('input,textarea,select'))&&last!==detailKey()){live.innerHTML=taskBody(detail);last=detailKey();}}}badge();window.BuddyActivity?.acceptWorker(snapshot);}
     catch(e){window.BuddyActivity?.workerError(e.message||e);snapshot.online=false;if(redraw&&view==='list'){list();showError(e);}}
   }
+  // A finished task with nothing to deliver (an empty result) is asked for once per outcome, not on every refresh.
+  const examined=new Map(),outcome=t=>`${t.status}|${t.updatedAt||''}`;
   async function deliverRoutineResults(){
     let changed=false;
-    for(const t of snapshot.tasks.filter(t=>deliverable(t)&&findAgent(t.agentId)&&!(state.messages[t.agentId]||[]).some(m=>m.id===deliveryID(t))).slice(0,10)){
-      const value=(await request({operation:'detail',taskId:t.id})).task;if(deliverResult(state,value)){changed=true;}
+    for(const id of [...examined.keys()])if(!snapshot.tasks.some(t=>t.id===id&&deliverable(t)))examined.delete(id);
+    for(const t of snapshot.tasks.filter(t=>deliverable(t)&&findAgent(t.agentId)&&examined.get(t.id)!==outcome(t)&&!(state.messages[t.agentId]||[]).some(m=>m.id===deliveryID(t))).slice(0,10)){
+      const value=(await request({operation:'detail',taskId:t.id})).task;examined.set(t.id,outcome(t));if(deliverResult(state,value)){changed=true;}
     }
     if(changed){save();if(ui.view.kind==='chat')refreshLiveChat(ui.view.target);else render();}
   }

@@ -39,8 +39,11 @@ export function sessionRefreshDestination(shared,raw){
 }
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const runFile=promisify(execFile);
+// A cut inside an emoji leaves half a surrogate pair, which the Mac app's JSON parser rejects (the whole line is dropped and the
+// request waits for its timeout). Replace any lone surrogate before a frame is written.
+const frame=value=>JSON.stringify(value,(key,item)=>typeof item==='string'?item.toWellFormed():item)+'\n';
 export class PrivateBrowser {
-  constructor(profile,{testOrigin='',testGooglePath='',sharedOrigin='',manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'}={}) {this.profile=resolve(profile);this.sharedOrigin=sharedOrigin;this.testOrigin=testOrigin;this.testGooglePath=testOrigin?testGooglePath:'';this.manualExecutable=manualExecutable;this.context=null;this.page=null;this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.manualProcess=null;this.lastURL=null;this.secrets=new Set();this.secretOrigins=new Map();this.googleFlow=null;}
+  constructor(profile,{testOrigin='',testGooglePath='',sharedOrigin='',commandDeadlineMs=40000,manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'}={}) {this.commandDeadlineMs=commandDeadlineMs;this.profile=resolve(profile);this.sharedOrigin=sharedOrigin;this.testOrigin=testOrigin;this.testGooglePath=testOrigin?testGooglePath:'';this.manualExecutable=manualExecutable;this.context=null;this.page=null;this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.manualProcess=null;this.lastURL=null;this.secrets=new Set();this.secretOrigins=new Map();this.googleFlow=null;}
   async profileLock(){
     const path=resolve(this.profile,'SingletonLock');let meta;
     try{meta=await lstat(path);}catch(error){if(error.code==='ENOENT')return null;throw error;}
@@ -93,6 +96,8 @@ export class PrivateBrowser {
         await route.abort('blockedbyclient');
       }
     });
+    // If Chrome exits or crashes, forget the dead context so the next command starts a new one instead of failing forever.
+    const launched=this.context;launched.on('close',()=>{if(this.context!==launched)return;this.context=null;this.page=null;this.snapshot=null;this.prepared=null;this.authPlan=null;this.refs=[];});
     if(!headed)this.context.on('page',p=>{if(p===this.page)return;if(this.googleFlow&&!this.googleFlow.popup){this.googleFlow.popup=p;return;}p.close().catch(()=>{});});
     this.page=this.context.pages()[0]||await this.context.newPage();this.page.setDefaultTimeout(12000);
     this.page.on('dialog',dialog=>dialog.dismiss().catch(()=>{}));
@@ -117,7 +122,17 @@ export class PrivateBrowser {
     return hash(await this.page.evaluate(()=>({url:location.href,title:document.title,text:document.body?.innerText.slice(0,50000),forms:[...document.forms].map(f=>[f.action,f.method,f.target]),fields:[...document.querySelectorAll('input,textarea,select,button,a[href],[role=button]')].slice(0,300).map(e=>[e.tagName,e.getAttribute('type'),e.getAttribute('href'),e.getAttribute('name'),e.getAttribute('aria-label'),e.textContent?.slice(0,120),e.type==='password'?'[hidden]':e.value,e.checked])})));
   }
   assertScope(url=this.page.url()){if(this.sharedOrigin&&new URL(url).origin!==this.sharedOrigin)throw Error('This shared session is available only for '+this.sharedOrigin+'.');}
-  async read(){
+  // A page that never yields (a script that spins) must not block the bridge for good: after the deadline the browser is reset and
+  // the next command starts a fresh one. Only reading and preparing are guarded; a click or submit that has begun is never cut off.
+  async guard(work){
+    const message='The page stopped responding, so Buddy reset the private browser. Open it again to continue.';
+    let timer,reset=false;
+    const stuck=new Promise((_,reject)=>{timer=setTimeout(()=>{reset=true;this.closeAutomation().finally(()=>reject(Error(message)));},this.commandDeadlineMs);});
+    // Closing the browser also makes the stuck call fail, usually first, with a Playwright message; say what actually happened.
+    try{return await Promise.race([work(),stuck]);}catch(error){throw reset?Error(message):error;}finally{clearTimeout(timer);}
+  }
+  read(){return this.guard(()=>this.readPage());}
+  async readPage(){
     await this.ready();this.assertScope();if(this.page.url()!=='about:blank')await publicURL(this.page.url(),lookup,this.testOrigin);this.refs=[];this.prepared=null;
     this.lastURL=this.page.url();const privacy=await this.privacy();
     if(privacy.private){this.snapshot=null;return {url:new URL(this.page.url()).origin,title:'Private sign-in',text:'Sign-in and verification contents are private. Use buddy_browser_signin; never request passwords in chat.',controls:[],authentication:{kind:privacy.kind,private:true}};}
@@ -130,8 +145,10 @@ export class PrivateBrowser {
     this.snapshot={id:randomUUID(),signature:await this.signature(),url:this.page.url()};
     return this.scrub({snapshotId:this.snapshot.id,url:this.safeURL(),title:await this.page.title(),text:(await this.page.locator('body').innerText().catch(()=>'' )).slice(0,26000),controls});
   }
-  async navigate(url){this.assertScope(url);await this.ready();this.blockedNavigation=null;try{await this.page.goto(await publicURL(url,lookup,this.testOrigin),{waitUntil:'domcontentloaded',timeout:30000});}catch(error){if(this.blockedNavigation)throw Error('Website navigation blocked: '+this.blockedNavigation);throw error;}return this.read();}
-  async prepare(args){
+  navigate(url){return this.guard(()=>this.navigatePage(url));}
+  async navigatePage(url){this.assertScope(url);await this.ready();this.blockedNavigation=null;try{await this.page.goto(await publicURL(url,lookup,this.testOrigin),{waitUntil:'domcontentloaded',timeout:30000});}catch(error){if(this.blockedNavigation)throw Error('Website navigation blocked: '+this.blockedNavigation);throw error;}return this.read();}
+  prepare(args){return this.guard(()=>this.preparePage(args));}
+  async preparePage(args){
     await this.ready();this.assertScope();
     if((await this.privacy()).private)throw Error('This sign-in step is private. Request buddy_browser_signin instead of reading or filling credentials.');
     if(!this.snapshot||args.snapshotId!==this.snapshot.id||await this.signature()!==this.snapshot.signature)throw Error('The page changed. Read it again before proposing an operation.');
@@ -173,7 +190,7 @@ export class PrivateBrowser {
         }
       }
       await this.page.waitForLoadState('domcontentloaded',{timeout:6000}).catch(()=>{});
-      return {performed:true,action:prepared.args.action,page:await this.read()};
+      return {performed:true,action:prepared.args.action,page:await this.readPage()};
     }catch(error){throw Error(`The browser operation did not return a confirmed result. Check the page before retrying: ${error.message}`);}
   }
   async prepareSignIn(mode='signin'){
@@ -198,7 +215,7 @@ export class PrivateBrowser {
     const label=await button.evaluate(e=>e.innerText||e.value||e.getAttribute('aria-label')||'').catch(()=> '');
     if(!/sign.?in|log.?in|continue|next/i.test(label)||/create|register|agree|accept|pay|purchase|reset|delete/i.test(label))return {needsUser:true,reason:'Choose this sign-in step in private Chrome.'};
     await this.privacy();if(await this.signature()!==plan.signature)throw Error('The sign-in form changed. Request it again.');this.snapshot=null;await button.click();await this.page.waitForLoadState('domcontentloaded',{timeout:6000}).catch(()=>{});
-    return {performed:true,page:await this.read()};
+    return {performed:true,page:await this.readPage()};
   }
   googlePage(page){try{const u=new URL(page.url());return u.protocol==='https:'&&u.hostname==='accounts.google.com'||!!this.testGooglePath&&u.origin===this.testOrigin&&u.pathname.startsWith(this.testGooglePath);}catch{return false;}}
   async googleButton(page,origin){
@@ -256,7 +273,7 @@ export class PrivateBrowser {
           if(!choseAccount&&!challenge&&!consent&&visible.length===1){choseAccount=true;await visible[0].click();continue;}
           if(challenge||consent||visible.length>1){this.page=page;return {needsUser:true,method:'google',reason:visible.length>1?'Choose which Google account to use privately.':'Google needs your sign-in, verification or permission choice.'};}
         }else if(url.origin===origin&&!(this.testGooglePath&&url.pathname.startsWith(this.testGooglePath))&&!/\/(?:oauth|[^/]*callback[^/]*|sso|authorize)(?:\/|$)/i.test(url.pathname)){
-          this.page=page;const result=await this.read();
+          this.page=page;const result=await this.readPage();
           if(!result.authentication?.private){if(popup)await root.close().catch(()=>{});return {performed:true,method:'google',page:result};}
         }
         // OAuth callbacks may briefly use the site's authentication subdomain.
@@ -305,7 +322,7 @@ export class PrivateBrowser {
     return {opened:true,private:true};
   }
   async finishManual(){const p=this.manualProcess;if(p&&p.exitCode===null&&p.signalCode===null){p.kill('SIGTERM');await Promise.race([new Promise(resolve=>p.once('exit',resolve)),new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error('Close Buddy’s private Chrome window before finishing sign-in.')),8000);t.unref();})]);}this.manualProcess=null;await this.closeManualProfile();return {closed:true,url:this.lastURL?.startsWith('https:')?new URL(this.lastURL).origin:null};}
-  async closeAutomation(){this.snapshot=null;this.prepared=null;this.authPlan=null;this.refs=[];if(this.context){const c=this.context;this.context=null;await c.close().catch(()=>{});}this.page=null;}
+  async closeAutomation(){this.snapshot=null;this.prepared=null;this.authPlan=null;this.refs=[];if(this.context){const c=this.context;this.context=null;await Promise.race([c.close().catch(()=>{}),new Promise(r=>setTimeout(r,5000))]);}this.page=null;}
   async close(){await this.closeAutomation();await this.finishManual();}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(realpathSync(process.argv[1])).href){
@@ -326,8 +343,8 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(realpathSync(process.argv[1]
       else if(request.command==='verifyEmail')result=await browser.verifyEmail(request.token,request.code);
       else if(request.command==='close'){await browser.close();result={closed:true};}
       else throw Error('Unsupported browser command.');
-      process.stdout.write(JSON.stringify({id:request.id,result:browser.scrub(result)})+'\n');
-    }catch(error){process.stdout.write(JSON.stringify({id:request?.id,error:browser.scrub(error.message)})+'\n');}
+      process.stdout.write(frame({id:request.id,result:browser.scrub(result)}));
+    }catch(error){process.stdout.write(frame({id:request?.id,error:browser.scrub(error.message)}));}
   }
   await browser.close();
 }

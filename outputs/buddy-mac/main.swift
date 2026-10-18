@@ -12,6 +12,12 @@ import AppKit
     private static let pageBackground = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(srgbRed: 18 / 255, green: 18 / 255, blue: 17 / 255, alpha: 1) : NSColor(srgbRed: 251 / 255, green: 250 / 255, blue: 248 / 255, alpha: 1)
     }
+    /// WKWebView keeps the colour it was given as it resolved at that moment, so resolve it again for the current appearance.
+    private static func resolvedPageBackground() -> NSColor {
+        var color = pageBackground
+        NSApp.effectiveAppearance.performAsCurrentDrawingAppearance { color = pageBackground.usingColorSpace(.sRGB) ?? pageBackground }
+        return color
+    }
     /// Light, dark, or whatever the Mac is using. The page saves the same choice in the workspace and tells the app.
     private func applyAppearance(_ choice: String) {
         switch choice {
@@ -19,6 +25,7 @@ import AppKit
         case "system": NSApp.appearance = nil
         default: NSApp.appearance = NSAppearance(named: .aqua)
         }
+        webView?.underPageBackgroundColor = Self.resolvedPageBackground()
     }
     private lazy var conversations = ConversationService(support: supportURL)
     private lazy var ai = BuddyAIRouter(support: supportURL, chatgpt: conversations)
@@ -113,7 +120,7 @@ import AppKit
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.autoresizingMask = [.width, .height]
-        webView.underPageBackgroundColor = Self.pageBackground
+        webView.underPageBackgroundColor = Self.resolvedPageBackground()
         window.contentView = webView
         self.webView = webView
         guard let resources = Bundle.main.resourceURL?.appendingPathComponent("Web", isDirectory: true) else { showFailure("Buddy’s interface is missing."); return }
@@ -514,7 +521,12 @@ import AppKit
         if navigationAction.targetFrame?.isMainFrame == false, url.absoluteString.split(separator:"#",maxSplits:1).first == "about:srcdoc" { decisionHandler(.allow); return }
         if navigationAction.targetFrame?.isMainFrame == false {decisionHandler(.cancel);return}
         if url.isFileURL, let root = Bundle.main.resourceURL?.appendingPathComponent("Web").standardizedFileURL.path,
-           url.standardizedFileURL.path.hasPrefix(root + "/") { decisionHandler(.allow); return }
+           url.standardizedFileURL.path.hasPrefix(root + "/") {
+            // The page reads the saved workspace from a copy made when the bridge was installed, so a reload (the web view's
+            // own context menu offers one) needs a fresh copy or the page would start from, and then save, an old workspace.
+            if navigationAction.navigationType == .reload { installBridge(on: webView.configuration.userContentController) }
+            decisionHandler(.allow); return
+        }
         if navigationAction.navigationType == .linkActivated, ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") { NSWorkspace.shared.open(url) }
         decisionHandler(.cancel)
     }

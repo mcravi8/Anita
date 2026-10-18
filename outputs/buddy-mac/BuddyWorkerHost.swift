@@ -272,11 +272,13 @@ import Darwin
                     reviews[i]["authAction"]=action
                 }
                 reviews[i]["status"] = accepted ? "answered" : "cancelled"; reviews[i]["answeredAt"] = ISO8601DateFormatter().string(from: Date())
-                do { try store.update(id, ["reviews": reviews, "status": "running", "progress": accepted ? "Running the approved operation" : "Operation declined"]); decision(accepted) }
+                // Answering a review is activity: without this the time spent waiting for you counts as silence, and an approval given after
+                // three minutes would be treated as a stalled connection and stop the approved action half way.
+                do { try store.update(id, ["reviews": reviews, "status": "running", "progress": accepted ? "Running the approved operation" : "Operation declined"]); lastActivityAt = Date(); decision(accepted) }
                 catch { decision(false); throw error }; return ["accepted": true]
             }
             guard try providerSettings.current(current).chatgptEnabled, let service else { service?.shutdown(); throw BuddyWorkerFailure(message: "ChatGPT is disconnected. This connection action was not approved.") }
-            let result = try service.answerInput(workspace: current, payload: request); try store.update(id, ["status": "running", "progress": "Continuing after your review"]); return result
+            let result = try service.answerInput(workspace: current, payload: request); try store.update(id, ["status": "running", "progress": "Continuing after your review"]); lastActivityAt = Date(); return result
         }
         if operation == "browser" {
             guard permitted(job, tool: "desktop") else { throw BuddyWorkerFailure(message: "This agent’s browser access is off.") }
@@ -408,7 +410,14 @@ import Darwin
         }
         if !store.paused { do { try routines.enqueueDue(store:store,workspace:workspace);try? FileManager.default.removeItem(at:root.appendingPathComponent("schedule-error.txt")) } catch { try? Data(error.localizedDescription.utf8).write(to:root.appendingPathComponent("schedule-error.txt"),options:.atomic);return } }
         guard !store.paused, let job = store.jobs.first(where: { $0["status"] as? String == "queued" }) else { return }
-        do { try await execute(job) } catch { try? store.update(job["id"] as! String, ["status": "failed", "progress": error.localizedDescription]); cleanup() }
+        let jobID = job["id"] as! String
+        do { try await execute(job) } catch {
+            // Cancel, pause and the browser hand-off stop this run, save their own status and clean up, and the call that was in
+            // flight then throws. Recording that as a failure would overwrite "cancelled" and make the routine need attention, and
+            // cleaning up again could tear down the next task. Only a run that was still going has failed.
+            guard ["queued", "running", "waiting_review"].contains((try? store.job(jobID))?["status"] as? String ?? "") else { return }
+            try? store.update(jobID, ["status": "failed", "progress": error.localizedDescription]); cleanup()
+        }
     }
     private func execute(_ job: [String: Any]) async throws {
         let id = job["id"] as! String, workspace = job["workspace"] as! String, agentID = job["agentId"] as! String

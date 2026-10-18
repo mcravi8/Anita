@@ -50,7 +50,7 @@ if(typeof document!=='undefined') {
     connectionsState.loading=true;connectionsState.error='';
     if(document.querySelector('[data-connections-view="list"]'))drawConnections();
     try {
-      await window.BuddyDesktop.saveState(JSON.stringify(state));
+      await persistWorkspace(state);
       const snapshot=await window.BuddyDesktop.connections(force);
       if(generation!==connectionsState.generation)return;
       connectionsState.snapshot=BuddyConnections.normalize(snapshot);connectionsState.loaded=true;

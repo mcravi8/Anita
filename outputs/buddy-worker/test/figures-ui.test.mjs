@@ -49,7 +49,7 @@ test('figures are painted in rows, messages, previews and inline names; search, 
   // Settings: the appearance block, and the first Buddy with its figure.
   await page.evaluate(()=>settings());await page.waitForTimeout(300);
   assert.ok(await page.locator('.settings-option .who canvas[data-fig]').count()===1);
-  assert.deepEqual(await page.locator('.theme-card').evaluateAll(b=>b.map(x=>[x.dataset.themeChoice,x.getAttribute('aria-checked')])),[['light','true'],['dark','false'],['system','false']]);
+  assert.deepEqual(await page.locator('.theme-card').evaluateAll(b=>b.map(x=>[x.dataset.themeChoice,x.getAttribute('aria-pressed')])),[['light','true'],['dark','false'],['system','false']]);
   await page.locator('.theme-card[data-theme-choice=dark]').click();
   assert.equal(await page.evaluate(()=>document.documentElement.dataset.theme),'dark');assert.equal(await page.evaluate(()=>state.theme),'dark');
   assert.equal(await page.evaluate(()=>getComputedStyle(document.body).backgroundColor),'rgb(18, 18, 17)');

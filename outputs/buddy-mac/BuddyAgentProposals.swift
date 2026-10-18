@@ -206,7 +206,7 @@ struct BuddyAgentProposal: Codable {
     private func fail(_ message:String)->BuddyProposalFailure {BuddyProposalFailure(message:message)}
     private func state(_ workspace:String)throws->[String:Any] {
         let data=try Data(contentsOf:workspaceFile)
-        guard data.count<32*1024*1024,UUID(uuidString:workspace) != nil,let s=try JSONSerialization.jsonObject(with:data) as? [String:Any],s["conversationWorkspace"] as? String==workspace,s["agents"] is [[String:Any]],s["groups"] is [[String:Any]] else{throw fail("This workspace changed. Reopen the conversation.")};return s
+        guard data.count<50_000_000,UUID(uuidString:workspace) != nil,let s=try JSONSerialization.jsonObject(with:data) as? [String:Any],s["conversationWorkspace"] as? String==workspace,s["agents"] is [[String:Any]],s["groups"] is [[String:Any]] else{throw fail("This workspace changed. Reopen the conversation.")};return s
     }
     private func records()throws->[[String:Any]] {
         guard FileManager.default.fileExists(atPath:file.path) else{return []}

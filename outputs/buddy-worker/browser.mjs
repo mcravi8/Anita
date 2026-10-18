@@ -32,7 +32,7 @@ export async function publicURL(raw, resolver=lookup, testOrigin='') {
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const runFile=promisify(execFile);
 export class PrivateBrowser {
-  constructor(profile,{testOrigin='',manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'}={}) {this.profile=resolve(profile);this.testOrigin=testOrigin;this.manualExecutable=manualExecutable;this.context=null;this.page=null;this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.manualProcess=null;this.lastURL=null;this.secrets=new Set();this.secretOrigins=new Map();}
+  constructor(profile,{testOrigin='',testGooglePath='',manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'}={}) {this.profile=resolve(profile);this.testOrigin=testOrigin;this.testGooglePath=testOrigin?testGooglePath:'';this.manualExecutable=manualExecutable;this.context=null;this.page=null;this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.manualProcess=null;this.lastURL=null;this.secrets=new Set();this.secretOrigins=new Map();this.googleFlow=null;}
   async profileLock(){
     const path=resolve(this.profile,'SingletonLock');let meta;
     try{meta=await lstat(path);}catch(error){if(error.code==='ENOENT')return null;throw error;}
@@ -62,7 +62,7 @@ export class PrivateBrowser {
     // Use Chrome's real encrypted profile, never Playwright's mock Keychain/basic password store.
     this.context=await chromium.launchPersistentContext(this.profile,{channel:'chrome',headless:!headed,chromiumSandbox:true,acceptDownloads:false,permissions:[],serviceWorkers:'block',ignoreDefaultArgs:['--password-store=basic','--use-mock-keychain','--disable-sync'],args:['--disable-extensions','--disable-background-networking']});
     await this.context.route('**/*',async route=>{try{const r=route.request(),url=new URL(await publicURL(r.url(),lookup,this.testOrigin)),payload=r.url()+' '+(r.postData()||'');for(const [secret,origin] of this.secretOrigins)if(url.origin!==origin&&(payload.includes(secret)||payload.includes(encodeURIComponent(secret))))throw Error('Private sign-in data cannot be sent to another origin.');await route.continue();}catch{await route.abort('blockedbyclient');}});
-    if(!headed)this.context.on('page',p=>{if(p!==this.page)p.close().catch(()=>{});});
+    if(!headed)this.context.on('page',p=>{if(p===this.page)return;if(this.googleFlow&&!this.googleFlow.popup){this.googleFlow.popup=p;return;}p.close().catch(()=>{});});
     this.page=this.context.pages()[0]||await this.context.newPage();this.page.setDefaultTimeout(12000);
     this.page.on('dialog',dialog=>dialog.dismiss().catch(()=>{}));
     return this;
@@ -148,22 +148,83 @@ export class PrivateBrowser {
     if(url.protocol!=='https:'&&url.origin!==this.testOrigin)throw Error('Sign-in requires HTTPS.');
     if(!['signin','signup','verification'].includes(mode))throw Error('Choose sign-in, account creation, or email verification.');
     const privacy=await this.privacy();if(privacy.kind==='security')throw Error('Account recovery and security changes need you in private Chrome.');
-    const accountEmail=await this.page.locator('input[type=email],input[autocomplete=username]').first().inputValue().catch(()=>null);
+    const email=this.page.locator('input[type=email],input[autocomplete=username],input[autocomplete=email]').first();
+    const accountEmail=await email.count()?await email.inputValue().catch(()=>null):null;
     const token=randomUUID();this.authPlan={token,origin:url.origin,mode,signature:await this.signature(),created:Date.now()};
-    return this.scrub({token,origin:url.origin,mode,accountEmail,private:true});
+    return this.scrub({token,origin:url.origin,mode,accountEmail,googleAvailable:mode==='signin'&&!!await this.googleButton(this.page,url.origin),private:true});
   }
   async useSaved(token){
     const plan=this.authPlan;this.authPlan=null;
     if(!plan||plan.token!==token||plan.mode!=='signin'||Date.now()-plan.created>300000||await this.signature()!==plan.signature)throw Error('This sign-in request changed or expired. Request it again.');
+    const google=await this.useGoogle(plan.origin);if(google&&!google.switchedSignIn)return google;if(google?.switchedSignIn)plan.signature=await this.signature();
     const password=this.page.locator('input[type=password][autocomplete="current-password"],input[type=password]:not([autocomplete="new-password"])').first();
     // Inspect only a boolean. No API exposes a password or the Password Manager vault.
-    const ready=await password.evaluate(e=>{const f=e.form;if(!e.value||!f||[...f.elements].some(x=>x.autocomplete==='new-password'))return false;const target=new URL(f.action||location.href,location.href);return target.origin===location.origin&&f.method.toLowerCase()==='post';}).catch(()=>false);
+    const ready=await password.count()?await password.evaluate(e=>{const f=e.form;if(!e.value||!f||[...f.elements].some(x=>x.autocomplete==='new-password'))return false;const target=new URL(f.action||location.href,location.href);return target.origin===location.origin&&f.method.toLowerCase()==='post';}).catch(()=>false):false;
     if(!ready)return {needsUser:true,reason:'Chrome has not filled a saved login. Open privately to choose a saved account or unlock Password Manager.'};
     const form=password.locator('xpath=ancestor::form');const button=form.locator('button[type=submit],button:not([type]),input[type=submit]').first();
     const label=await button.evaluate(e=>e.innerText||e.value||e.getAttribute('aria-label')||'').catch(()=> '');
     if(!/sign.?in|log.?in|continue|next/i.test(label)||/create|register|agree|accept|pay|purchase|reset|delete/i.test(label))return {needsUser:true,reason:'Choose this sign-in step in private Chrome.'};
     await this.privacy();if(await this.signature()!==plan.signature)throw Error('The sign-in form changed. Request it again.');this.snapshot=null;await button.click();await this.page.waitForLoadState('domcontentloaded',{timeout:6000}).catch(()=>{});
     return {performed:true,page:await this.read()};
+  }
+  googlePage(page){try{const u=new URL(page.url());return u.protocol==='https:'&&u.hostname==='accounts.google.com'||!!this.testGooglePath&&u.origin===this.testOrigin&&u.pathname.startsWith(this.testGooglePath);}catch{return false;}}
+  async googleButton(page,origin){
+    for(const item of await page.locator('button,a[href],[role=button]').all()){
+      if(!await item.isVisible()||!await item.isEnabled())continue;
+      const label=await item.evaluate(e=>(e.innerText||e.getAttribute('aria-label')||'').trim().replace(/\s+/g,' '));
+      if(!/^(?:(?:continue|sign in|log in)(?: with)? )?google$/i.test(label))continue;
+      const href=await item.getAttribute('href');if(href){const u=new URL(href,page.url());if(u.origin!==origin&&!(u.protocol==='https:'&&u.hostname==='accounts.google.com'))continue;}
+      return item;
+    }
+    return null;
+  }
+  async useGoogle(origin){
+    const root=this.page;let switchedSignIn=false;
+    const signup=()=>/\/(?:sign-up|signup|register)(?:\/|$)/i.test(new URL(root.url()).pathname);
+    if(signup()){
+      // Login must not submit the registration form shown by some sites by default.
+      let link;
+      for(const item of await root.locator('a[href]').all()){
+        if(!await item.isVisible())continue;
+        const label=(await item.innerText()).trim(),href=new URL(await item.getAttribute('href'),root.url());
+        if(/^(?:sign|log)\s?in$/i.test(label)&&href.origin===origin&&/\/(?:sign-in|signin|login)(?:\/|$)/i.test(href.pathname)){link=item;break;}
+      }
+      if(!link)return {needsUser:true,reason:'The site is on account creation rather than sign-in. Choose the existing-account sign-in privately.'};
+      await link.click();await root.waitForLoadState('domcontentloaded',{timeout:6000}).catch(()=>{});
+      if(new URL(root.url()).origin!==origin||signup())return {needsUser:true,reason:'The existing-account sign-in needs you.'};
+      switchedSignIn=true;
+    }
+    if(new URL(root.url()).origin!==origin)return null;
+    const google=await this.googleButton(root,origin);
+    if(!google)return switchedSignIn?{switchedSignIn:true}:null;
+    this.snapshot=null;const flow={origin,popup:null};this.googleFlow=flow;let choseAccount=false;
+    try{
+      await google.click({timeout:12000});
+      const deadline=Date.now()+12000;
+      for(let i=0;i<32&&Date.now()<deadline;i++){
+        const popup=flow.popup&&!flow.popup.isClosed()?flow.popup:null,page=popup||root;
+        await page.waitForLoadState('domcontentloaded',{timeout:1200}).catch(()=>{});
+        const url=new URL(page.url());
+        if(this.googlePage(page)){
+          // Only an unambiguous existing account tile is automatic. Passwords,
+          // new accounts, OAuth permissions, agreements and challenges stay private.
+          const tiles=page.locator('[data-identifier]'),visible=[];
+          for(const tile of await tiles.all())if(await tile.isVisible())visible.push(tile);
+          const challenge=await page.locator('input[type=password],input[autocomplete="one-time-code"],iframe[src*="recaptcha"]').count();
+          const consent=/\/consent(?:\/|$)|\/approval(?:\/|$)|\/challenge(?:\/|$)|\/signin\/v\d+/i.test(url.pathname);
+          if(!choseAccount&&!challenge&&!consent&&visible.length===1){choseAccount=true;await visible[0].click();continue;}
+          if(challenge||consent||visible.length>1){this.page=page;return {needsUser:true,method:'google',reason:visible.length>1?'Choose which Google account to use privately.':'Google needs your sign-in, verification or permission choice.'};}
+        }else if(url.origin===origin&&!(this.testGooglePath&&url.pathname.startsWith(this.testGooglePath))&&!/\/(?:oauth|[^/]*callback[^/]*|sso|authorize)(?:\/|$)/i.test(url.pathname)){
+          this.page=page;const result=await this.read();
+          if(!result.authentication?.private){if(popup)await root.close().catch(()=>{});return {performed:true,method:'google',page:result};}
+        }
+        // OAuth callbacks may briefly use the site's authentication subdomain.
+        // Wait for the approved site without reading or acting on other origins.
+        await new Promise(r=>setTimeout(r,250));
+      }
+      this.page=flow.popup&&!flow.popup.isClosed()?flow.popup:root;
+      return {needsUser:true,method:'google',reason:'Google sign-in needs a private account choice or verification.'};
+    }finally{this.googleFlow=null;}
   }
   async verificationPlan(){
     await this.ready();const p=await this.privacy();if(!p.private||p.kind!=='verification')throw Error('A supported email verification form is not visible.');

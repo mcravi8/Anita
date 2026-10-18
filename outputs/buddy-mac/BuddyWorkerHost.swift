@@ -309,9 +309,10 @@ import Darwin
         guard let origin=plan["origin"] as? String,let token=plan["token"] as? String else{throw BuddyWorkerFailure(message:"This sign-in step is unavailable.")}
         let old=try store.job(id),permission=old["signInPermission"] as? [String:Any] ?? [:]
         let date=(permission["approvedAt"] as? String).flatMap{ISO8601DateFormatter().date(from:$0)}
-        let auto=mode=="verification" && permission["origin"] as? String==origin && permission["emailCodes"] as? Bool==true && date.map{Date().timeIntervalSince($0)<600}==true
+        let savedGoogle=BuddyWorkerSignInPolicy.reuseGoogle(job:job,plan:plan,jobs:store.jobs)
+        let auto=savedGoogle || mode=="verification" && permission["origin"] as? String==origin && permission["emailCodes"] as? Bool==true && date.map{Date().timeIntervalSince($0)<600}==true
         var reviewID:String?
-        var action=mode=="verification" ? "verify":"private"
+        var action=savedGoogle ? "saved":mode=="verification" ? "verify":"private"
         if !auto {
             let review=UUID().uuidString;reviewID=review
             var records=old["reviews"] as? [[String:Any]] ?? []

@@ -9,6 +9,16 @@ import Foundation
         require(!BuddyWorkerLiveness.stalled(status:"running",lastActivity:now,now:now),"active work is not interrupted")
         for status in ["waiting_review","waiting_user","queued","completed","paused"] {require(!BuddyWorkerLiveness.stalled(status:status,lastActivity:old,now:now),"human and inactive states are not mistaken for stalled work")}
         let workspace = UUID().uuidString, agent = UUID().uuidString
+        let loginJob:[String:Any] = ["workspace":workspace,"agentId":agent]
+        let googlePlan:[String:Any] = ["mode":"signin","googleAvailable":true,"origin":"https://console.agentmail.to"]
+        let approval:[String:Any] = ["kind":"authentication","mode":"signin","origin":"https://console.agentmail.to","status":"completed","authAction":"saved"]
+        let approved:[String:Any] = ["workspace":workspace,"agentId":agent,"reviews":[approval]]
+        require(BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:googlePlan,jobs:[approved]),"an already-approved site can reuse Google without another sign-in-choice interruption")
+        for field in ["workspace","agentId"] {var wrong=approved;wrong[field]=UUID().uuidString;require(!BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:googlePlan,jobs:[wrong]),"saved sign-in approval is scoped to the actual workspace and agent")}
+        var otherSite=googlePlan;otherSite["origin"]="https://other.example";require(!BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:otherSite,jobs:[approved]),"a saved login does not authorize another site")
+        for mode in ["signup","verification"] {var wrong=googlePlan;wrong["mode"]=mode;require(!BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:wrong,jobs:[approved]),"Google reuse never grants account creation or email verification")}
+        var passwordOnly=googlePlan;passwordOnly["googleAvailable"]=false;require(!BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:passwordOnly,jobs:[approved]),"only an observed Google button gets automatic reuse")
+        for status in ["pending","declined","uncertain"] {var review=approval;review["status"]=status;var wrong=approved;wrong["reviews"]=[review];require(!BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:googlePlan,jobs:[wrong]),"unconfirmed or declined reviews cannot authorize login")}
         let store = try BuddyWorkerStore(directory: root.appendingPathComponent("Worker"))
         let first = try store.create(workspace: workspace, agent: agent, requestId: "once", title: "Fixture task", goal: "Research only", kind: "research", provider: "chatgpt", budget: 0), id = first["id"] as! String
         let duplicate = try store.create(workspace: workspace, agent: agent, requestId: "once", title: "Other title", goal: "Other brief", kind: "research", provider: "chatgpt", budget: 0)

@@ -14,6 +14,17 @@ enum BuddyWorkerLiveness {
     }
 }
 
+enum BuddyWorkerSignInPolicy {
+    static func reuseGoogle(job:[String:Any],plan:[String:Any],jobs:[[String:Any]])->Bool {
+        guard plan["mode"] as? String=="signin",plan["googleAvailable"] as? Bool==true,let origin=plan["origin"] as? String,let url=URL(string:origin),url.scheme=="https",url.host != nil,let workspace=job["workspace"] as? String,let agent=job["agentId"] as? String else{return false}
+        return jobs.contains{prior in
+            prior["workspace"] as? String==workspace && prior["agentId"] as? String==agent && (prior["reviews"] as? [[String:Any]] ?? []).contains{review in
+                review["kind"] as? String=="authentication" && review["mode"] as? String=="signin" && review["origin"] as? String==origin && review["status"] as? String=="completed" && review["authAction"] as? String=="saved"
+            }
+        }
+    }
+}
+
 enum BuddyWorkerWire {
     static let maximumBytes = 8 * 1024 * 1024
     static func directory(_ support: URL) -> URL {

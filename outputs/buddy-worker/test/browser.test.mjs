@@ -93,3 +93,44 @@ test('finishing sign-in closes only the verified Chrome profile, including after
  const wrong=await mkdtemp(join(tmpdir(),'buddy-wrong-profile-')),c=new PrivateBrowser(wrong,{manualExecutable:process.execPath});
  try{await symlink(`${hostname()}-${kept.pid}`,join(wrong,'SingletonLock'));await assert.rejects(c.closeManualProfile(),/Close Buddy/);assert.equal(kept.exitCode,null);assert.equal(kept.signalCode,null);}finally{kept.kill();await rm(other,{recursive:true,force:true});await rm(wrong,{recursive:true,force:true});}
 });
+
+test('Google sign-in switches to existing-account login and reuses one saved account without exposing credentials',async()=>{
+ let signupClicks=0,googleClicks=0,accountClicks=0,consentClicks=0,scenario='account';
+ const server=createServer((req,res)=>{res.setHeader('Content-Type','text/html');
+  if(req.url==='/sign-up')return res.end('<form><input type="password" autocomplete="new-password"><button type="button" onclick="fetch(\'/bad-signup\')">Google</button></form><a href="/sign-in">Sign in</a>');
+  if(req.url==='/bad-signup'){signupClicks++;return res.end('Bad signup');}
+  if(req.url==='/sign-in')return res.end(`<input type="password" autocomplete="current-password" value="private-fixture-password"><button onclick="location.href='/start-google'">Google</button>`);
+  if(req.url==='/start-google'){googleClicks++;res.statusCode=302;res.setHeader('Location','/google/'+scenario);return res.end();}
+  if(req.url==='/google/account')return res.end('<div role="link" tabindex="0" data-identifier="fixture@example.test" onclick="location.href=\'/account-selected\'">Fixture account</div>');
+  if(req.url==='/account-selected'){accountClicks++;res.statusCode=302;res.setHeader('Location','/dashboard');return res.end();}
+  if(req.url==='/google/multiple')return res.end('<div role="link" data-identifier="one@example.test">One</div><div role="link" data-identifier="two@example.test">Two</div>');
+  if(req.url==='/google/consent')return res.end('<div data-identifier="fixture@example.test">Account</div><button onclick="location.href=\'/permission-granted\'">Allow</button>');
+  if(req.url==='/permission-granted'){consentClicks++;return res.end('Wrong permission grant');}
+  if(req.url==='/google/challenge')return res.end('<input type="password" value="private-google-password"><button>Continue</button>');
+  res.end('<h1>Existing account dashboard</h1>');
+ });
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-google-signin-')),b=new PrivateBrowser(join(root,'profile'),{testOrigin:origin,testGooglePath:'/google/'});
+ try{
+  await b.navigate(origin+'/sign-up');let plan=await b.prepareSignIn('signin');assert.equal(plan.googleAvailable,true);let result=await b.useSaved(plan.token);
+  assert.equal(result.performed,true);assert.equal(result.method,'google');assert.equal(result.page.title,await b.page.title());assert.match(result.page.text,/Existing account dashboard/);assert.equal(signupClicks,0);assert.equal(googleClicks,1);assert.equal(accountClicks,1);assert.ok(!JSON.stringify(result).includes('private-fixture-password'));
+  for(const value of ['multiple','consent','challenge']){scenario=value;await b.navigate(origin+'/sign-in');plan=await b.prepareSignIn('signin');result=await b.useSaved(plan.token);assert.equal(result.needsUser,true,value);assert.equal(result.method,'google');assert.equal(result.page,undefined);assert.ok(!JSON.stringify(result).includes('private-google-password'));}
+  assert.equal(accountClicks,1,'multiple accounts and consent never select or grant automatically');assert.equal(consentClicks,0);
+ }finally{await b.close();await rm(root,{recursive:true,force:true});await new Promise(r=>server.close(r));}
+});
+
+test('Google sign-in never registers an account or follows a different identity provider',async()=>{
+ let bad=0;const server=createServer((req,res)=>{res.setHeader('Content-Type','text/html');if(req.url==='/register')return res.end('<input type="password" autocomplete="new-password"><button onclick="location.href=\'/bad\'">Google</button>');if(req.url==='/bad')bad++;res.end('<input type="password" autocomplete="current-password"><a href="https://not-google.example/login">Continue with Google</a>');});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-google-scope-')),b=new PrivateBrowser(root,{testOrigin:origin});
+ try{for(const path of ['/register','/sign-in']){await b.navigate(origin+path);const plan=await b.prepareSignIn('signin'),result=await b.useSaved(plan.token);assert.equal(result.needsUser,true);}assert.equal(bad,0);}finally{await b.close();await rm(root,{recursive:true,force:true});await new Promise(r=>server.close(r));}
+});
+
+test('Google OAuth popup keeps its callback alive until the original site is signed in',async()=>{
+ let picks=0;const server=createServer((req,res)=>{res.setHeader('Content-Type','text/html');
+  if(req.url==='/sign-in')return res.end('<input type="password"><button onclick="window.open(\'/google/account\')">Continue with Google</button>');
+  if(req.url==='/google/account')return res.end('<div role="link" data-identifier="fixture@example.test" onclick="location.href=\'/oauth_callback\'">Fixture account</div>');
+  if(req.url==='/oauth_callback'){picks++;return res.end('<script>setTimeout(()=>{window.opener.location="/dashboard";window.close();},300)</script>');}
+  res.end('<h1>Signed-in popup fixture</h1>');
+ });
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-google-popup-')),b=new PrivateBrowser(root,{testOrigin:origin,testGooglePath:'/google/'});
+ try{await b.navigate(origin+'/sign-in');const plan=await b.prepareSignIn('signin'),result=await b.useSaved(plan.token);assert.equal(result.performed,true);assert.equal(result.method,'google');assert.match(result.page.text,/Signed-in popup fixture/);assert.equal(picks,1);assert.equal(b.context.pages().length,1);}finally{await b.close();await rm(root,{recursive:true,force:true});await new Promise(r=>server.close(r));}
+});

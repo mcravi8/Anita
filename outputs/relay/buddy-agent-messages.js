@@ -7,8 +7,12 @@
   }
   const stamp=value=>{const n=Date.parse(value||'');return Number.isFinite(n)?n:NaN;};
   function mergeTimeline(state,agent,messages,events,updateTimes={}){
-    const known=new Set(state.agents.map(a=>a.id)),seen=new Set();
-    const activity=(events||[]).filter(e=>e&&typeof e.id==='string'&&typeof e.exchangeId==='string'&&!seen.has(e.id)&&seen.add(e.id)&&known.has(e.fromAgentId)&&known.has(e.toAgentId)&&e.fromAgentId!==e.toAgentId&&[e.fromAgentId,e.toAgentId].includes(agent)&&Number.isFinite(stamp(e.at))).slice().sort((a,b)=>stamp(a.at)-stamp(b.at)||a.id.localeCompare(b.id));
+    const known=new Set(state.agents.map(a=>a.id)),seen=new Set(),team=(state.groups||[]).find(g=>g.id===agent),members=new Set(team?.members||[]);
+    const activity=(events||[]).filter(e=>{
+      if(!e||typeof e.id!=='string'||typeof e.exchangeId!=='string'||seen.has(e.id)||!known.has(e.fromAgentId)||!known.has(e.toAgentId)||!Number.isFinite(stamp(e.at)))return false;
+      if(team?!(e.item?.kind==='team-chat-item'&&members.has(e.fromAgentId)&&members.has(e.toAgentId)):e.fromAgentId===e.toAgentId||![e.fromAgentId,e.toAgentId].includes(agent))return false;
+      seen.add(e.id);return true;
+    }).slice().sort((a,b)=>stamp(a.at)-stamp(b.at)||a.id.localeCompare(b.id));
     if(!activity.length)return messages;
     const times=messages.map(m=>stamp(m.createdAt||updateTimes[m.id]||m.teamCheckedAt||state.runs?.[m.runId]?.createdAt));
     function clock(m,anchor,backwards){
@@ -27,6 +31,7 @@
     for(let i=0;i<slots.length;i++){
       let group;
       for(const e of slots[i]){
+        if(e.item){result.push(e.item);group=null;continue;}
         if(!group||stamp(e.at)-stamp(group.endAt)>5*60000||group.count>=40){group={kind:'agent-exchange',id:'agent-activity-'+e.id,agentId:agent,count:0,peers:[],exchangeIds:[],at:e.at,endAt:e.at};result.push(group);}
         group.count++;group.endAt=e.at;const peer=e.fromAgentId===agent?e.toAgentId:e.fromAgentId;if(!group.peers.includes(peer))group.peers.push(peer);if(!group.exchangeIds.includes(e.exchangeId))group.exchangeIds.push(e.exchangeId);
       }
@@ -40,8 +45,8 @@
   const native=()=>!!window.BuddyDesktop?.worker;
   const time=value=>value?new Date(value).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'';
   const status=value=>({queued:'Queued',running:'Waiting for reply',completed:'Completed',failed:'Couldn’t complete',interrupted:'Interrupted',budget:'Usage limit reached',cancelled:'Cancelled'}[value]||value);
-  api.timeline=(id,messages)=>mergeTimeline(state,id,messages,summaryWorkspace===state.conversationWorkspace?summaries[id]?.events:[],updateTimes);
-  api.hasTimeline=id=>api.timeline(id,[]).length>0;
+  api.timeline=(id,messages)=>findGroup(id)?window.BuddyTeamChat?.timeline(id,messages)||messages:mergeTimeline(state,id,messages,summaryWorkspace===state.conversationWorkspace?summaries[id]?.events:[],updateTimes);
+  api.hasTimeline=id=>findGroup(id)?window.BuddyTeamChat?.hasTimeline(id)||false:api.timeline(id,[]).length>0;
   api.marker=m=>`<div class="agent-message-activity" data-agent-activity="${esc(m.id)}"><time datetime="${esc(m.at)}" title="${esc(time(m.at)+(m.at!==m.endAt?' – '+time(m.endAt):''))}">${esc(time(m.at))}</time><button type="button" class="agent-messages-link" data-agent-messages="${esc(m.agentId)}" data-agent-exchanges="${esc(JSON.stringify(m.exchangeIds))}"><span class="agent-message-count">${m.count} ${m.count===1?'message':'messages'} with</span><span class="agent-message-peers">${m.peers.map(peer=>`<span class="agent-message-peer">${avatar(peer,true)}<span>${esc(agentName(peer))}</span></span>`).join(' ')}</span>${icon('chevron')}</button></div>`;
   api.accept=value=>{
     if(value.workspace!==state.conversationWorkspace)return;

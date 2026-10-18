@@ -196,6 +196,8 @@ import Foundation
     private func updateEntry(_ job: Job, _ id: String, status: String, notes: String = "", error: String = "") {
         guard let index = job.entries.firstIndex(where: { $0["agentId"] as? String == id }) else { return }
         job.entries[index]["status"] = status
+        if status == "working", job.entries[index]["startedAt"] == nil { job.entries[index]["startedAt"] = ISO8601DateFormatter().string(from:Date()) }
+        if ["completed","failed","blocked","stopped"].contains(status) { job.entries[index]["finishedAt"] = ISO8601DateFormatter().string(from:Date()) }
         if !notes.isEmpty { job.entries[index]["notes"] = notes }
         job.entries[index]["error"] = error
     }

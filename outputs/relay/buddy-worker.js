@@ -72,8 +72,8 @@
   function showError(e){error=String(e.message||e);const el=document.querySelector('[data-worker-error]');if(el)el.textContent=error;else showToast(error);}
   async function refresh(redraw=true){
     const listKey=s=>JSON.stringify([s.online,s.paused,s.defaultProvider,s.privateBrowser?.agentId,s.privateBrowser?.taskId,s.tasks.map(t=>[t.id,t.title,t.agentId,t.status]),(s.routines||[]).map(r=>[r.id,r.status,r.nextRun])]);
-    try{const before=listKey(snapshot);snapshot=await request({operation:'status'});await deliverRoutineResults();error='';const message=document.querySelector('[data-worker-error]');if(message)message.textContent='';if(redraw&&document.querySelector('[data-worker-panel]')){if(view==='list'&&before!==listKey(snapshot))list();else if(view==='routine'&&routine&&before!==listKey(snapshot)){const r=snapshot.routines?.find(r=>r.id===routine.id);if(r)routineDetail(r);else{view='list';list();}}else if(view==='task'&&detail){const result=await request({operation:'detail',taskId:detail.id});detail=result.task;const live=document.querySelector('[data-worker-live]');if(live&&!(live.contains(document.activeElement)&&document.activeElement.matches('input,textarea,select'))&&last!==detailKey()){live.innerHTML=taskBody(detail);last=detailKey();}}}badge();}
-    catch(e){snapshot.online=false;if(redraw&&view==='list'){list();showError(e);}}
+    try{const before=listKey(snapshot);snapshot=await request({operation:'status'});await deliverRoutineResults();error='';const message=document.querySelector('[data-worker-error]');if(message)message.textContent='';if(redraw&&document.querySelector('[data-worker-panel]')){if(view==='list'&&before!==listKey(snapshot))list();else if(view==='routine'&&routine&&before!==listKey(snapshot)){const r=snapshot.routines?.find(r=>r.id===routine.id);if(r)routineDetail(r);else{view='list';list();}}else if(view==='task'&&detail){const result=await request({operation:'detail',taskId:detail.id});detail=result.task;const live=document.querySelector('[data-worker-live]');if(live&&!(live.contains(document.activeElement)&&document.activeElement.matches('input,textarea,select'))&&last!==detailKey()){live.innerHTML=taskBody(detail);last=detailKey();}}}badge();window.BuddyActivity?.acceptWorker(snapshot);}
+    catch(e){window.BuddyActivity?.workerError(e.message||e);snapshot.online=false;if(redraw&&view==='list'){list();showError(e);}}
   }
   async function deliverRoutineResults(){
     let changed=false;
@@ -83,6 +83,7 @@
     if(changed){save();if(ui.view.kind==='chat')refreshLiveChat(ui.view.target);else render();}
   }
   function badge(){const count=snapshot.tasks.filter(t=>['waiting_review','waiting_user','failed','interrupted'].includes(t.status)).length+(snapshot.routines||[]).filter(r=>r.status==='needs_attention').length+(snapshot.scheduleError?1:0);document.querySelectorAll('[data-worker-badge]').forEach(el=>{el.textContent=count||'';el.hidden=!count;});}
+  api.refresh=refresh;
   api.open=async()=>{view='list';error='';list();await refresh();};
   api.profiles=async()=>{view='profiles';error='';profiles();try{snapshot=await request({operation:'start'});profiles();}catch(e){showError(e);}};
   document.addEventListener('input',e=>{if(e.target.matches('[data-worker-update]')&&detail)drafts.set(detail.id,{update:e.target.value});const form=e.target.closest('#worker-new-form,#worker-routine-form');if(form){try{localStorage.setItem(key()+(form.id==='worker-routine-form'?'-routine':''),JSON.stringify({...Object.fromEntries(new FormData(form)),...(form.id==='worker-routine-form'?{weekdays:[...form.querySelectorAll('[name=weekday]:checked')].map(v=>Number(v.value))}:{})}));}catch{}}});

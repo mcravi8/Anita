@@ -83,6 +83,8 @@ import Foundation
         fake.complete(4, text: "ONE_COMBINED_REPLY")
         await wait { team.snapshots()[0]["status"] as? String == "completed" }
         require(team.snapshots().count == 1 && team.snapshots()[0]["text"] as? String == "ONE_COMBINED_REPLY", "only one group reply is exposed")
+        let recordedEntries=(team.snapshots()[0]["team"] as! [String:Any])["entries"] as! [[String:Any]]
+        require(recordedEntries.allSatisfy { ($0["startedAt"] as? String).flatMap { ISO8601DateFormatter().date(from:$0) } != nil && ($0["finishedAt"] as? String).flatMap { ISO8601DateFormatter().date(from:$0) } != nil }, "group contributions retain actual start and finish timestamps for the chat timeline")
         print("PASS: independent parallel work, dependent handoffs, private internal turns, scoped permissions, and one combined reply")
 
         let (failureFake, failureTeam) = fixture(), failureRequest = request()

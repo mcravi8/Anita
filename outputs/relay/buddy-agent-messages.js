@@ -13,7 +13,8 @@
   const status=value=>({queued:'Queued',running:'Waiting for reply',completed:'Completed',failed:'Couldn’t complete',interrupted:'Interrupted',budget:'Usage limit reached',cancelled:'Cancelled'}[value]||value);
   api.summary=id=>{
     const s=summaryWorkspace===state.conversationWorkspace?summaries[id]:null;
-    return s?.count?`<button type="button" class="agent-messages-link" data-agent-messages="${esc(id)}">${icon('people')}<span>${Number(s.count)} messages with ${s.peers.length} ${s.peers.length===1?'agent':'agents'}</span>${icon('chevron')}</button>`:'';
+    const peers=[...new Set(s?.peers||[])].filter(peer=>peer!==id&&findAgent(peer));
+    return s?.count&&peers.length?`<button type="button" class="agent-messages-link" data-agent-messages="${esc(id)}"><span class="agent-message-count">${Number(s.count)} ${Number(s.count)===1?'message':'messages'} with</span><span class="agent-message-peers">${peers.map(peer=>`<span class="agent-message-peer">${avatar(peer,true)}<span>${esc(agentName(peer))}</span></span>`).join(' ')}</span>${icon('chevron')}</button>`:'';
   };
   api.accept=value=>{
     if(value.workspace!==state.conversationWorkspace)return;

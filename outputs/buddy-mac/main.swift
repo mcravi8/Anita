@@ -236,7 +236,7 @@ import AppKit
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }
     @objc private func about() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.22.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.22.1", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
@@ -488,6 +488,7 @@ import AppKit
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
         if navigationAction.targetFrame?.isMainFrame == false, url.absoluteString.split(separator:"#",maxSplits:1).first == "about:srcdoc" { decisionHandler(.allow); return }
+        if navigationAction.targetFrame?.isMainFrame == false {decisionHandler(.cancel);return}
         if url.isFileURL, let root = Bundle.main.resourceURL?.appendingPathComponent("Web").standardizedFileURL.path,
            url.standardizedFileURL.path.hasPrefix(root + "/") { decisionHandler(.allow); return }
         if navigationAction.navigationType == .linkActivated, ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") { NSWorkspace.shared.open(url) }

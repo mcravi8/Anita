@@ -1,4 +1,4 @@
-# Buddy for Mac · 0.22.0
+# Buddy for Mac · 0.22.1
 
 Buddy is a personal Mac app with minimal direct messages, 3D avatars, and agents whose names, roles, instructions, shapes, and colors you can change independently.
 

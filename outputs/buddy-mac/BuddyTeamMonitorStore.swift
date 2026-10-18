@@ -94,10 +94,16 @@ import CryptoKit
         }
         if !NSDictionary(dictionary:old).isEqual(to:seen){try mutate{value["observed"]=seen}};return out
     }
-    func publish(agent:String,job:[String:Any],body:String,sources:[[String:Any]],priority:Int,now:Date,checkStatus:String="completed")throws {
+    static func brief(_ body:String)->String {
+        let plain=body.replacingOccurrences(of:#"(?m)^\s*[-*]\s+"#,with:"",options:.regularExpression).replacingOccurrences(of:"**",with:"").trimmingCharacters(in:.whitespacesAndNewlines)
+        let first=plain.range(of:#"(?s)^.*?[.!?](?=\s|$)"#,options:.regularExpression).map{String(plain[$0])} ?? plain.components(separatedBy:"\n")[0]
+        guard !first.isEmpty,first.count<=260,first.range(of:#"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b|\b\d\d:\d\d:\d\dZ\b|\bTask [0-9a-f]{8}\b"#,options:[.regularExpression,.caseInsensitive])==nil else{return "There’s an update on your work. Open Work details."}
+        return first
+    }
+    func publish(agent:String,job:[String:Any],body:String,sources:[[String:Any]],priority:Int,now:Date,checkStatus:String="completed",detail:String?=nil)throws {
         let id="team-"+(job["id"] as! String)+":"+agent
         guard !updates.contains(where:{$0["id"] as? String==id}) else{return}
-        let update:[String:Any]=["id":id,"workspace":job["workspace"]!,"agentId":agent,"checkId":job["id"]!,"body":body,"sources":sources,"priority":priority,"checkStatus":checkStatus,"at":Self.stamp(now),"checkedAt":job["startedAt"] ?? Self.stamp(now)]
+        let update:[String:Any]=["id":id,"workspace":job["workspace"]!,"agentId":agent,"checkId":job["id"]!,"body":Self.brief(body),"detail":detail ?? body,"sources":sources,"priority":priority,"checkStatus":checkStatus,"at":Self.stamp(now),"checkedAt":job["startedAt"] ?? Self.stamp(now)]
         try mutate{var entries=updates;guard entries.count<2000 else{throw BuddyWorkerFailure(message:"Saved team updates are full.")};entries.append(update);value["updates"]=entries}
     }
     func status(state:[String:Any])->[String:Any] {

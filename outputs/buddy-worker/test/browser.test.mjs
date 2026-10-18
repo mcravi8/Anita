@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {publicAddress,publicURL,PrivateBrowser} from '../browser.mjs';
 import {mkdtemp,rm,symlink,writeFile,readFile,chmod} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
+import {tmpdir,hostname} from 'node:os';
 import {join} from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
@@ -69,4 +69,27 @@ test('private handoff launches an ordinary separate profile with no agent/debugg
   assert.ok(args.includes('chrome://settings/people'));assert.ok(args.some(x=>x===`--user-data-dir=${join(root,'profile')}`));assert.ok(!args.some(x=>/remote-debug|enable-automation|mock-keychain|password-store=basic/.test(x)));
   assert.equal((await b.finishManual()).closed,true);
  }finally{await b.close();await rm(root,{recursive:true,force:true});}
+});
+
+
+test('private Chrome recovers only a same-user dead-process lock and keeps saved profile data',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'buddy-stale-profile-')),lock=join(root,'SingletonLock'),saved=join(root,'saved-fixture.txt');
+ const dead=spawn(process.execPath,['-e','process.exit(0)']);await new Promise(r=>dead.once('exit',r));
+ const b=new PrivateBrowser(root);
+ try{await writeFile(saved,'keep saved browser data');await symlink(`${hostname()}-${dead.pid}`,lock);assert.equal(await b.profileLock(),null);assert.equal(await readFile(saved,'utf8'),'keep saved browser data');
+  await symlink(`${hostname()}-${process.pid}`,lock);assert.equal(await b.profileLock(),process.pid);assert.equal(await readFile(saved,'utf8'),'keep saved browser data');
+ }finally{await rm(root,{recursive:true,force:true});}
+});
+test('a Chrome process that exits before opening cannot report a successful private handoff',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'buddy-missing-window-')),program=join(root,'fake-chrome');await writeFile(program,'#!/bin/sh\nexit 1\n');await chmod(program,0o700);
+ const b=new PrivateBrowser(join(root,'profile'),{manualExecutable:program});
+ try{await assert.rejects(b.manual('google'),/Chrome did not open/);assert.equal(b.manualProcess,null);}finally{await rm(root,{recursive:true,force:true});}
+});
+test('finishing sign-in closes only the verified Chrome profile, including after a re-exec',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'buddy-reexec-profile-')),b=new PrivateBrowser(root,{manualExecutable:process.execPath}),child=spawn(process.execPath,['-e','setInterval(()=>{},1000)','--',`--user-data-dir=${root}`]);
+ try{await new Promise(r=>child.once('spawn',r));await symlink(`${hostname()}-${child.pid}`,join(root,'SingletonLock'));await b.closeManualProfile();assert.ok(child.exitCode!==null||child.signalCode!==null);assert.equal(await b.profileLock(),null);}finally{if(child.exitCode===null&&child.signalCode===null)child.kill();await rm(root,{recursive:true,force:true});}
+ const other=await mkdtemp(join(tmpdir(),'buddy-other-profile-')),kept=spawn(process.execPath,['-e','setInterval(()=>{},1000)','--',`--user-data-dir=${other}`]);
+ await new Promise(r=>kept.once('spawn',r));
+ const wrong=await mkdtemp(join(tmpdir(),'buddy-wrong-profile-')),c=new PrivateBrowser(wrong,{manualExecutable:process.execPath});
+ try{await symlink(`${hostname()}-${kept.pid}`,join(wrong,'SingletonLock'));await assert.rejects(c.closeManualProfile(),/Close Buddy/);assert.equal(kept.exitCode,null);assert.equal(kept.signalCode,null);}finally{kept.kill();await rm(other,{recursive:true,force:true});await rm(wrong,{recursive:true,force:true});}
 });

@@ -2,12 +2,14 @@ import {chromium} from 'playwright-core';
 import {lookup} from 'node:dns/promises';
 import {isIP} from 'node:net';
 import {randomUUID, createHash} from 'node:crypto';
-import {mkdir, chmod} from 'node:fs/promises';
+import {mkdir, chmod, lstat, readlink, unlink} from 'node:fs/promises';
+import {hostname} from 'node:os';
 import {resolve} from 'node:path';
 import {createInterface} from 'node:readline';
 import {pathToFileURL} from 'node:url';
-import {realpathSync,lstatSync} from 'node:fs';
-import {spawn} from 'node:child_process';
+import {realpathSync} from 'node:fs';
+import {spawn,execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 
 export function publicAddress(ip) {
   if (isIP(ip) === 4) {
@@ -28,11 +30,35 @@ export async function publicURL(raw, resolver=lookup, testOrigin='') {
   return url.href;
 }
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
+const runFile=promisify(execFile);
 export class PrivateBrowser {
   constructor(profile,{testOrigin='',manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'}={}) {this.profile=resolve(profile);this.testOrigin=testOrigin;this.manualExecutable=manualExecutable;this.context=null;this.page=null;this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.manualProcess=null;this.lastURL=null;this.secrets=new Set();this.secretOrigins=new Map();}
+  async profileLock(){
+    const path=resolve(this.profile,'SingletonLock');let meta;
+    try{meta=await lstat(path);}catch(error){if(error.code==='ENOENT')return null;throw error;}
+    if(!meta.isSymbolicLink()||meta.uid!==process.getuid())throw Error('Chrome’s profile lock needs manual inspection. Saved browser data was kept.');
+    const target=await readlink(path),split=target.lastIndexOf('-'),host=target.slice(0,split),pid=Number(target.slice(split+1));
+    if(host!==hostname()||!Number.isSafeInteger(pid)||pid<=0)throw Error('Chrome’s profile is locked by another session. Close Buddy’s private Chrome window first.');
+    try{process.kill(pid,0);return pid;}catch(error){if(error.code!=='ESRCH')return pid;}
+    // Only this account's same-host, dead-process lock is disposable. Never
+    // reset a profile, touch a live lock, or read its cookies/password database.
+    if(await readlink(path)!==target)throw Error('Chrome’s profile lock changed. Try again.');
+    await unlink(path);return null;
+  }
+  async closeManualProfile(){
+    let pid=await this.profileLock();if(!pid)return;
+    const {stdout}=await runFile('/bin/ps',['-p',String(pid),'-ww','-o','command='],{timeout:2000,maxBuffer:65536}).catch(()=>({stdout:''}));
+    const command=stdout.trim(),marker=`--user-data-dir=${this.profile}`;
+    // Chrome can re-exec during Google sign-in. Only close the real Chrome
+    // executable whose command explicitly names this private profile.
+    if(!command.startsWith(this.manualExecutable+' ')||!command.includes(marker+' ')&&!command.endsWith(marker))throw Error('Close Buddy’s private Chrome window before finishing sign-in.');
+    process.kill(pid,'SIGTERM');
+    for(let i=0;i<40;i++){if(!await this.profileLock())return;await new Promise(r=>setTimeout(r,100));}
+    throw Error('Private Chrome is still closing. Try Finish private sign-in again.');
+  }
   async launch(headed=false) {
     if(this.manualProcess&&this.manualProcess.exitCode===null&&this.manualProcess.signalCode===null)throw Error('Private sign-in is open. Finish it in Buddy before resuming automated work.');
-    await this.closeAutomation(); await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);
+    await this.closeAutomation(); await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);await this.profileLock();
     // Use Chrome's real encrypted profile, never Playwright's mock Keychain/basic password store.
     this.context=await chromium.launchPersistentContext(this.profile,{channel:'chrome',headless:!headed,chromiumSandbox:true,acceptDownloads:false,permissions:[],serviceWorkers:'block',ignoreDefaultArgs:['--password-store=basic','--use-mock-keychain','--disable-sync'],args:['--disable-extensions','--disable-background-networking']});
     await this.context.route('**/*',async route=>{try{const r=route.request(),url=new URL(await publicURL(r.url(),lookup,this.testOrigin)),payload=r.url()+' '+(r.postData()||'');for(const [secret,origin] of this.secretOrigins)if(url.origin!==origin&&(payload.includes(secret)||payload.includes(encodeURIComponent(secret))))throw Error('Private sign-in data cannot be sent to another origin.');await route.continue();}catch{await route.abort('blockedbyclient');}});
@@ -163,16 +189,20 @@ export class PrivateBrowser {
     catch{throw Error('Verification was attempted without a confirmed result. Inspect the site before trying another code.');}
   }
   async manual(destination){
-    if(this.manualProcess&&this.manualProcess.exitCode===null&&this.manualProcess.signalCode===null)return {opened:true,private:true};
+    const existing=this.manualProcess&&this.manualProcess.exitCode===null&&this.manualProcess.signalCode===null;
+    if(existing&&destination!=='google')return {opened:true,private:true};
     let url=destination==='google'?'chrome://settings/people':this.page?.url()||this.lastURL||'about:blank';
     if(!['about:blank','chrome://settings/people'].includes(url))url=await publicURL(url,lookup,this.testOrigin);
-    this.lastURL=url;await this.closeAutomation();await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);
+    if(!existing)this.lastURL=url;await this.closeAutomation();await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);await this.profileLock();
     // No debugging connection, automation flags, page scripts, screenshots, or password reads during the handoff.
     const child=spawn(this.manualExecutable,[`--user-data-dir=${this.profile}`,'--no-first-run','--no-default-browser-check','--disable-background-mode','--new-window',url],{stdio:'ignore'});
-    await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('Could not open private Chrome. Install Google Chrome and try again.')));});this.manualProcess=child;
+    await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('Could not open private Chrome. Install Google Chrome and try again.')));});
+    await new Promise(resolve=>{const timer=setTimeout(resolve,350);child.once('exit',()=>{clearTimeout(timer);resolve();});});
+    if((child.exitCode!==null||child.signalCode!==null)&&!await this.profileLock())throw Error('Chrome did not open. Your saved browser data was kept; try opening Chrome again.');
+    if(!existing)this.manualProcess=child;
     return {opened:true,private:true};
   }
-  async finishManual(){const p=this.manualProcess;if(p&&p.exitCode===null&&p.signalCode===null){p.kill('SIGTERM');await Promise.race([new Promise(resolve=>p.once('exit',resolve)),new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error('Close Buddy’s private Chrome window before finishing sign-in.')),8000);t.unref();})]);}this.manualProcess=null;let locked=false;try{lstatSync(resolve(this.profile,'SingletonLock'));locked=true;}catch{}if(locked)throw Error('An older private Chrome session is still open. Quit that private Chrome session before finishing sign-in.');return {closed:true,url:this.lastURL?.startsWith('https:')?new URL(this.lastURL).origin:null};}
+  async finishManual(){const p=this.manualProcess;if(p&&p.exitCode===null&&p.signalCode===null){p.kill('SIGTERM');await Promise.race([new Promise(resolve=>p.once('exit',resolve)),new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error('Close Buddy’s private Chrome window before finishing sign-in.')),8000);t.unref();})]);}this.manualProcess=null;await this.closeManualProfile();return {closed:true,url:this.lastURL?.startsWith('https:')?new URL(this.lastURL).origin:null};}
   async closeAutomation(){this.snapshot=null;this.prepared=null;this.authPlan=null;this.refs=[];if(this.context){const c=this.context;this.context=null;await c.close().catch(()=>{});}this.page=null;}
   async close(){await this.closeAutomation();await this.finishManual();}
 }

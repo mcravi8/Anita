@@ -22,7 +22,8 @@ test('ordinary browser work reports results and distinct blockers in its DM with
  assert.equal(worker.deliverResult(JSON.parse(JSON.stringify(s)),t),false);
  assert.equal(worker.deliverResult(s,{...t,attentionKey:'review-two'}),true);
  assert.equal(worker.deliverResult(s,{...t,status:'waiting_user',attentionKey:'signin',progress:'Sign in privately.'}),true);
- assert.match(s.messages.chief.at(-1).body,/need your help/);
+ assert.match(s.messages.chief.at(-1).body,/sign in/i);
+ assert.equal(s.messages.chief.length,1,'review transitions update one attention message');
  assert.equal(worker.deliverResult(s,{...t,status:'completed',result:'Created the requested inbox; verified on the website.'}),true);
  assert.equal(s.messages.chief.at(-1).workerTaskID,'browser');
  assert.equal(worker.deliverResult(s,{...t,status:'completed',result:'Duplicate'}),false);
@@ -38,3 +39,4 @@ test('task blockers stay brief and keep diagnostic logs or partial results out o
  const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}},t={id:'long-error',workspace:'w',agentId:'a',status:'interrupted',title:'Open my inbox',attempt:1,updatedAt:'2026-10-18T05:00:00Z',progress:'Technical detail '.repeat(100),result:'Verbose partial work '.repeat(100)};
  assert.equal(worker.deliverResult(s,t),true);assert.ok(s.messages.a[0].body.length<150);assert.match(s.messages.a[0].body,/Open the task for details/);assert.equal(s.messages.a[0].body.includes('Verbose partial'),false);
 });
+test('sign-in transitions keep one actionable message and preserve the final result',()=>{const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}},t={id:'job',workspace:'w',agentId:'a',title:'Create inbox',attempt:1,status:'waiting_review',attentionKey:'auth',updatedAt:'2026-10-18T05:44:00Z',reviews:[{status:'pending',kind:'authentication',mode:'signin'}]};worker.deliverResult(s,t);assert.equal(s.messages.a[0].body,'Please sign in to continue.');worker.deliverResult(s,{...t,status:'waiting_user',attentionKey:'private',updatedAt:'2026-10-18T05:45:00Z',progress:'Private Chrome is open. Finish sign-in in Buddy when ready.'});assert.equal(s.messages.a.length,1);assert.match(s.messages.a[0].body,/Finish private sign-in/);worker.deliverResult(s,{...t,status:'completed',result:'Created chief@example.test.',updatedAt:'2026-10-18T05:46:00Z'});assert.equal(worker.presentation(s,s.messages.a[0]).hidden,true);assert.equal(worker.presentation(s,s.messages.a[1]).body,'Created chief@example.test.');});

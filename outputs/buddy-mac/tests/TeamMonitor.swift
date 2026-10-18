@@ -38,7 +38,7 @@ import Foundation
   require(enabled["saved"] as? Bool==true && enabled["agentId"] as? String==maze && enabled["proactive"] as? Bool==true,"an explicit request saves this agent's proactive mode with a real receipt")
   let changedJobs:[[String:Any]] = [["id":task,"workspace":w,"agentId":maze,"title":"Research brief","status":"completed","progress":"Finished","updatedAt":"2026-10-17T12:30:00Z"]]
   now=now.addingTimeInterval(1000);for _ in 0..<10 {await step(nil,changedJobs)}
-  require((try monitor.status(state)["updates"] as! [[String:Any]]).contains{$0["agentId"] as? String==maze},"an opted-in peer receives its own meaningful update")
+  require(!(try monitor.status(state)["updates"] as! [[String:Any]]).contains{$0["agentId"] as? String==maze},"a peer's worker result is delivered by the worker without a duplicate monitor message")
   _ = try monitor.handle(["action":"configure","agentId":maze,"participates":false],state:state,jobs:jobs)
   let privateStatus=try monitor.handle(["action":"status","agentId":maze],state:state,jobs:jobs,actor:chief)
   require((privateStatus["work"] as? [[String:Any]])?.isEmpty==true && privateStatus["profiles"]==nil,"revoking team sharing hides peer conversations, instructions and work from Chief tools")
@@ -82,6 +82,11 @@ import Foundation
   require(try budgetStore.reserve(reserveJob,policy:policy,limit:0.2,now:Date()),"an allowed estimate is durably reserved before calling a model")
   let restarted=try BuddyTeamMonitorStore(support:budgetRoot)
   require(restarted.checks.contains{$0["id"] as? String==reserveJob["id"] as? String && $0["status"] as? String=="interrupted"},"restart marks uncertain calls interrupted without auto replay")
+  let verbose="The AgentMail inbox needs your sign-in. Task 5BD6689F-E3FE-4EC2-B92C-2C436E740F9B changed at 05:44:19Z. "+String(repeating:"Diagnostic details. ",count:40)
+  try budgetStore.publish(agent:chief,job:reserveJob,body:verbose,sources:[],priority:0,now:Date())
+  let brief=budgetStore.updates.last!
+  require(brief["body"] as? String=="The AgentMail inbox needs your sign-in." && brief["detail"] as? String==verbose,"proactive DMs stay short while preserving complete diagnostics for expansion")
+  require(BuddyTeamMonitorStore.brief("Task 5BD6689F-E3FE-4EC2-B92C-2C436E740F9B is waiting at 05:44:19Z.")=="There’s an update on your work. Open Work details.","technical IDs cannot leak into a proactive DM")
   let quiet=try budgetStore.setPolicy(["agentId":chief,"proactive":false],state:state)
   require(budgetStore.configuration(quiet,agent:chief)["proactive"] as? Bool==false,"Chief can be switched to quiet mode explicitly")
   gpt.shutdown()

@@ -6,16 +6,34 @@
   const authTitle=mode=>mode==='signup'?'Create an account':mode==='verification'?'Verify your email':'Sign in privately';
   const deliverable=t=>['completed','failed','interrupted','waiting_review','waiting_user'].includes(t?.status);
   const deliveryID=t=>`worker-${t.id}-${Number(t.attempt)||0}-${t.status}${['waiting_review','waiting_user'].includes(t.status)?'-'+encodeURIComponent(t.attentionKey||t.progress||''):''}`;
+  const attention=status=>['waiting_review','waiting_user'].includes(status);
+  function taskMessage(t){
+    const auth=pending(t).find(r=>r.kind==='authentication');
+    if(t.status==='waiting_review'&&auth)return auth.mode==='signup'?'I need your approval to create this account.':'Please sign in to continue.';
+    if(t.status==='waiting_review')return 'I need your approval to continue.';
+    if(t.status==='waiting_user'&&(/private|sign.?in/i.test(t.progress||'')||t.signInOrigin))return 'Please sign in in the private Chrome window, then choose “Finish private sign-in”.';
+    const progress=String(t.progress||'').split('\n')[0].trim();
+    const brief=progress.length<=160&&!/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b|\b\d\d:\d\d:\d\dZ\b/i.test(progress)?progress:'';
+    if(t.status==='waiting_user')return brief||'I need a detail from you to continue.';
+    if(t.status==='completed')return t.result;
+    return `I couldn’t finish **${String(t.title||'this task').slice(0,90)}**. ${brief||'Open the task for details.'}`;
+  }
+  function presentation(state,m){
+    if(!m.workerTaskID)return {body:m.body,hidden:false};
+    const messages=state.messages[m.who]||[],index=messages.indexOf(m);
+    const superseded=attention(m.workerStatus)&&index>=0&&messages.slice(index+1).some(n=>n.workerTaskID===m.workerTaskID);
+    return {body:attention(m.workerStatus)?taskMessage({status:m.workerStatus,progress:m.body}):m.body,hidden:superseded};
+  }
   function deliverResult(state,t){
     if(!t||t.workspace!==state.conversationWorkspace||!state.agents.some(a=>a.id===t.agentId)||!deliverable(t))return false;
     state.messages[t.agentId]||=[];const id=deliveryID(t);if(state.messages[t.agentId].some(m=>m.id===id))return false;
-    const progress=String(t.progress||'').split('\n')[0].trim();
-    const brief=progress.length<=180?progress:'Open the task for details.';
-    const body=t.status==='completed'?t.result:t.status==='waiting_review'?`I need your approval to continue **${t.title}**.`:t.status==='waiting_user'?`I need your help to continue **${t.title}**. ${brief||'Open the task to continue.'}`:`I couldn’t finish **${t.title}**. ${brief||'Open the task for details.'}`;
+    const body=taskMessage(t);
     if(!body)return false;
-    state.messages[t.agentId].push({id,who:t.agentId,body,time:new Date(t.updatedAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}),live:true,status:'completed',workerTaskID:t.id,workerStatus:t.status,coverage:t.coverage||[],files:t.files||[]});return true;
+    const message={id,who:t.agentId,body,time:new Date(t.updatedAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}),live:true,status:'completed',workerTaskID:t.id,workerStatus:t.status,workerAttempt:Number(t.attempt)||0,workerUpdatedAt:t.updatedAt,coverage:t.coverage||[],files:t.files||[]};
+    const prior=attention(t.status)?state.messages[t.agentId].find(m=>m.workerTaskID===t.id&&attention(m.workerStatus)&&(m.workerAttempt===message.workerAttempt||m.id.startsWith(`worker-${t.id}-${message.workerAttempt}-`))):null;
+    if(prior){if(prior.workerUpdatedAt&&prior.workerUpdatedAt>t.updatedAt)return false;Object.assign(prior,message);}else state.messages[t.agentId].push(message);return true;
   }
-  const api={labels,canResume,pending,authTitle,deliverable,deliveryID,deliverResult};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
+  const api={labels,canResume,pending,authTitle,deliverable,deliveryID,deliverResult,taskMessage,presentation};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
   let snapshot={online:false,tasks:[],routines:[],paused:false},detail=null,view='list',routine=null,busy=false,error='',last='',preview=null;
   const drafts=new Map();
@@ -26,7 +44,7 @@
   const request=payload=>{if(!window.BuddyDesktop?.worker)throw Error('Open Buddy’s Mac app to use background work.');return window.BuddyDesktop.worker(payload);};
   const button=(op,label,extra='',primary=false)=>`<button type="button" class="${primary?'primary-button':'border-button'}" data-worker-op="${op}" ${extra} ${busy?'disabled':''}>${label}</button>`;
   function shell(body){openDrawer('Background work',`<div class="worker-panel" data-worker-panel>${body}<p class="field-error" data-worker-error role="alert">${esc(error)}</p></div>`);document.querySelector('.modal.drawer')?.classList.add('worker-drawer');}
-  function privateBanner(){return snapshot.privateBrowser?`<section class="worker-private" role="status"><strong>Private Chrome is open</strong><p>${esc(agentName(snapshot.privateBrowser.agentId))} is waiting. Use Google Password Manager or enter credentials in that window.</p>${button('finish-signin','Finish private sign-in','',true)}<small>This closes the private window and lets Buddy check the saved session.</small></section>`:'';}
+  function privateBanner(){return snapshot.privateBrowser?`<section class="worker-private" role="status"><strong>Private Chrome is open</strong><p>${esc(agentName(snapshot.privateBrowser.agentId))} is waiting. Use Google Password Manager or enter credentials in that window.</p>${button('finish-signin','Finish private sign-in','',true)}${button('chrome-settings','Set up saved passwords')}<small>This closes the private window and lets Buddy check the saved session.</small></section>`:'';}
   function profiles(){shell(`<h3>Browser sign-in</h3><p class="worker-intro">Sign in to Chrome with your Google account to use Google Password Manager. Each agent has a separate private Chrome profile.</p>${privateBanner()}<div class="worker-list">${state.agents.map(a=>`<div class="worker-profile">${avatar(a.id)}<span class="worker-profile-label"><strong>${esc(a.name)}</strong><small>Passwords stay with Chrome</small></span>${button('open-google','Open Chrome',`data-agent-id="${esc(a.id)}"`)}</div>`).join('')}</div><details class="worker-more"><summary>How it works${icon('down')}</summary><p>The private window opens Chrome without an agent connection. Sign in through Chrome’s profile controls to make your saved Google passwords available. Gmail website sign-in alone may not enable Password Manager.</p><p>Chrome handles saving, generating, and filling passwords. Buddy reuses the resulting website sessions. Passwords, password-manager contents, and sign-in forms are excluded from agent observations.</p><p>Chrome may ask you to unlock a password, confirm your account, or complete a CAPTCHA. New accounts ask you first. Supported email-code forms use the matching connected Gmail account after permission for that website; recovery, financial verification, and unsupported forms need you.</p></details>`);}
   function list(){
     const tasks=[...snapshot.tasks].reverse();
@@ -97,6 +115,7 @@
         else if(['pause-routine','resume-routine','delete-routine'].includes(operation)){const action=operation.split('-')[0];await request({operation:'routine',agentId:routine.agentId,arguments:{action,routineID:routine.id}});await refresh(false);if(action==='delete'){view='list';list();}else routineDetail(snapshot.routines.find(r=>r.id===routine.id));}
         else if(operation==='new'){view='new';form();}
         else if(operation==='profiles'){view='profiles';profiles();}
+        else if(operation==='chrome-settings'){await request({operation:'openChromeSettings',agentId:snapshot.privateBrowser?.agentId});await refresh(false);if(view==='task'&&detail)drawDetail();else profiles();}
         else if(operation==='open-google'){await request({operation:'openGoogle',agentId:op.dataset.agentId});await refresh(false);profiles();}
         else if(operation==='finish-signin'){await request({operation:'finishSignIn'});await refresh(false);if(view==='profiles')profiles();else if(view==='task'){detail=(await request({operation:'detail',taskId:detail.id})).task;drawDetail();}else list();}
         else if(operation.startsWith('auth-')){const r=pending(detail).find(r=>r.id===op.dataset.reviewId&&r.kind==='authentication');if(!r)throw Error('This sign-in request ended. Refresh the task.');await request({operation:'review',taskId:detail.id,id:r.id,accept:operation!=='auth-decline',authAction:operation.slice(5)});await refresh();}

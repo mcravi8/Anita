@@ -23,10 +23,10 @@
     if(!retryOf&&state.attachments[target]?.length)throw Error('Remove the attachment, then choose a shared file from the folder button in the Mac app.');
     state.messages[target] ||= [];
     if(previous)userId=previous.userId;
-    else state.messages[target].push({id:userId,who:'you',body:text,time,live:true});
+    else state.messages[target].push({id:userId,who:'you',body:text,time,createdAt:new Date().toISOString(),live:true});
     const team=group?{phase:'planning',leadId:'',entries:[],memberIds:[...group.members],partial:false}:undefined;
     state.messages[target].push({id:replyId,who:target,body:'',time,live:true,runId,status:'starting',...(team?{team}: {})});
-    const run={runId,target,key:`${state.conversationWorkspace}:${target}`,userId,replyId,text,status:'starting',...(team?{team,memberIds:[...group.members]}: {})};
+    const run={runId,target,key:`${state.conversationWorkspace}:${target}`,userId,replyId,text,createdAt:new Date().toISOString(),status:'starting',...(team?{team,memberIds:[...group.members]}: {})};
     state.runs[runId]=run;
     if(!previous)state.drafts[target]='';
     return {run,payload:group?{kind:'group',runId,key:run.key,text,groupId:target}:{runId,key:run.key,text,agentId:target,agent:{name:agent.name,role:agent.role,description:agent.description}}};
@@ -55,7 +55,7 @@
     const body=typeof event.text==='string'?event.text:message?.body||'';
     const empty=event.status==='completed'&&!body.trim()&&!(event.files?.length||message?.files?.length||message?.proposalIds?.length);
     const status=empty?'failed':event.status,error=empty?'No answer came back. Try again.':event.error||'';
-    run.status=status;run.error=error;
+    run.status=status;run.error=error;run.updatedAt=new Date().toISOString();
     if(team)run.team=team;
     if(Array.isArray(event.files))run.files=structuredClone(event.files.filter(f=>f&&typeof f.path==='string'&&typeof f.folderId==='string'&&typeof f.revision==='string').slice(0,180));
     if(typeof event.provider==='string')run.provider=event.provider;if(typeof event.model==='string')run.model=event.model;

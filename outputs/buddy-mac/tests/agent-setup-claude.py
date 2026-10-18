@@ -12,7 +12,7 @@ for line in sys.stdin:
     directory=Path(c['cwd']).parent
     with (directory/'fixture-calls.jsonl').open('a') as f:f.write(json.dumps({'phase':phase,'model':c['model'],'budget':c['budget'],'repair':'draftToShorten' in prompt})+'\n')
     if phase=='questions':
-        result={'ready':not (len(answers)==1 and 'NEED_MORE' in text),'question':'Which sources should I use, and what should I bring back to you?' if len(answers)==1 and 'NEED_MORE' in text else ''}
+        result={'role':'Research partner','instructions':'Research primary public sources and return concise, sourced comparisons. Ask only for missing scope.','ready':not (len(answers)==1 and 'NEED_MORE' in text),'question':'Which sources should I use, and what should I bring back to you?' if len(answers)==1 and 'NEED_MORE' in text else ''}
     else:
         if 'SLOW_PROFILE' in text:time.sleep(3)
         marker=directory/'failed-once'

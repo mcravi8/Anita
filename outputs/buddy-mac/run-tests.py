@@ -9,9 +9,14 @@ shutil.copytree(source,Path(snapshot.name)/'Source',ignore=shutil.ignore_pattern
 source=Path(snapshot.name)/'Source'
 with tempfile.TemporaryDirectory(prefix='buddy-agent-setup-',suffix='.noindex') as temp:
  binary=Path(temp)/'buddy-agent-setup-tests'
- names=['BuddyAgentSetup.swift','BuddyAISettings.swift','BuddyWorkerProcess.swift','BuddyWorkerCore.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/AgentSetup.swift']
+ names=['BuddyAgentMemory.swift','BuddyAgentSetup.swift','BuddyAISettings.swift','BuddyWorkerProcess.swift','BuddyWorkerCore.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/AgentSetup.swift']
  subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
  subprocess.run([str(binary),str(source/'tests/agent-setup-claude.py'),shutil.which('python3')],check=True)
+with tempfile.TemporaryDirectory(prefix='buddy-team-monitor-',suffix='.noindex') as temp:
+ binary=Path(temp)/'buddy-team-monitor-tests'
+ names=['BuddyTeamMonitor.swift','BuddyTeamMonitorStore.swift','BuddyAgentMemory.swift','BuddyWorkerClient.swift','BuddyAISettings.swift','BuddyWorkerProcess.swift','BuddyWorkerCore.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/TeamMonitor.swift']
+ subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
+ subprocess.run([str(binary),str(source/'tests/team-monitor-claude.py'),shutil.which('python3'),str(source/'tests/team-monitor-gpt.py')],check=True)
 with tempfile.TemporaryDirectory(prefix='buddy-transport-test-') as temp:
  binary=Path(temp)/'buddy-transport-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyTransport.swift'),str(source/'BuddyConnections.swift'),str(source/'tests/main.swift'),'-o',str(binary)],check=True)
@@ -60,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='buddy-worker-test-') as temp:
 
 with tempfile.TemporaryDirectory(prefix='buddy-worker-integration-') as temp:
  binary=Path(temp)/'buddy-worker-integration'
- names=['BuddyWorkerCore.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyWorkerClient.swift','BuddyAISettings.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/WorkerIntegration.swift']
+ names=['BuddyWorkerCore.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyWorkerClient.swift','BuddyAgentMemory.swift','BuddyTeamMonitorStore.swift','BuddyTeamMonitor.swift','BuddyAISettings.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/WorkerIntegration.swift']
  subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
  subprocess.run([str(binary),str(source/'tests/worker-server.py'),str(source/'tests/coding-claude.py'),shutil.which('python3'),str(worker/'coding-shell.mjs'),shutil.which('node')],check=True)
 
@@ -84,7 +89,7 @@ with tempfile.TemporaryDirectory(prefix='buddy-mail-test-') as temp:
 
 with tempfile.TemporaryDirectory(prefix='buddy-signin-integration-') as temp:
  binary=Path(temp)/'buddy-signin-integration'
- names=['BuddyWorkerCore.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyWorkerClient.swift','BuddyAISettings.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/SignInIntegration.swift']
+ names=['BuddyWorkerCore.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyWorkerClient.swift','BuddyAgentMemory.swift','BuddyTeamMonitorStore.swift','BuddyTeamMonitor.swift','BuddyAISettings.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/SignInIntegration.swift']
  subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
  subprocess.run([str(binary),str(source/'tests/signin-server.py'),str(source/'tests/signin-browser.py'),shutil.which('python3')],check=True)
 

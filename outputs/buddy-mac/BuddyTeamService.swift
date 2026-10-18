@@ -2,6 +2,8 @@ import Foundation
 
 @MainActor final class BuddyTeamService {
     var onEvent: (([String: Any]) -> Void)?
+    var agentInstructions:((String,String)->String)?
+    var extraTools:[[String:Any]]=[]
     private let turnTimeoutNanoseconds: UInt64
     private let conversations: any BuddyConversationSending
     private final class Job {
@@ -139,7 +141,7 @@ import Foundation
         if tools { options.proposalScope = BuddyProposalScope(workspace: job.request.workspace, chat: job.request.groupId, actorId: agent.id, replyRunId: job.request.runId) }
         options.fileContext = job.request.fileScope
         if tools { options.fileScope = job.request.fileScope }
-        options.instructions = instructions; options.outputSchema = schema; options.internalRun = true; options.finalAnswerOnly = true
+        options.instructions = instructions+"\n"+(agentInstructions?(job.request.workspace,agent.id) ?? ""); options.extraTools=tools ? extraTools:[]; options.authorizedUserText=job.request.text; options.outputSchema = schema; options.internalRun = true; options.finalAnswerOnly = true
         return try await withCheckedThrowingContinuation { continuation in
             children[childId] = Child(parent: job.request.runId, entry: entry, finalReply: finalReply, continuation: continuation)
             job.children.insert(childId)

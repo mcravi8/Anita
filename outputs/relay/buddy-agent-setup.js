@@ -16,7 +16,7 @@
     value.agentSetup||={};const old=value.agentSetup[a.id];
     if(old&&r.revision<old.revision)return false;
     value.agentSetup[a.id]=structuredClone(r);a.setupStatus=r.status==='ready'?'ready':'pending';
-    if(typeof r.instructions==='string'&&typeof r.role==='string'&&(r.profileRevision||0)>=(a.profileRevision||0)){a.description=r.instructions;a.role=r.role;a.profileRevision=r.profileRevision||0;}
+    if(typeof r.instructions==='string'&&typeof r.role==='string'&&(r.profileRevision||0)>=(a.profileRevision||0)&&(!(a.memoryRevision>0)||(r.profileRevision||0)>(a.profileRevision||0))){if((r.profileRevision||0)>(a.profileRevision||0)){delete a.memoryRevision;delete a.learnedRules;delete a.learningError;}a.description=r.instructions;a.role=r.role;a.profileRevision=r.profileRevision||0;}
     const previous=(value.messages[a.id]||[]).filter(m=>!m.setup);
     value.messages[a.id]=structuredClone(r.messages).concat(previous);
     if(busy(r.status))value.messages[a.id].push({id:`setup-pending-${a.id}`,who:a.id,body:'',time:'',live:true,status:'answering',setup:true});
@@ -53,7 +53,7 @@
     }catch(e){showToast(String(e.message||e));}finally{sending.delete(id);}
   }
   async function edit(id,config){
-    if(!window.BuddyDesktop?.agentSetup||!required(findAgent(id))&&!state.agentSetup?.[id])return;
+    if(!window.BuddyDesktop?.agentSetup)return;
     await ensure(id);const result=await request({action:'edit',agentId:id,role:config.role,instructions:config.description});receive(result.interview);
   }
   async function stop(id){try{const result=await request({action:'stop',agentId:id});receive(result.interview);}catch(e){showToast(String(e.message||e));}}

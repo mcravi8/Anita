@@ -15,6 +15,7 @@ import Foundation
         var status = "starting", text = "", files: [[String: Any]] = [], calls = 0
         var coverage: [[String:Any]] = []
         var inboxBusy = false, routineReceipt = false
+        var proactiveReceipt:Bool?
         var error: String?
         var delegate: ConversationService?
         var delegateResult: ((Result<[String: Any], Error>) -> Void)?
@@ -153,8 +154,8 @@ import Foundation
             if let proposal=result["proposal"] {onEvent?(["type":"proposal","runId":scope.replyRunId,"proposal":proposal,"internal":run.options.internalRun])};return result
         }
         if run.options.extraTools.contains(where:{$0["name"] as? String == tool}),let handler=primary.extraToolHandler {
-            let result=try await handler(tool,args,["agentId":run.options.actorId,"runId":run.id,"callId":callID,"workspace":run.workspace,"key":run.key])
-            if tool=="buddy_manage_routine",result["saved"] as? Bool==true,(result["routine"] as? [String:Any])?["status"] as? String=="active" { run.routineReceipt=true };return result
+            let result=try await handler(tool,args,["agentId":run.options.actorId,"runId":run.id,"callId":callID,"workspace":run.workspace,"key":run.key,"authorizedUserText":run.options.authorizedUserText])
+            if tool=="buddy_manage_routine",result["saved"] as? Bool==true,(result["routine"] as? [String:Any])?["status"] as? String=="active" { run.routineReceipt=true };if tool=="buddy_team",result["saved"] as? Bool==true,result["agentId"] as? String==run.options.actorId,let enabled=result["proactive"] as? Bool {run.proactiveReceipt=enabled};return result
         }
         guard BuddyProjectFiles.tools.contains(where:{$0["name"] as? String == tool}),let scope=run.options.fileScope,primary.filePermission?(run.workspace,run.options.permissionKeys ?? [run.key]) == true else {throw BuddyFailure(message:"This file tool is unavailable or file access is off.")}
         let result=try primary.projectFiles.call(scope,tool:tool,arguments:args,actor:run.options.actorId,actorName:run.agent["name"] as? String ?? "Agent")
@@ -223,7 +224,7 @@ import Foundation
     func stopFiles(workspace:String) {for run in runs.values where run.workspace == workspace && run.options.fileScope != nil && !run.stopped{finish(run,status:"stopped")}}
     func stopForAgent(_ key:String) {for run in runs.values where (run.options.permissionKeys ?? [run.key]).contains(key) && !run.stopped{finish(run,status:"stopped")}}
     func shutdown(){stopAll();timer?.invalidate();timer=nil}
-    private func finish(_ run:Run,status:String,error:String?=nil){guard !run.stopped else{return};var status=status,error=error;if status=="completed",run.options.requiresRoutine,!run.routineReceipt {status="failed";error="No active routine was saved. Try again or open Background work → Routines.";run.text="Your recurring request has not been scheduled."};if status=="completed" {do {try primary.inboxReviews.commit(runID:run.id)} catch let failure {status="failed";error=failure.localizedDescription}};run.status=status;run.error=error;let done=run.delegateResult;run.delegateResult=nil;done?(.failure(BuddyFailure(message:"This conversation stopped; check any external action before retrying.")));run.delegate?.shutdown()
+    private func finish(_ run:Run,status:String,error:String?=nil){guard !run.stopped else{return};var status=status,error=error;if status=="completed",run.options.requiresRoutine,!run.routineReceipt {status="failed";error="No active routine was saved. Try again or open Background work → Routines.";run.text="Your recurring request has not been scheduled."};if status=="completed",let expected=run.options.requiresProactive,run.proactiveReceipt != expected {status="failed";error="The proactive-update setting wasn’t saved. Try again or open this agent’s Preferences & updates.";run.text="Your proactive-update preference has not been changed."};if status=="completed" {do {try primary.inboxReviews.commit(runID:run.id)} catch let failure {status="failed";error=failure.localizedDescription}};run.status=status;run.error=error;let done=run.delegateResult;run.delegateResult=nil;done?(.failure(BuddyFailure(message:"This conversation stopped; check any external action before retrying.")));run.delegate?.shutdown()
         if status=="completed",run.process.isRunning,permitted(run),let choice=try? settings.current(run.workspace) {
             idle[run.key]=(run,Date(),choice.claudeRevision)
             while idle.count>4,let oldest=idle.min(by:{$0.value.at<$1.value.at}) {idle.removeValue(forKey:oldest.key)?.run.process.close()}

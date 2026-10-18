@@ -29,6 +29,13 @@ import Foundation
         var scheduleOptions=options;scheduleOptions.requiresRoutine=true
         let fakeSchedule=try send("Run this every morning",scheduleOptions);await wait{terminal(fakeSchedule)}
         require(events.contains{$0["runId"] as? String==fakeSchedule && $0["status"] as? String=="failed" && ($0["error"] as? String)?.contains("No active routine")==true},"Claude cannot finish a schedule request without a native saved routine receipt")
+        var proactiveOptions=options;proactiveOptions.requiresProactive=true
+        let fakeProactive=try send("Keep me updated.",proactiveOptions);await wait{terminal(fakeProactive)}
+        require(events.contains{$0["runId"] as? String==fakeProactive && $0["status"] as? String=="failed" && ($0["error"] as? String)?.contains("setting") == true},"Claude cannot claim proactive updates were enabled without a native saved setting receipt")
+        primary.extraToolHandler={tool,args,context in require(tool=="buddy_team" && context["agentId"] as? String==agent && context["authorizedUserText"] as? String=="Keep me updated.","the tool receives this actor's actual current user request");return ["saved":true,"agentId":agent,"proactive":true]}
+        proactiveOptions.authorizedUserText="Keep me updated.";proactiveOptions.extraTools=[["type":"function","name":"buddy_team","description":"Fixture saved setting","inputSchema":["type":"object","properties":["action":["type":"string"]]]]]
+        let savedProactive=try send("SAVE_PROACTIVE",proactiveOptions);await wait{terminal(savedProactive)}
+        require(events.contains{$0["runId"] as? String==savedProactive && $0["status"] as? String=="completed"},"Claude's real native saved-setting receipt satisfies the proactive acknowledgement guard")
         let file=try send("WRITE_CLAUDE",options);await wait{terminal(file)}
         let saved=try primary.projectFiles.read(options.fileScope!,path:"claude-note.md")
         require((saved["content"] as? String)?.contains("selected Claude") == true,"Claude uses the existing scoped file engine and real saved bytes")
@@ -39,6 +46,10 @@ import Foundation
         require(events.contains{$0["runId"] as? String == group2 && ($0["text"] as? String)?.contains("\"ok\"") == true},"in-flight group keeps its provider and structured planning output")
         let gpt=try send("GPT_CHECK",options);await wait{terminal(gpt)}
         require(events.contains{$0["runId"] as? String == gpt && $0["text"] as? String == "ChatGPT fixture answer" && $0["status"] as? String == "completed"},"new turns use selected ChatGPT without changing history")
+        let fakeGPTProactive=try send("Keep me updated.",proactiveOptions);await wait{terminal(fakeGPTProactive)}
+        require(events.contains{$0["runId"] as? String==fakeGPTProactive && $0["status"] as? String=="failed" && ($0["error"] as? String)?.contains("setting") == true},"ChatGPT cannot claim proactive updates were enabled without a native saved setting receipt")
+        let savedGPTProactive=try send("SAVE_PROACTIVE",proactiveOptions);await wait{terminal(savedGPTProactive)}
+        require(events.contains{$0["runId"] as? String==savedGPTProactive && $0["status"] as? String=="completed"},"ChatGPT's real native saved-setting receipt satisfies the proactive acknowledgement guard")
         _ = try await router.disconnect(workspace:workspace,provider:"chatgpt")
         invalid=false;do{_ = try send("DISCONNECTED",options)}catch{invalid=true};require(invalid,"disconnected ChatGPT blocks new work without falling back")
         let account=try await primary.connection();require(account["connected"] as? Bool == true,"Buddy-only disconnect preserves shared ChatGPT sign-in")

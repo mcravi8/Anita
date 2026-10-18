@@ -41,10 +41,11 @@ import AppKit
             }
         }
         conversations.extraToolHandler = { [weak self] tool, args, context in
-            guard let self, ["buddy_start_background_task","buddy_manage_routine","buddy_coding_session"].contains(tool), let id = context["agentId"] as? String else { throw BuddyWorkerFailure(message: "Background work is unavailable for this turn.") }
+            guard let self, ["buddy_start_background_task","buddy_manage_routine","buddy_coding_session","buddy_team"].contains(tool), let id = context["agentId"] as? String else { throw BuddyWorkerFailure(message: "Background work is unavailable for this turn.") }
             let workspace = try self.workspaceContext()
             guard workspace.agents.contains(id) else { throw BuddyWorkerFailure(message: "This agent is no longer available.") }
             _ = try await BuddyWorkerClient.start(support: self.supportURL, workspace: workspace.workspace)
+            if tool=="buddy_team" {return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"team","workspace":workspace.workspace,"actorId":id,"authorizedText":context["authorizedUserText"] ?? "","arguments":args])}
             if tool=="buddy_coding_session" {
                 return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"coding","workspace":workspace.workspace,"agentId":id,"requestId":(context["runId"] as? String ?? "")+":"+(context["callId"] as? String ?? ""),"arguments":args])
             }
@@ -67,6 +68,9 @@ import AppKit
             if !self.teamwork.consume(event) { self.deliver(event) }
         }
         showWindow()
+        teamwork.extraTools=[BuddyWorkerClient.teamTool]
+        teamwork.agentInstructions={ [weak self] workspace,id in guard let self,let s=try? self.workspaceState(),s["conversationWorkspace"] as? String==workspace,let a=(s["agents"] as? [[String:Any]])?.first(where:{$0["id"] as? String==id}) else{return ""};return BuddyAgentMemory.guidance(a)}
+        Task {if let context=try? workspaceContext(){_ = try? await BuddyWorkerClient.start(support:supportURL,workspace:context.workspace)}}
     }
 
     private func showWindow() {
@@ -228,7 +232,7 @@ import AppKit
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }
     @objc private func about() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.19.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.20.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
@@ -266,7 +270,7 @@ import AppKit
             guard let payload = body["payload"] as? [String: Any] else { replyHandler(nil, "Invalid message."); return }
             do {
                 if payload["kind"] as? String == "group" {
-                    guard let data = try? Data(contentsOf: stateURL), let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw BuddyFailure(message: "Buddy couldn’t load this group. Reopen the app and try again.") }
+                    let state = try workspaceState()
                     var request = try BuddyTeamRequest.from(workspace: state, payload: payload)
                     let agents=state["agents"] as? [[String:Any]] ?? []
                     guard request.members.allSatisfy({member in agents.first(where:{$0["id"] as? String==member.id})?["setupStatus"] as? String != "pending" || agentSetup.ready(workspace:request.workspace,agent:member.id)}) else {throw BuddyFailure(message:"Finish each agent's setup before starting group work.")}
@@ -279,11 +283,14 @@ import AppKit
                 let currentAgent=(try workspaceState()["agents"] as? [[String:Any]] ?? []).first{$0["id"] as? String==agent}
                 guard currentAgent?["setupStatus"] as? String != "pending" || agentSetup.ready(workspace:context.workspace,agent:agent) else {throw BuddyFailure(message:"Finish this agent's questions or edit its instructions in settings first.")}
                 var options = BuddyTurnOptions()
+                options.authorizedUserText=payload["text"] as? String ?? ""
+                options.requiresProactive=BuddyWorkerClient.proactiveRequest(options.authorizedUserText)
                 options.fileScope = try conversations.projectFiles.scope(context.workspace)
                 options.actorId = agent
                 options.extraTools = BuddyWorkerClient.tools
                 options.requiresRoutine = BuddyWorkerClient.recurringRequest(payload["text"] as? String ?? "")
                 options.instructions = "For explicit coding/build/test requests or requests to use Claude Code, call buddy_coding_session directly with a complete task brief; it is a native worker tool, not a connected service. Check status for real results. For an explicit recurring request (run this every morning/daily/weekly), call buddy_manage_routine now. Carry the relevant user brief from history into the goal. For email, choose a targeted search with follow-ups and an explicit lookback window. Default to 09:00 local for an unspecified morning, state that assumption and the saved next run. Do not create a one-off task instead. Never claim scheduled without saved=true and a routine ID. Do not schedule hypothetical examples or questions. Use list/update/pause/resume/delete for existing routines. Results and controls are in Background work. This Mac must be awake and online; a missed run catches up once. If the user explicitly asks you to run a task in the background, use buddy_start_background_task. Pass the full authorized brief and the facts needed to execute it; the worker has separate conversation context. It uses this agent’s saved provider and model, its configured spending limit, and current agent permissions, private browser/files, and native human action reviews. Report the returned task title and tell the user results and reviews are in Background work. Don't create background work for ordinary questions, invent tasks, or claim it has finished when only queued."
+                options.instructions += "\n"+BuddyWorkerClient.teamGuidance+"\n"+BuddyAgentMemory.guidance(currentAgent ?? [:])
                 options.proposalScope = BuddyProposalScope(workspace: context.workspace, chat: agent, actorId: agent, replyRunId: payload["runId"] as? String ?? "")
                 try ai.ensureAgentDefaults(workspace:context.workspace,agents:context.agents)
                 options.historyScope=BuddyHistoryScope(workspace:context.workspace,agent:agent)
@@ -445,7 +452,7 @@ import AppKit
 
     private func workspaceState() throws -> [String: Any] {
         guard let data = try? Data(contentsOf: stateURL), let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw BuddyFailure(message: "Buddy couldn’t read this workspace. Reopen the app.") }
-        return state
+        return try agentSetup.protect(state)
     }
     private func workspaceContext() throws -> (workspace: String, agents: [String]) {
         guard let data = try? Data(contentsOf: stateURL), let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let workspace = state["conversationWorkspace"] as? String, UUID(uuidString: workspace) != nil, let agents = state["agents"] as? [[String: Any]] else { throw BuddyFailure(message: "Buddy couldn’t load this workspace. Reopen the app and try again.") }

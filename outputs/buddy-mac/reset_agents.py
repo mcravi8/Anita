@@ -14,7 +14,7 @@ def reset(support,stop=stop_worker):
     support=Path(support);stop()
     with (support/'agent-reset.lock').open('a') as lock:
         os.chmod(lock.name,0o600);fcntl.flock(lock,fcntl.LOCK_EX)
-        names=['workspace.json','agent-models.json','agent-interviews.json','agent-proposals.json','conversation-providers.json','Worker/tasks.json','Worker/routines.json']
+        names=['workspace.json','agent-models.json','agent-interviews.json','agent-memory.json','team-monitor.json','agent-proposals.json','conversation-providers.json','Worker/tasks.json','Worker/routines.json']
         raw={name:(support/name).read_bytes() for name in names if (support/name).exists()}
         saved={name:json.loads(data) for name,data in raw.items()};state=saved['workspace.json'];workspace=state['conversationWorkspace'];uuid.UUID(workspace)
         if state.get('version')!=1 or not isinstance(state.get('agents'),list):raise RuntimeError('Could not verify the saved workspace.')
@@ -22,6 +22,11 @@ def reset(support,stop=stop_worker):
         state['onboarding']={'version':1,'status':'pending','registrationId':str(uuid.uuid4()),'draft':{'name':'Buddy','role':'Getting started','description':BOOTSTRAP,'avatarShape':'star','avatarColor':'lilac','tools':{'web':True,'projectFiles':True,'desktop':True},'groupIds':[]}}
         if 'agent-models.json' in saved:saved['agent-models.json']['workspaces'].pop(workspace,None)
         if 'agent-interviews.json' in saved:saved['agent-interviews.json']['records']={k:r for k,r in saved['agent-interviews.json']['records'].items() if r['workspace']!=workspace}
+        if 'agent-memory.json' in saved:saved['agent-memory.json']['records']={k:r for k,r in saved['agent-memory.json']['records'].items() if r['workspace']!=workspace}
+        if 'team-monitor.json' in saved:
+            journal=saved['team-monitor.json'];journal.get('settings',{}).pop(workspace,None)
+            for field in ['checks','updates']:journal[field]=[r for r in journal.get(field,[]) if r['workspace']!=workspace]
+            journal['observed']={k:r for k,r in journal.get('observed',{}).items() if r['workspace']!=workspace};journal['journalRevision']=journal.get('journalRevision',0)+1
         if 'agent-proposals.json' in saved:saved['agent-proposals.json']=[r for r in saved['agent-proposals.json'] if r['workspace']!=workspace]
         if 'conversation-providers.json' in saved:saved['conversation-providers.json']={k:v for k,v in saved['conversation-providers.json'].items() if not k.startswith(workspace+':')}
         for name,field in [('Worker/tasks.json','tasks'),('Worker/routines.json','routines')]:

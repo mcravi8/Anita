@@ -16,6 +16,8 @@ import Foundation
         let answer:[String:Any]=["requestId":"answer-one","revision":first["revision"]!,"text":"NEED_MORE: help research a topic."]
         _ = try call(a,"answer",answer);let follow=try await wait(a,"interview")
         require((follow["messages"] as? [[String:Any]])?.count==3,"Claude asks a relevant follow-up when more job context is needed")
+        let provisional=try JSONSerialization.jsonObject(with:Data(contentsOf:stateFile)) as! [String:Any]
+        require((follow["instructions"] as? String)?.isEmpty==false && (provisional["agents"] as! [[String:Any]])[0]["description"] as? String==follow["instructions"] as? String,"working instructions are visible before the interview finishes")
         _ = try call(a,"answer",answer)
         require((try call(a,"status")["messages"] as? [[String:Any]])?.count==3,"retrying an accepted request does not duplicate the answer or model call")
         _ = try call(a,"answer",["requestId":"answer-two","revision":follow["revision"]!,"text":"Use primary public sources, give concise sourced comparisons, no external actions."])

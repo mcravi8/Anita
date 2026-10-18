@@ -35,6 +35,7 @@ struct BuddyFailure: LocalizedError {
     var extraToolHandler: ((String, [String: Any], [String: Any]) async throws -> [String: Any])?
     let projectFiles: BuddyProjectFiles
     let agentProposals: BuddyAgentProposals
+    let teamBuilder:BuddyTeamBuilder
     let computer: BuddyComputer
     var connectionFilter: ((BuddyConnection) -> Bool)?
     var computerPermission: ((String, [String]) -> Bool)?
@@ -61,6 +62,7 @@ struct BuddyFailure: LocalizedError {
         self.executableOverride = executable
         self.projectFiles = projectFiles ?? BuddyProjectFiles(support: support)
         self.agentProposals = BuddyAgentProposals(support: support)
+        self.teamBuilder = BuddyTeamBuilder(support:support)
         self.computer = BuddyComputer(support: computerSupport ?? support)
         if FileManager.default.fileExists(atPath: actionJournalURL.path) {
             if let data = try? Data(contentsOf: actionJournalURL), let records = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] {
@@ -409,7 +411,7 @@ struct BuddyFailure: LocalizedError {
                 // configuration as a developer item so edits take effect even without an app restart.
                 let fileAccess = (options.fileScope ?? options.fileContext).map { scope in filePermission?(scope.workspace, options.permissionKeys ?? [key]) == true } ?? false
                 let fileGuide = fileAccess && options.fileScope == nil ? "Shared project-file access is enabled for the group’s member workers. This coordination or synthesis turn has no file tools itself. Plan requested real file work for the authorized workers; do not mistake the absence of tools in this planning step for disabled worker access. In synthesis, rely on the supplied verified save receipts." : fileAccess ? "Project file tools are available: text/Markdown/HTML/code up to 1 MB; Word DOCX paragraph creation/edits; Excel XLSX sheet/cell/formula creation/edits; PDF creation, form filling, annotations, page rotation/appending up to 32 MB; and raw base64 byte tools for any file format up to 1 MB. Use buddy_create_document and buddy_edit_document for Office/PDF. PDFs preserve existing printed text; signed/protected documents may be preview-only. Excel formulas are recalculated by Excel on open, not by Buddy. New and saved documents have in-app previews. Work only in user-connected folders. Read existing files before editing and use their current version; if file_changed, reread and merge. Claim saved files only when the tool returns saved=true. Use buddy_list_folders to discover additional connected folders, then pass their folderId to file tools. Do not read or write unrelated files. No deletion or access outside connected folders. If a requested folder is missing, ask the user to connect it using Files → Folder & access → Connect another folder." : "Project-file access is disabled for this request. Do not invoke Buddy file tools."
-                let proposalGuide = try (options.proposalsEnabled ? options.proposalScope : nil).map { scope in "Use buddy_propose_agent when the user asks for a new teammate or a clear missing specialist would help. The tool saves a pending suggestion only: the user must review and approve it. Never claim they joined, are working, or have been delegated work before approval. Prefer existing registered agents; do not repropose declined suggestions unless explicitly asked. Shape IDs are star, pebble, cube, clover; color IDs are lilac, blue (light blue), peach, mint (green), red (autumn red), gold (yellow), cobalt (blue).\n" + (try agentProposals.context(scope)) } ?? "Agent suggestions are unavailable in this step."
+                let proposalGuide = try (options.proposalsEnabled ? options.proposalScope : nil).map { scope in "Use buddy_build_team to create explicitly requested teams or teammates with complete editable job briefs. Use buddy_propose_agent for an unsolicited individual suggestion, which stays pending until human approval. Never claim creation or work without the actual corresponding receipt. Prefer existing registered agents; do not repropose declined suggestions unless explicitly asked. Shape IDs are star, pebble, cube, clover; color IDs are lilac, blue (light blue), peach, mint (green), red (autumn red), gold (yellow), cobalt (blue).\n" + BuddyTeamBuilder.guidance + "\n" + (try agentProposals.context(scope)) } ?? "Agent suggestions are unavailable in this step."
                 let previousActions = inputRecords.values.filter { $0["workspace"] as? String == options.proposalScope?.workspace && $0["chat"] as? String == options.proposalScope?.chat && ["answered", "uncertain", "completed"].contains($0["status"] as? String ?? "") }.suffix(20).map { record in
                     ["status": record["status"] ?? "uncertain", "tool": record["tool"] ?? [:], "finishedAt": record["finishedAt"] ?? NSNull(), "answeredAt": record["answeredAt"] ?? NSNull()] as [String: Any]
                 }
@@ -789,6 +791,12 @@ struct BuddyFailure: LocalizedError {
                 if let proposal = result["proposal"] as? [String: Any] { onEvent?(["type": "proposal", "runId": scope.replyRunId, "proposal": proposal, "internal": run["internal"] ?? false]) }
                 answerFileCall(message, result: result, success: true); return
             }
+            if tool=="buddy_build_team" {
+                guard run["proposalsEnabled"] as? Bool==true,let scope=run["proposalScope"] as? BuddyProposalScope,let callId=params["callId"] as? String else{throw BuddyProposalFailure(message:"Team creation is unavailable in this turn.")}
+                let result=try teamBuilder.perform(scope,executionRunId:runID,callId:callId,arguments:arguments,authorizedText:run["authorizedUserText"] as? String ?? "")
+                if let plan=result["plan"] {onEvent?(["type":"team-plan","runId":scope.replyRunId,"plan":plan,"internal":run["internal"] ?? false])}
+                answerFileCall(message,result:BuddyTeamBuilder.modelResult(result),success:true);return
+            }
             guard let scope = run["fileScope"] as? BuddyFileScope, let keys = run["permissionKeys"] as? [String], filePermission?(scope.workspace, keys) == true else { throw BuddyFileFailure(code: "access_removed", message: "Project-file access is unavailable. Do not retry file operations in this turn.") }
             let count = (run["fileCalls"] as? Int ?? 0) + 1
             guard count <= 60 else { throw BuddyFileFailure(code: "file_limit", message: "This reply reached its file-operation limit. Finish with the verified results so far.") }
@@ -896,7 +904,7 @@ struct BuddyFailure: LocalizedError {
               BuddyTurnScope.matches(params, turnID: turnID),
               ["starting", "answering", "stopping"].contains(runs[runID]?["status"] as? String ?? "") else { return }
         if method == "item/completed", let item = params["item"] as? [String: Any], item["type"] as? String == "dynamicToolCall" {
-            onEvent?(["type": "tool", "runId": runID, "tool": item["tool"] ?? "Buddy tool", "status": item["success"] as? Bool == true ? "completed" : "failed", "category": (item["tool"] as? String ?? "").hasPrefix("buddy_desktop_") ? "computer" : item["tool"] as? String == "buddy_propose_agent" ? "team" : "files", "internal": runs[runID]?["internal"] ?? false])
+            onEvent?(["type": "tool", "runId": runID, "tool": item["tool"] ?? "Buddy tool", "status": item["success"] as? Bool == true ? "completed" : "failed", "category": (item["tool"] as? String ?? "").hasPrefix("buddy_desktop_") ? "computer" : ["buddy_propose_agent","buddy_build_team"].contains(item["tool"] as? String ?? "") ? "team" : "files", "internal": runs[runID]?["internal"] ?? false])
         }
         if method == "item/started", let item = params["item"] as? [String: Any], item["type"] as? String == "mcpToolCall", let id = item["id"] as? String {
             var previews = runs[runID]?["toolPreviews"] as? [String: [String: Any]] ?? [:]

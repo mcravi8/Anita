@@ -35,6 +35,10 @@ with tempfile.TemporaryDirectory(prefix='buddy-proposals-test-') as temp:
  binary=Path(temp)/'buddy-proposal-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyAgentProposals.swift'),str(source/'tests/Proposals.swift'),'-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)
+with tempfile.TemporaryDirectory(prefix='buddy-team-builder-',suffix='.noindex') as temp:
+ binary=Path(temp)/'buddy-team-builder-tests'
+ subprocess.run(['xcrun','swiftc',str(source/'BuddyAgentProposals.swift'),str(source/'tests/TeamBuilder.swift'),'-o',str(binary)],check=True)
+ subprocess.run([str(binary)],check=True)
 
 with tempfile.TemporaryDirectory(prefix='buddy-actions-test-') as temp:
  binary=Path(temp)/'buddy-action-tests'
@@ -72,6 +76,11 @@ with tempfile.TemporaryDirectory(prefix='buddy-worker-integration-') as temp:
 with tempfile.TemporaryDirectory(prefix='buddy-provider-test-') as temp:
  binary=Path(temp)/'buddy-provider-tests'
  names=['BuddyAISettings.swift','BuddyAIRouter.swift','BuddyClaudeConversations.swift','BuddyWorkerProcess.swift','BuddyWorkerCore.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/Providers.swift']
+ subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
+ subprocess.run([str(binary),str(source/'tests/provider-server.py'),str(source/'tests/provider-claude.py'),shutil.which('python3')],check=True)
+with tempfile.TemporaryDirectory(prefix='buddy-team-routing-',suffix='.noindex') as temp:
+ binary=Path(temp)/'buddy-team-routing-tests'
+ names=['BuddyAISettings.swift','BuddyClaudeConversations.swift','BuddyWorkerProcess.swift','BuddyWorkerCore.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/TeamBuilderRouting.swift']
  subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
  subprocess.run([str(binary),str(source/'tests/provider-server.py'),str(source/'tests/provider-claude.py'),shutil.which('python3')],check=True)
 

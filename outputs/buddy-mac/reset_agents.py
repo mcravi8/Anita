@@ -14,7 +14,7 @@ def reset(support,stop=stop_worker):
     support=Path(support);stop()
     with (support/'agent-reset.lock').open('a') as lock:
         os.chmod(lock.name,0o600);fcntl.flock(lock,fcntl.LOCK_EX)
-        names=['workspace.json','agent-models.json','agent-interviews.json','agent-memory.json','team-monitor.json','agent-proposals.json','conversation-providers.json','Worker/tasks.json','Worker/routines.json']
+        names=['workspace.json','agent-models.json','agent-interviews.json','agent-memory.json','team-monitor.json','team-plans.json','agent-proposals.json','conversation-providers.json','Worker/tasks.json','Worker/routines.json']
         raw={name:(support/name).read_bytes() for name in names if (support/name).exists()}
         saved={name:json.loads(data) for name,data in raw.items()};state=saved['workspace.json'];workspace=state['conversationWorkspace'];uuid.UUID(workspace)
         if state.get('version')!=1 or not isinstance(state.get('agents'),list):raise RuntimeError('Could not verify the saved workspace.')
@@ -28,6 +28,8 @@ def reset(support,stop=stop_worker):
             for field in ['checks','updates']:journal[field]=[r for r in journal.get(field,[]) if r['workspace']!=workspace]
             journal['observed']={k:r for k,r in journal.get('observed',{}).items() if r['workspace']!=workspace};journal['journalRevision']=journal.get('journalRevision',0)+1
         if 'agent-proposals.json' in saved:saved['agent-proposals.json']=[r for r in saved['agent-proposals.json'] if r['workspace']!=workspace]
+        if 'team-plans.json' in saved:saved['team-plans.json']=[r for r in saved['team-plans.json'] if r['workspace']!=workspace]
+        state.pop('teamPlans',None);state.pop('appliedTeamPlans',None)
         if 'conversation-providers.json' in saved:saved['conversation-providers.json']={k:v for k,v in saved['conversation-providers.json'].items() if not k.startswith(workspace+':')}
         for name,field in [('Worker/tasks.json','tasks'),('Worker/routines.json','routines')]:
             if name in saved:saved[name][field]=[r for r in saved[name][field] if r['workspace']!=workspace]

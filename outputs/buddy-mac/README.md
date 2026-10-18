@@ -1,4 +1,4 @@
-# Buddy for Mac · 0.20.0
+# Buddy for Mac · 0.21.0
 
 Buddy is a personal Mac app with minimal direct messages, 3D avatars, and agents whose names, roles, instructions, shapes, and colors you can change independently.
 
@@ -212,3 +212,16 @@ New explicit standing preferences in ordinary direct or relevant group messages 
 Atomic local journals are `agent-memory.json` and `team-monitor.json`. Failed learning keeps the previous instructions and shows an error. Automatic Claude check-ins and learning share a default $2/day estimated limit, separately from chat/task limits; pending usage is reserved before calls and unresolved usage remains reserved. The SDK’s final request may exceed an estimate. ChatGPT check-ins use subscription allowances. Both need the selected provider connected; there is no silent fallback or replay of interrupted calls. The helper survives closing Buddy, but this Mac must remain awake and online.
 
 Verified with inert Claude and ChatGPT transports, actual native queue and source records, per-model routing, quiet/opt-in behavior, idle suppression, budget reservations, credential filtering, workspace/sharing isolation, exact quote validation, and manual-edit precedence. No test agents or separate app identities are installed.
+
+
+## Buddy 0.21 — agents create teams and teammates
+
+The native `buddy_build_team` tool is available to direct-chat agents and tool-enabled group participants through both Claude and ChatGPT. It lists actual registered agents/teams, creates a team around existing and new agents, adds members to an existing team, or creates a standalone agent. It can create up to eight new agents per plan, with at most sixteen members in a group. The creating agent joins by default and is recorded as manager. Existing members keep their instructions, chats, access removals and model choices.
+
+An explicit current human creation request can commit directly. Authorization is bound to the real saved user message and parent reply, plus an exact quote; quoted tool content, hypothetical or capability discussion, or a model-authored claim of consent cannot authorize direct creation. Ambiguous or unsolicited plans remain pending. A unique pending plan can also proceed after a real explicit go-ahead. Human review supports editing the team name/goal, existing members, each new name/role/instructions/appearance, and setup style before approval; decline creates nothing.
+
+Delegated teammates start from the creating agent’s complete, editable brief and ask for missing details as needed. The optional individual-interview mode retains the existing onboarding conversation. Agents made through the normal New agent UI still use their original adaptive interview. Default service/file/computer access and native external-action reviews remain as configured; creation does not bypass them. New teammates keep the existing quiet-by-default proactive policy while participating in Chief’s oversight.
+
+The main chat receives a compact Created/Suggested card. Created teams appear in the sidebar and open their real shared group chat; instruction links open individual agent settings. Team registration does not itself start work. `team-plans.json` journals intent and receipts. Agents and group membership commit together, duplicate deliveries and same-request retries return the same plan, stale frontend saves preserve newly created work, and interrupted journal receipts reconcile against workspace provenance. There are no extra app windows or app identities.
+
+Inert native tests cover direct creation, existing membership, interview mode, exact human authorization, pending edit/approval/decline, retries, workspace isolation, preservation and real Claude/ChatGPT tool round trips. Frontend tests cover receipt deduplication, manual-edit/membership precedence and invalid/foreign receipts.

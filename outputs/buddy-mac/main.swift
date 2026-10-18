@@ -64,7 +64,7 @@ import AppKit
                 Task { if let workspace = try? self.workspaceContext().workspace, let status = try? await self.ai.status(workspace: workspace) { self.deliver(status.merging(["type": "connection"]) { _, new in new }) } }; return
             }
             if event["type"] as? String == "tool-input" { _ = self.teamwork.consume(event); self.deliver(event); return }
-            if event["type"] as? String == "proposal" { self.deliver(event); return }
+            if ["proposal","team-plan"].contains(event["type"] as? String ?? "") { self.deliver(event); return }
             if !self.teamwork.consume(event) { self.deliver(event) }
         }
         showWindow()
@@ -127,6 +127,8 @@ import AppKit
           toolInputs: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'toolInputs'}),
           answerToolInput: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'answerToolInput', payload}),
           agentProposals: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'agentProposals'}),
+          teamPlans: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'teamPlans'}),
+          reviewTeamPlan: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'reviewTeamPlan', payload}),
           reviewAgentProposal: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'reviewAgentProposal', payload}),
           connections: refresh => window.webkit.messageHandlers.buddy.postMessage({kind: 'connections', refresh: !!refresh}),
           setConnectionAccess: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'setConnectionAccess', payload}),
@@ -232,7 +234,7 @@ import AppKit
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }
     @objc private func about() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.20.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.21.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
@@ -315,6 +317,10 @@ import AppKit
         case "agentProposals":
             do { let context = try workspaceContext(); replyHandler(["proposals": try conversations.agentProposals.list(context.workspace)], nil) }
             catch { replyHandler(nil, error.localizedDescription) }
+        case "teamPlans":
+            do{let context=try workspaceContext();replyHandler(["plans":try conversations.teamBuilder.list(context.workspace)],nil)}catch{replyHandler(nil,error.localizedDescription)}
+        case "reviewTeamPlan":
+            do{let context=try workspaceContext();guard let payload=body["payload"] as? [String:Any] else{throw BuddyProposalFailure(message:"Review this team plan first.")};replyHandler(try conversations.teamBuilder.review(context.workspace,payload:payload),nil)}catch{replyHandler(nil,error.localizedDescription)}
         case "reviewAgentProposal":
             do {
                 let context = try workspaceContext()
@@ -399,7 +405,7 @@ import AppKit
             do {
                 try FileManager.default.createDirectory(at: supportURL, withIntermediateDirectories: true)
                 let previous = try? workspaceState()
-                let protected = try agentSetup.protect(conversations.agentProposals.preserveApprovals(in: state, previous: previous))
+                let protected = try agentSetup.protect(conversations.teamBuilder.preserve(in:conversations.agentProposals.preserveApprovals(in: state, previous: previous),previous:previous))
                 if let workspace=protected["conversationWorkspace"] as? String,let agents=protected["agents"] as? [[String:Any]] {try ai.ensureAgentDefaults(workspace:workspace,agents:agents.compactMap{$0["id"] as? String})}
                 try JSONSerialization.data(withJSONObject: protected).write(to: stateURL, options: .atomic)
                 if let workspace = state["conversationWorkspace"] as? String, let agents = state["agents"] as? [[String: Any]], let oldAgents = previous?["agents"] as? [[String: Any]] {

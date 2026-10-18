@@ -53,7 +53,7 @@
     }
     const message=(state.messages[run.target]||[]).find(m=>m.id===run.replyId);
     const body=typeof event.text==='string'?event.text:message?.body||'';
-    const empty=event.status==='completed'&&!body.trim()&&!(event.files?.length||message?.files?.length||message?.proposalIds?.length);
+    const empty=event.status==='completed'&&!body.trim()&&!(event.files?.length||message?.files?.length||message?.proposalIds?.length||message?.teamPlanIds?.length);
     const status=empty?'failed':event.status,error=empty?'No answer came back. Try again.':event.error||'';
     run.status=status;run.error=error;run.updatedAt=new Date().toISOString();
     if(team)run.team=team;
@@ -66,7 +66,7 @@
   function recover(state,snapshots=[]){
     for(const run of Object.values(state.runs||{})){
       const message=(state.messages[run.target]||[]).find(m=>m.id===run.replyId);
-      if(run.status==='completed'&&message&&!message.body?.trim()&&!message.files?.length&&!message.proposalIds?.length){
+      if(run.status==='completed'&&message&&!message.body?.trim()&&!message.files?.length&&!message.proposalIds?.length&&!message.teamPlanIds?.length){
         run.status=message.status='failed';run.error=message.error='This reply finished without an answer. Try again.';
       }
       if(!busy(run.status))continue;

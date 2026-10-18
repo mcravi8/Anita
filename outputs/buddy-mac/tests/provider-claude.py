@@ -7,6 +7,9 @@ for line in sys.stdin:
  config=json.loads(line);assert config['command']=='start' and config['apiKey']=='fixture-key'
  assert 0.1<=config['budget']<=10 and all(t['name'].startswith('buddy_') for t in config['tools'])
  prompt=config['prompt']
+ if 'BUILD_TEAM_CLAUDE' in prompt:
+  out({'type':'call','id':'team-1','tool':'buddy_build_team','arguments':{'action':'create','teamName':'Claude research','objective':'Research public evidence','reason':'Source gathering','authorizationQuote':'Create a research team.','newAgents':[{'name':'Claude scout','role':'Researcher','description':'Research primary sources and ask only for missing scope.','avatarShape':'clover','avatarColor':'mint'}]}})
+  result=json.loads(sys.stdin.readline());assert result['result'].get('created'),result
  if 'SAVE_PROACTIVE' in prompt:
   out({'type':'call','id':'proactive-1','tool':'buddy_team','arguments':{'action':'set_proactive','enabled':True,'quote':'Keep me updated.'}})
   result=json.loads(sys.stdin.readline());assert result['result'].get('saved'),result

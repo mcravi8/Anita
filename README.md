@@ -7,6 +7,7 @@ A personal AI workspace with configurable agents, individual chats, and group te
 - Configurable agents with independent conversations, roles, appearances, instructions, and access settings.
 - Adaptive setup in each new agent's chat; Claude turns the answers into editable instructions and learns explicit standing preferences over time.
 - Proactive Chief oversight with private status check-ins, sourced DM updates, and per-agent opt-in notifications.
+- Agents create requested teams and teammates, with editable briefs and approval for unsolicited suggestions.
 - Group coordination with assignments, dependent handoffs, and one shared response.
 - ChatGPT sign-in through the local Codex app-server, using subscription allowances.
 - Connected services for research, email, and other supported tools, with action reviews.

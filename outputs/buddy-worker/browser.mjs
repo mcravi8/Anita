@@ -74,20 +74,28 @@ export class PrivateBrowser {
     this.context=await chromium.launchPersistentContext(this.profile,{channel:'chrome',headless:!headed,chromiumSandbox:true,acceptDownloads:false,permissions:[],serviceWorkers:'block',ignoreDefaultArgs:['--password-store=basic','--use-mock-keychain','--disable-sync'],args:['--disable-extensions','--disable-background-networking']});
     await this.context.route('**/*',async route=>{
       const request=route.request();
-      let navigation=request.isNavigationRequest();
+      const pageLoad=request.isNavigationRequest();   // a page or frame being loaded, which is where a redirect is checked below
+      let navigation=pageLoad;
       if(navigation){try{navigation=!request.frame().parentFrame();}catch{/* A popup's first request precedes its frame. Treat it as top-level. */}}
       try{
         const url=new URL(await publicURL(request.url(),lookup,this.testOrigin)),payload=request.url()+' '+(request.postData()||'');
         if(this.sharedOrigin&&navigation&&!this.googleFlow&&url.origin!==this.sharedOrigin&&!(this.sessionRefresh&&sessionRefreshDestination(this.sharedOrigin,url.href)))throw Error('Outside shared website session.');
         for(const [secret,origin] of this.secretOrigins)if(url.origin!==origin&&(payload.includes(secret)||payload.includes(encodeURIComponent(secret))))throw Error('Private sign-in data cannot be sent to another origin.');
-        if(this.sharedOrigin&&navigation&&!this.googleFlow){
+        // Chrome follows redirects inside its own network stack without asking again, so a public page could send the browser (and a
+        // form's POST body) on to an address inside this Mac or its network. Page loads are therefore fetched without following
+        // redirects: each Location is checked here first, and then Chrome follows it as a new request that is checked again. (Google
+        // sign-in is left to Chrome itself, as before.)
+        if(pageLoad&&!this.googleFlow){
           const response=await route.fetch({maxRedirects:0}),location=response.headers().location;
           if(location&&response.status()>=300&&response.status()<400){
             const destination=new URL(location,request.url());
-            if(destination.origin!==this.sharedOrigin){
-              if(url.origin!==this.sharedOrigin||!sessionRefreshDestination(this.sharedOrigin,destination.href)||(this.sessionRefreshes||0)>=2)throw Error('Website redirected outside the delegated session to '+destination.origin);
-              this.sessionRefresh=true;this.sessionRefreshes=(this.sessionRefreshes||0)+1;
-            }else if(url.origin!==this.sharedOrigin)this.sessionRefresh=false;
+            await publicURL(destination.href,lookup,this.testOrigin);
+            if(this.sharedOrigin&&navigation){
+              if(destination.origin!==this.sharedOrigin){
+                if(url.origin!==this.sharedOrigin||!sessionRefreshDestination(this.sharedOrigin,destination.href)||(this.sessionRefreshes||0)>=2)throw Error('Website redirected outside the delegated session to '+destination.origin);
+                this.sessionRefresh=true;this.sessionRefreshes=(this.sessionRefreshes||0)+1;
+              }else if(url.origin!==this.sharedOrigin)this.sessionRefresh=false;
+            }
           }
           await route.fulfill({response});
         }else await route.continue();

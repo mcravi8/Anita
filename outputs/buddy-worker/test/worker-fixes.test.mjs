@@ -47,6 +47,32 @@ test('without network access a command cannot reach a service on this Mac, such 
 });
 
 function pages(){return createServer((req,res)=>{res.setHeader('Content-Type','text/html');res.end(req.url.startsWith('/spin')?'<title>spin</title><script>for(;;){}</script>':'<title>fine</title><h1>All good</h1>');});}
+const redirectTest=ROUTES=>async()=>{
+ const inside=[];   // what reached the "internal" service
+ const internal=createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;inside.push(req.method+' '+req.url+' '+body);res.setHeader('Content-Type','text/html');res.end('<title>INTERNAL</title><p>internal secret</p>');});
+ await new Promise(r=>internal.listen(0,'127.0.0.1',r));const target=`http://127.0.0.1:${internal.address().port}/reboot`;
+ const site=createServer((req,res)=>{
+  res.setHeader('Content-Type','text/html');
+  if(req.url==='/go'){res.statusCode=302;res.setHeader('Location',target);res.end();return;}
+  if(req.url==='/chain'){res.statusCode=302;res.setHeader('Location','/chain2');res.end();return;}
+  if(req.url==='/chain2'){res.statusCode=307;res.setHeader('Location',target);res.end();return;}
+  if(req.url==='/form'){res.end('<title>form</title><form id=f method=post action=/r307><input name=cmd value=factory-reset></form><script>document.getElementById("f").submit()</script>');return;}
+  if(req.url==='/r307'){res.statusCode=307;res.setHeader('Location',target);res.end();return;}
+  if(req.url==='/legit'){res.statusCode=302;res.setHeader('Location','/ok');res.end();return;}
+  res.end('<title>fine</title><h1>All good</h1>');
+ });
+ await new Promise(r=>site.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${site.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-redirect-test-'));
+ const b=new PrivateBrowser(join(root,'profile'),{testOrigin:origin});
+ try{
+  for(const path of ROUTES){try{await b.navigate(origin+path);}catch{}await new Promise(r=>setTimeout(r,1200));}
+  assert.deepEqual(inside,[],'nothing reached the internal service: no redirected GET, no redirected POST'+(ROUTES.includes('/chain')?', no second hop':''));
+  const page=await b.navigate(origin+'/legit');assert.match(JSON.stringify(page),/All good|fine/,'an ordinary redirect within the public site still works');
+ }finally{await b.close().catch(()=>{});site.close();internal.close();await rm(root,{recursive:true,force:true});}
+};
+test('a redirect from a public page cannot send the browser, or a form POST, on to the private network',{timeout:90000},redirectTest(['/go','/form']));
+// Playwright does not route the hops after the first one, so a chain (public, then public, then private) is still followed by Chrome unchecked.
+// This is the known limit of checking the first hop; closing it takes a checking proxy for all browser traffic. It is listed so it cannot be forgotten.
+test('a chain of redirects that ends in the private network is refused',{todo:'needs a checking proxy for all browser traffic',timeout:90000},redirectTest(['/chain']));
 test('a page that never yields cannot block the private browser for good',{timeout:60000},async()=>{
  const server=pages();await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-spin-test-'));
  const b=new PrivateBrowser(join(root,'profile'),{testOrigin:origin,commandDeadlineMs:2000});

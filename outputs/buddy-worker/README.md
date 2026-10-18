@@ -31,6 +31,14 @@ Private task files and current connected user folders use the existing format, s
 
 Task briefs, partial/final results, file receipts, and reviews are saved locally. Only an actual service/browser result can confirm an effect. On restart, active work becomes interrupted, pending approvals expire, and previously accepted actions without receipts remain uncertain. Nothing is automatically resubmitted. Explicit Resume must reconcile external state first. Tasks are serial, limited to one hour per attempt and 150 browser calls; logged actions and pending reviews are bounded. Daily/weekday routines run through the local durable scheduler; no remote host is supplied.
 
+## What the private browser refuses on the network
+
+Before a page is opened, its address must resolve to a public address (loopback, private, link-local and mapped addresses are refused). Page and frame loads are fetched without following redirects, so the first redirect of a page load is checked the same way before Chrome follows it, which stops a public page redirecting the browser, or a form's POST, to an address inside this Mac or its network.
+
+Known limits, listed so they are not assumed away: Playwright does not route the hops after the first one, so a chain of redirects (public, then public, then private) is still followed by Chrome unchecked; subresource requests are checked at their first address only; and the name is resolved once for the check and again by Chrome, so a site that answers differently the second time (DNS rebinding) is not stopped. Closing all three takes a checking proxy that every Chrome request goes through, which verifies the real destination at connection time. `test/worker-fixes.test.mjs` carries the chained-redirect case as a to-do test that starts passing when that is built.
+
+A helper that exits abnormally leaves its last error output in `Worker/crash-<helper>.log` (see the Mac app README). A page that stops responding resets the browser after 40 seconds, and a browser whose Chrome died is started again by the next command.
+
 ## Runtime plumbing and checks
 
 `Buddy Worker.app` has a separate bundle identity so the helper cannot intercept reopening Buddy. `~/Library/LaunchAgents/app.buddy.worker.plist` starts it for the signed-in user. The private Unix socket uses a short per-user temporary directory, owner-only permissions, and peer UID validation. Requests carry workspace/task IDs; create requests have stable idempotency IDs. No network control port is opened.

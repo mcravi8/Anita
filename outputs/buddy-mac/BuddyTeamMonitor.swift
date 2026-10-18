@@ -29,6 +29,7 @@ import Foundation
         var out=try status(raw);guard let actor else{return out}
         let policy=try store.policy(raw),observed=try store.observed(raw,jobs:jobs,now:now),allowed=observed.filter{($0["agentId"] as? String==actor || store.configuration(policy,agent:$0["agentId"] as? String ?? "")["participates"] as? Bool != false) && (target==nil || $0["agentId"] as? String==target)}
         out.removeValue(forKey:"profiles");out.removeValue(forKey:"updates")
+        out["automaticClaudeUsage"]=["dailyLimitUSD":out.removeValue(forKey:"dailyLimitUSD") ?? NSNull(),"sharedAcrossAgents":true,"appliesTo":["team_checkins","preference_learning"],"excludes":["chat_replies","background_tasks","scheduled_tasks"],"dailyUsage":out.removeValue(forKey:"daily") ?? [:]]
         let visible=Set(allowed.compactMap{$0["agentId"] as? String})
         out["observed"]=(out["observed"] as? [[String:Any]] ?? []).filter{visible.contains($0["agentId"] as? String ?? "")}
         out["checks"]=(out["checks"] as? [[String:Any]] ?? []).filter{visible.contains($0["agentId"] as? String ?? "")}

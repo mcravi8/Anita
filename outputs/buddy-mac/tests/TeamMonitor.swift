@@ -41,6 +41,8 @@ import Foundation
   require(!(try monitor.status(state)["updates"] as! [[String:Any]]).contains{$0["agentId"] as? String==maze},"a peer's worker result is delivered by the worker without a duplicate monitor message")
   _ = try monitor.handle(["action":"configure","agentId":maze,"participates":false],state:state,jobs:jobs)
   let privateStatus=try monitor.handle(["action":"status","agentId":maze],state:state,jobs:jobs,actor:chief)
+  let automaticUsage=privateStatus["automaticClaudeUsage"] as! [String:Any]
+  require(privateStatus["dailyLimitUSD"]==nil && automaticUsage["dailyLimitUSD"] as? Double==2 && (automaticUsage["excludes"] as? [String])?.contains("scheduled_tasks")==true,"agent-facing limits carry their real scope instead of implying an overall daily task budget")
   require((privateStatus["work"] as? [[String:Any]])?.isEmpty==true && privateStatus["profiles"]==nil,"revoking team sharing hides peer conversations, instructions and work from Chief tools")
   var longHistory=jobs
   for n in 0..<100 {longHistory.append(["id":UUID().uuidString,"workspace":w,"agentId":maze,"title":"Newer completed task \(n)","status":"completed","updatedAt":"2026-10-18T00:00:00Z"])}
@@ -78,6 +80,9 @@ import Foundation
   let budgetRoot=root.appendingPathComponent("Budget",isDirectory:true);try FileManager.default.createDirectory(at:budgetRoot,withIntermediateDirectories:true)
   let budgetStore=try BuddyTeamMonitorStore(support:budgetRoot),policy=try budgetStore.policy(state),budgetJob=try budgetStore.enqueue(kind:"checkin",workspace:w,agent:maze,input:[:],fingerprint:"budget",policy:policy,selection:.init(provider:"claude",model:"fixture"),now:Date())
   require(try budgetStore.reserve(budgetJob,policy:["dailyLimitUSD":0.1],limit:0.2,now:Date())==false,"automatic calls cannot reserve above the configured daily estimate")
+  _ = try budgetStore.setPolicy(["dailyLimitUSD":3.5],state:state)
+  let reopenedBudget=try BuddyTeamMonitorStore(support:budgetRoot)
+  require(try reopenedBudget.policy(state)["dailyLimitUSD"] as? Double==3.5,"an edited daily estimate persists when settings are reopened")
   let reserveJob=try budgetStore.enqueue(kind:"checkin",workspace:w,agent:maze,input:[:],fingerprint:"reserved",policy:policy,selection:.init(provider:"claude",model:"fixture"),now:Date())
   require(try budgetStore.reserve(reserveJob,policy:policy,limit:0.2,now:Date()),"an allowed estimate is durably reserved before calling a model")
   let restarted=try BuddyTeamMonitorStore(support:budgetRoot)

@@ -333,6 +333,9 @@ import Darwin
         if action=="saved" {
             do{
                 let result=try await p.request(["command":"useSaved","token":token])
+                var receipt:[String:Any]=["origin":origin,"at":ISO8601DateFormatter().string(from:Date()),"reusedApproval":savedGoogle]
+                for key in ["method","needsUser","performed","reason"] {if let value=result[key]{receipt[key]=value}}
+                _ = try store.update(id,["signInReceipt":receipt])
                 if result["needsUser"] as? Bool==true {
                     if let reviewID{try finishReview(reviewID,job:id,status:"completed",receipt:["needsUser":true])}
                     try await openPrivate(job,p:p);return ["paused":true,"private":true,"instruction":"Chrome needs the user to choose/unlock a saved login. The task is paused for private sign-in."]

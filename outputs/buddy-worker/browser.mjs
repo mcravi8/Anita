@@ -190,12 +190,20 @@ export class PrivateBrowser {
         if(/^(?:sign|log)\s?in$/i.test(label)&&href.origin===origin&&/\/(?:sign-in|signin|login)(?:\/|$)/i.test(href.pathname)){link=item;break;}
       }
       if(!link)return {needsUser:true,reason:'The site is on account creation rather than sign-in. Choose the existing-account sign-in privately.'};
+      const oldLink=await link.elementHandle(),oldHref=await link.getAttribute('href');
       await link.click();await root.waitForLoadState('domcontentloaded',{timeout:6000}).catch(()=>{});
-      if(new URL(root.url()).origin!==origin||signup())return {needsUser:true,reason:'The existing-account sign-in needs you.'};
+      const transitionDeadline=Date.now()+6000;let stillSignupLink=true;
+      while(Date.now()<transitionDeadline){
+        stillSignupLink=await oldLink.evaluate((e,href)=>e.isConnected&&e.getClientRects().length>0&&/^(?:sign|log)\s?in$/i.test(e.textContent.trim())&&e.getAttribute('href')===href,oldHref).catch(()=>false);
+        if(!stillSignupLink)break;
+        await new Promise(r=>setTimeout(r,75));
+      }
+      if(stillSignupLink||new URL(root.url()).origin!==origin||signup())return {needsUser:true,reason:'The existing-account sign-in needs you.'};
       switchedSignIn=true;
     }
     if(new URL(root.url()).origin!==origin)return null;
-    const google=await this.googleButton(root,origin);
+    let google=await this.googleButton(root,origin);
+    if(switchedSignIn&&!google){const deadline=Date.now()+3000;while(!google&&Date.now()<deadline){await new Promise(r=>setTimeout(r,100));google=await this.googleButton(root,origin);}}
     if(!google)return switchedSignIn?{switchedSignIn:true}:null;
     this.snapshot=null;const flow={origin,popup:null};this.googleFlow=flow;let choseAccount=false;
     try{

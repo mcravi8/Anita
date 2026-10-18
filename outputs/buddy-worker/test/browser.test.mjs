@@ -134,3 +134,14 @@ test('Google OAuth popup keeps its callback alive until the original site is sig
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-google-popup-')),b=new PrivateBrowser(root,{testOrigin:origin,testGooglePath:'/google/'});
  try{await b.navigate(origin+'/sign-in');const plan=await b.prepareSignIn('signin'),result=await b.useSaved(plan.token);assert.equal(result.performed,true);assert.equal(result.method,'google');assert.match(result.page.text,/Signed-in popup fixture/);assert.equal(picks,1);assert.equal(b.context.pages().length,1);}finally{await b.close();await rm(root,{recursive:true,force:true});await new Promise(r=>server.close(r));}
 });
+
+test('Google login waits for a client-rendered sign-in page instead of clicking the old registration button',async()=>{
+ let registration=0,signin=0;const server=createServer((req,res)=>{res.setHeader('Content-Type','text/html');
+  if(req.url==='/sign-up')return res.end(`<input autocomplete="new-password" type="password"><button onclick="fetch('/bad-registration')">Google</button><a href="/sign-in" id="existing">Sign in</a><script>document.querySelector('#existing').addEventListener('click',event=>{event.preventDefault();history.pushState({},'',event.currentTarget.href);setTimeout(()=>{document.body.innerHTML=${JSON.stringify('<input type="password"><button onclick="location.href=\'/google/account\'">Google</button><a href="/sign-up">Sign up</a>')};},300);});</script>`);
+  if(req.url==='/bad-registration'){registration++;return res.end('Not allowed');}
+  if(req.url==='/google/account')return res.end('<div role="link" data-identifier="fixture@example.test" onclick="location.href=\'/dashboard\'">Fixture account</div>');
+  signin++;res.end('<h1>Signed in through SPA Google</h1>');
+ });
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-google-spa-')),b=new PrivateBrowser(root,{testOrigin:origin,testGooglePath:'/google/'});
+ try{await b.navigate(origin+'/sign-up');const plan=await b.prepareSignIn('signin'),result=await b.useSaved(plan.token);assert.equal(result.performed,true);assert.equal(result.method,'google');assert.match(result.page.text,/Signed in through SPA Google/);assert.equal(registration,0);assert.ok(signin>=1);}finally{await b.close();await rm(root,{recursive:true,force:true});await new Promise(r=>server.close(r));}
+});

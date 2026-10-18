@@ -1,0 +1,470 @@
+/* The reading page. Edit and run ./build.sh install to restyle the app.
+
+   The page is drawn the full height of the window, behind the toolbar. --top-inset
+   is the toolbar's height, set by the app: the text starts that far down, and what
+   scrolls up behind the toolbar dissolves into #scroll-edge. */
+
+:root {
+  color-scheme: light dark;
+  --top-inset: 0px;
+
+  --bg: #ffffff;
+  --fg: #1d1d1f;
+  --secondary: #6e6e73;
+  --tertiary: #8e8e93;
+  --separator: rgba(0, 0, 0, 0.1);
+  --fill: rgba(120, 120, 128, 0.1);
+  --fill-strong: rgba(120, 120, 128, 0.18);
+  --link: #0066cc;
+  --accent: #0088ff;
+  --find: rgba(255, 214, 10, 0.5);
+  --find-current: #ffd60a;
+
+  /* Xcode's default light theme. */
+  --tk-comment: #5d6c79;
+  --tk-string: #c41a16;
+  --tk-keyword: #9b2393;
+  --tk-number: #1c00cf;
+  --tk-function: #326d74;
+  --tk-type: #0b4f79;
+  --tk-variable: #6c36a9;
+  --tk-attribute: #0f68a0;
+  --tk-added: #248a3d;
+  --tk-removed: #d70015;
+
+  --note: #0066cc;
+  --tip: #248a3d;
+  --important: #8944ab;
+  --warning: #b25000;
+  --caution: #d70015;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e1e;
+    --fg: #f5f5f7;
+    --secondary: #a1a1a6;
+    --tertiary: #8e8e93;
+    --separator: rgba(255, 255, 255, 0.12);
+    --fill: rgba(120, 120, 128, 0.2);
+    --fill-strong: rgba(120, 120, 128, 0.34);
+    --link: #2997ff;
+    --accent: #0091ff;
+    --find: rgba(255, 214, 10, 0.34);
+
+    /* Xcode's default dark theme. */
+    --tk-comment: #7f8c98;
+    --tk-string: #fc6a5d;
+    --tk-keyword: #fc5fa3;
+    --tk-number: #d0bf69;
+    --tk-function: #67b7a4;
+    --tk-type: #5dd8ff;
+    --tk-variable: #d0a8ff;
+    --tk-attribute: #41a1c0;
+    --tk-added: #30d158;
+    --tk-removed: #ff453a;
+
+    --note: #409cff;
+    --tip: #30db5b;
+    --important: #da8fff;
+    --warning: #ffb340;
+    --caution: #ff6961;
+  }
+}
+
+html {
+  background: var(--bg);
+  /* A jump to a heading lands below the toolbar, not behind it. */
+  scroll-padding-top: calc(var(--top-inset) + 20px);
+}
+
+body {
+  margin: 0;
+  color: var(--fg);
+  font: 16px/1.62 system-ui, -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-wrap: break-word;
+}
+
+/* The scroll edge: text passing behind the toolbar is blurred and faded, so the
+   window's title and controls stay legible over it. Over the empty margin at the
+   top of an unscrolled page it blurs nothing and cannot be seen. */
+#scroll-edge {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  height: calc(var(--top-inset) + 24px);
+  pointer-events: none;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  backdrop-filter: blur(18px) saturate(1.4);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 32px), transparent);
+}
+
+#content {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: calc(var(--top-inset) + 30px) 56px 140px;
+}
+
+#content > :first-child {
+  margin-top: 0;
+}
+
+/* Headings: weight and space do the work a rule would. */
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 1.9em 0 0.55em;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+h1 { font-size: 2.1em; letter-spacing: -0.022em; line-height: 1.12; margin-bottom: 0.6em; }
+h2 { font-size: 1.5em; letter-spacing: -0.016em; margin-top: 2.1em; }
+h3 { font-size: 1.2em; letter-spacing: -0.01em; font-weight: 650; }
+h4 { font-size: 1em; font-weight: 650; }
+h5 { font-size: 0.86em; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; color: var(--secondary); }
+h6 { font-size: 0.86em; font-weight: 600; color: var(--secondary); }
+
+/* Text */
+
+p, ul, ol, blockquote, pre, details, .table-wrap {
+  margin: 0 0 1em;
+}
+
+a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+strong {
+  font-weight: 650;
+}
+
+hr {
+  height: 1px;
+  margin: 2.4em 0;
+  border: 0;
+  background: var(--separator);
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+kbd {
+  padding: 0.12em 0.5em;
+  font: 0.82em system-ui, -apple-system, sans-serif;
+  border-radius: 6px;
+  background: var(--fill);
+  box-shadow: 0 0 0 1px var(--separator), 0 1.5px 0 var(--separator);
+}
+
+.empty {
+  color: var(--secondary);
+}
+
+/* Lists */
+
+ul, ol {
+  padding-left: 1.7em;
+}
+
+li {
+  margin: 0.25em 0;
+}
+
+li::marker {
+  color: var(--tertiary);
+}
+
+li > p {
+  margin: 0.25em 0;
+}
+
+li > ul, li > ol {
+  margin: 0.25em 0;
+}
+
+/* Tasks: a circle that fills when done. Drawn here rather than left to the
+   system's checkbox, which draws a done task dimmed. */
+
+li.task {
+  list-style: none;
+}
+
+li.task input {
+  -webkit-appearance: none;
+  appearance: none;
+  box-sizing: border-box;
+  width: 1.1em;
+  height: 1.1em;
+  margin: 0 0.6em 0 -1.7em;
+  vertical-align: -0.2em;
+  border: 1.5px solid var(--tertiary);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+li.task input:checked {
+  border-color: var(--accent);
+  background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.2 8.5l2.5 2.5 5.1-5.6' fill='none' stroke='white' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% no-repeat;
+}
+
+li.task:has(> p > input:checked) {
+  color: var(--secondary);
+}
+
+/* Quotes and callouts */
+
+blockquote {
+  position: relative;
+  padding: 2px 0 2px 20px;
+  color: var(--secondary);
+}
+
+blockquote::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  border-radius: 2px;
+  background: var(--fill-strong);
+}
+
+blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+blockquote.alert {
+  padding: 14px 18px;
+  color: var(--fg);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--tone) 11%, transparent);
+}
+
+blockquote.alert::before {
+  display: none;
+}
+
+.alert-title {
+  margin: 0 0 0.3em;
+  font-size: 0.8em;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--tone);
+}
+
+.alert-note { --tone: var(--note); }
+.alert-tip { --tone: var(--tip); }
+.alert-important { --tone: var(--important); }
+.alert-warning { --tone: var(--warning); }
+.alert-caution { --tone: var(--caution); }
+
+/* Code */
+
+code {
+  padding: 0.14em 0.4em;
+  font: 0.87em ui-monospace, "SF Mono", Menlo, monospace;
+  border-radius: 6px;
+  background: var(--fill-strong);
+}
+
+pre {
+  padding: 16px 18px;
+  overflow-x: auto;
+  line-height: 1.55;
+  border-radius: 14px;
+  background: var(--fill);
+}
+
+pre code {
+  padding: 0;
+  font-size: 0.82em;
+  white-space: pre;
+  border-radius: 0;
+  background: none;
+}
+
+pre.front-matter {
+  background: none;
+  box-shadow: inset 0 0 0 1px var(--separator);
+}
+
+.tk-c { color: var(--tk-comment); }
+.tk-s { color: var(--tk-string); }
+.tk-k { color: var(--tk-keyword); font-weight: 600; }
+.tk-n, .tk-l { color: var(--tk-number); }
+.tk-f { color: var(--tk-function); }
+.tk-t { color: var(--tk-type); }
+.tk-v, .tk-m { color: var(--tk-variable); }
+.tk-a { color: var(--tk-attribute); }
+.tk-add { color: var(--tk-added); }
+.tk-del { color: var(--tk-removed); }
+
+/* A source file: the page is the file — every line numbered, nothing boxed. Long
+   lines wrap rather than send the whole page sideways. */
+
+#content.source {
+  max-width: none;
+  padding-left: 18px;
+  padding-right: 28px;
+}
+
+pre.source {
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  border-radius: 0;
+  background: none;
+  tab-size: 4;
+}
+
+pre.source code {
+  display: block;
+  counter-reset: line;
+  font-size: 0.8em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+pre.source .line {
+  display: block;
+  position: relative;
+  min-height: 1.55em;
+  padding-left: 4.6em;
+}
+
+pre.source .line::before {
+  counter-increment: line;
+  content: counter(line);
+  position: absolute;
+  left: 0;
+  width: 3.4em;
+  text-align: right;
+  color: var(--tertiary);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Tables: one rounded surface, rows parted by hairlines. A wide one scrolls on
+   its own; the page does not. */
+
+.table-wrap {
+  overflow-x: auto;
+  border-radius: 12px;
+  box-shadow: inset 0 0 0 1px var(--separator);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  border-spacing: 0;
+  font-size: 0.94em;
+}
+
+th, td {
+  padding: 9px 14px;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  font-size: 0.86em;
+  font-weight: 600;
+  color: var(--secondary);
+  background: var(--fill);
+}
+
+td {
+  border-top: 1px solid var(--separator);
+}
+
+.center { text-align: center; }
+.right { text-align: right; }
+
+/* Disclosure */
+
+details {
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: var(--fill);
+}
+
+details > :last-child {
+  margin-bottom: 0;
+}
+
+summary {
+  font-weight: 600;
+}
+
+details[open] > summary {
+  margin-bottom: 0.7em;
+}
+
+/* Find */
+
+::highlight(mdv-find) {
+  background-color: var(--find);
+}
+
+::highlight(mdv-find-current) {
+  color: #000000;
+  background-color: var(--find-current);
+}
+
+@media (max-width: 640px) {
+  #content {
+    padding-left: 26px;
+    padding-right: 26px;
+  }
+}
+
+@media print {
+  #scroll-edge {
+    display: none;
+  }
+
+  #content {
+    max-width: none;
+    padding: 0;
+  }
+
+  pre, blockquote, table, img {
+    break-inside: avoid;
+  }
+}
+
+/* Typeset math inherits the page's colour and scales with reading zoom. Each wide
+   display scrolls within itself rather than stretching the reading column. */
+.math-display {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.4em 0.1em;
+  margin: 0.4em 0 1.2em;
+}
+.math-display > .katex-display {
+  margin: 0;
+  width: max-content;
+  min-width: 100%;
+}
+.math-inline > .katex { font-size: 1.1em; }
+.katex-mathml { user-select: none; }
+.math-error { color: var(--secondary); }
+.math-error code { white-space: pre-wrap; }

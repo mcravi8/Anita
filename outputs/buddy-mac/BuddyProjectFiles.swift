@@ -215,9 +215,9 @@ struct BuddyFileReceipt: Codable {
 
     func list(_ scope: BuddyFileScope) throws -> [String: Any] {
         let fd = try rootDescriptor(scope); defer { Darwin.close(fd) }
-        var files: [[String: Any]] = [], limited = false
+        var files: [[String: Any]] = [], directories:[[String:Any]]=[], limited = false
         func walk(_ fd: Int32, prefix: String, depth: Int) {
-            guard depth < 8, files.count < 200 else { limited = true; return }
+            guard depth < 8, files.count < 200, directories.count < 500 else { limited = true; return }
             let copy = dup(fd)
             guard copy >= 0 else { limited = true; return }
             guard let stream = fdopendir(copy) else { Darwin.close(copy); limited = true; return }
@@ -230,6 +230,10 @@ struct BuddyFileReceipt: Codable {
                 let path = prefix + name
                 if (try? checkCredentialBoundary(try location(scope).appendingPathComponent(path))) == nil {continue}
                 if (meta.st_mode & S_IFMT) == S_IFDIR {
+                    guard directories.count<500 else{limited=true;break}
+                    let omitted=["node_modules","venv","env","__pycache__"].contains(name)
+                    directories.append(["path":path,"omitted":omitted])
+                    if omitted {continue}
                     let child = openat(fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                     if child >= 0 { walk(child, prefix: path + "/", depth: depth + 1); Darwin.close(child) }
                 } else if (meta.st_mode & S_IFMT) == S_IFREG, meta.st_nlink == 1 { files.append(["path": path, "bytes": meta.st_size, "modified": ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: Double(meta.st_mtimespec.tv_sec)))]) }
@@ -239,6 +243,7 @@ struct BuddyFileReceipt: Codable {
         walk(fd, prefix: "", depth: 0)
         var result = try info(scope.workspace, folderId: scope.folderId)
         result["files"] = files.sorted { ($0["path"] as! String).localizedStandardCompare($1["path"] as! String) == .orderedAscending }
+        result["directories"]=directories
         result["limited"] = limited
         return result
     }

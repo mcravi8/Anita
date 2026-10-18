@@ -31,6 +31,13 @@ with tempfile.TemporaryDirectory(prefix='buddy-files-test-') as temp:
  subprocess.run(['xcrun','swiftc',str(source/'BuddyProjectFiles.swift'),str(source/'BuddyDocuments.swift'),str(source/'tests/Files.swift'),'-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)
 
+with tempfile.TemporaryDirectory(prefix='buddy-markdown-preview-',suffix='.noindex') as temp:
+ binary=Path(temp)/'buddy-markdown-preview-tests'
+ shutil.copytree(source/'MarkdownViewer',Path(temp)/'MarkdownViewer')
+ names=['BuddyMarkdownRenderer.swift','BuddyMarkdownPreview.swift','BuddyDocuments.swift','BuddyProjectFiles.swift','tests/MarkdownPreview.swift']
+ subprocess.run(['xcrun','swiftc','-framework','JavaScriptCore',*[str(source/name) for name in names],'-o',str(binary)],check=True)
+ subprocess.run([str(binary)],check=True)
+
 with tempfile.TemporaryDirectory(prefix='buddy-proposals-test-') as temp:
  binary=Path(temp)/'buddy-proposal-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyAgentProposals.swift'),str(source/'tests/Proposals.swift'),'-o',str(binary)],check=True)

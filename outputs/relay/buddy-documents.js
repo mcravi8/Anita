@@ -14,6 +14,14 @@
     return `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; form-action 'none'; base-uri 'none';"><style>body{margin:24px;font-family:system-ui;overflow-wrap:anywhere}img{max-width:100%}</style></head><body>${clean}</body></html>`;
   }
   function preview(file,sheetIndex=0){
+    if(file.markdownViewer){
+      const viewer=file.markdownViewer;
+      let clean=root.DOMPurify?root.DOMPurify.sanitize(viewer.html,{FORBID_TAGS:['script','style','iframe','object','embed','form','base','meta','link'],FORBID_ATTR:['srcset','action','formaction','target','ping','download','autofocus']}):`<pre>${escape(file.content)}</pre>`;
+      if(root.document){const template=document.createElement('template');template.innerHTML=clean;for(const a of template.content.querySelectorAll('a[href]')){const href=a.getAttribute('href');if(!href.startsWith('#')){a.title=href;a.removeAttribute('href');}}for(const img of template.content.querySelectorAll('img'))if(!/^data:image\/(png|jpeg|gif|webp);base64,/i.test(img.getAttribute('src')||'')){img.removeAttribute('src');img.alt=img.alt||'Image unavailable';}clean=template.innerHTML;}
+      const outline=(viewer.headings||[]).length?`<details class="buddy-outline"><summary>Outline</summary><nav aria-label="Document outline">${viewer.headings.slice(0,100).map(h=>`<a href="#${escape(h.id)}" style="padding-left:${Math.min(5,Math.max(0,h.level-1))*12}px">${escape(h.title)}</a>`).join('')}</nav></details>`:'';
+      const html=`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none';"><style>${String(viewer.style||'').replace(/<\/style/gi,'')}\n:root{--top-inset:0px}body{margin:0;font-size:15px}#content{padding:28px;max-width:760px;margin:auto}.buddy-outline{font:12px/1.6 -apple-system,sans-serif;margin-bottom:24px;color:var(--secondary)}.buddy-outline summary{cursor:pointer}.buddy-outline nav{display:grid;gap:6px;margin-top:12px}.buddy-outline a{color:var(--link);text-decoration:none}img{max-width:100%}</style></head><body><article id="content">${outline}${clean}</article></body></html>`;
+      return `<iframe class="document-markdown" title="${escape(file.path.split('/').pop())} · Markdown Viewer" sandbox="" referrerpolicy="no-referrer" srcdoc="${escape(html)}"></iframe><p class="markdown-viewer-caption">${escape(viewer.caption||'Markdown Viewer')}</p>`;
+    }
     if(file.format==='docx'){
       const paragraphs=new Map((file.paragraphs||[]).map(p=>[p.id,p]));
       const render=p=>{if(!p)return '';const heading=/heading\s*([1-6])/i.exec(p.style||''),tag=p.style==='Title'?'h1':heading?'h'+Math.min(6,Number(heading[1])+1):'p';return `<${tag} data-paragraph="${p.id}">${escape(p.text)||'<br>'}</${tag}>`;};
@@ -24,6 +32,7 @@
     if(file.format==='pdf')return `<div class="document-page-controls"><button class="border-button" data-action="document-prev" ${file.previewPage<=1?'disabled':''}>Previous</button><span>Page ${file.previewPage||1} of ${file.pageCount}</span><button class="border-button" data-action="document-next" ${file.previewPage>=file.pageCount?'disabled':''}>Next</button></div>${file.image?`<img class="document-page-image" src="${escape(file.image)}" alt="PDF page ${file.previewPage||1}">`:'<p>No page image is available.</p>'}`;
     if(file.format==='image')return `<img class="document-media-image" src="${escape(file.image)}" alt="${escape(file.path)}">`;
     if(file.format==='text'){
+      if(file.markdownPlain)return `<pre class="document-code">${escape(file.content)}</pre>`;
       const ext=file.path.split('.').pop().toLowerCase();
       if(['md','markdown','mdown'].includes(ext))return `<article class="document-paper reply-markdown">${root.BuddyMarkdown?.render(file.content)||escape(file.content)}</article>`;
       if(['html','htm'].includes(ext))return `<iframe class="document-html" title="HTML preview" sandbox="" referrerpolicy="no-referrer" srcdoc="${escape(htmlDocument(file.content))}"></iframe>`;

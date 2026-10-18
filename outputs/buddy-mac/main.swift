@@ -133,8 +133,10 @@ import AppKit
           connections: refresh => window.webkit.messageHandlers.buddy.postMessage({kind: 'connections', refresh: !!refresh}),
           setConnectionAccess: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'setConnectionAccess', payload}),
           projectFiles: folderId => window.webkit.messageHandlers.buddy.postMessage({kind: 'projectFiles', folderId: folderId || null}),
+          projectFolders: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'projectFolders'}),
           fullProjectPreview: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'fullProjectPreview', payload}),
           previewProjectFile: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'previewProjectFile', payload}),
+          projectFileVersion: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'projectFileVersion', payload}),
           editProjectDocument: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'editProjectDocument', payload}),
           createProjectDocument: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'createProjectDocument', payload}),
           revealProjectFile: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'revealProjectFile', payload}),
@@ -234,7 +236,7 @@ import AppKit
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }
     @objc private func about() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.21.1", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.22.0", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
@@ -340,16 +342,24 @@ import AppKit
                 await teamwork.stopForAgent(key)
                 replyHandler(try await conversations.setConnectionAccess(key: key, connection: id, allowed: allowed), nil)
             } catch { replyHandler(nil, error.localizedDescription) } }
+        case "projectFolders":
+            do{let context=try workspaceContext();replyHandler(["folders":try conversations.projectFiles.locations(context.workspace)],nil)}catch{replyHandler(nil,error.localizedDescription)}
         case "projectFiles":
             do { let context = try workspaceContext(); let scope = try (body["folderId"] as? String).map { BuddyFileScope(workspace: context.workspace, folderId: $0) } ?? conversations.projectFiles.scope(context.workspace); replyHandler(try conversations.projectFiles.list(scope), nil) }
             catch { replyHandler(nil, error.localizedDescription) }
-        case "readProjectFile", "fullProjectPreview", "previewProjectFile", "createProjectDocument", "editProjectDocument", "revealProjectFile", "writeProjectFile", "projectVersions", "restoreProjectFile":
+        case "readProjectFile", "fullProjectPreview", "previewProjectFile", "projectFileVersion", "createProjectDocument", "editProjectDocument", "revealProjectFile", "writeProjectFile", "projectVersions", "restoreProjectFile":
             do {
                 let context = try workspaceContext()
                 guard let payload = body["payload"] as? [String: Any], let folderId = payload["folderId"] as? String, let path = payload["path"] as? String else { throw BuddyFailure(message: "Refresh Files and try again.") }
                 let scope = BuddyFileScope(workspace: context.workspace, folderId: folderId)
                 if kind == "fullProjectPreview" { try filePreviews.open(data:conversations.projectFiles.readBytes(scope,path:path),name:path);replyHandler(["previewed":true],nil) }
-                else if kind == "previewProjectFile" { replyHandler(try conversations.projectFiles.preview(scope,path:path,page:payload["page"] as? Int ?? 1),nil) }
+                else if kind == "previewProjectFile" {
+                    let preview=try conversations.projectFiles.preview(scope,path:path,page:payload["page"] as? Int ?? 1)
+                    var rendered=BuddyMarkdownPreview.enrich(preview,assetReader:{try? self.conversations.projectFiles.readBytes(scope,path:$0)})
+                    rendered["originalPath"]=try conversations.projectFiles.location(scope).appendingPathComponent(path).path
+                    replyHandler(rendered,nil)
+                }
+                else if kind == "projectFileVersion" {replyHandler(["version":BuddyProjectFiles.hash(try conversations.projectFiles.readBytes(scope,path:path))],nil)}
                 else if kind == "revealProjectFile" { _ = try conversations.projectFiles.readBytes(scope,path:path); let url=try conversations.projectFiles.location(scope).appendingPathComponent(path); NSWorkspace.shared.activateFileViewerSelecting([url]);replyHandler(["revealed":true],nil) }
                 else if kind == "createProjectDocument" { guard let spec=payload["specification"] as? [String:Any] else { throw BuddyFailure(message:"Enter document contents.") }; replyHandler(try conversations.projectFiles.document(scope,path:path,expectedVersion:"",specification:spec,operations:nil,actor:"you",actorName:"You"),nil);deliver(["type":"project-files-changed"]) }
                 else if kind == "editProjectDocument" { guard let edits=payload["operations"] as? [[String:Any]],let version=payload["expectedVersion"] as? String else { throw BuddyFailure(message:"Read the latest document before editing.") };replyHandler(try conversations.projectFiles.document(scope,path:path,expectedVersion:version,specification:nil,operations:edits,actor:"you",actorName:"You"),nil);deliver(["type":"project-files-changed"]) }
@@ -477,7 +487,7 @@ import AppKit
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-        if navigationAction.targetFrame?.isMainFrame == false, url.absoluteString == "about:srcdoc" { decisionHandler(.allow); return }
+        if navigationAction.targetFrame?.isMainFrame == false, url.absoluteString.split(separator:"#",maxSplits:1).first == "about:srcdoc" { decisionHandler(.allow); return }
         if url.isFileURL, let root = Bundle.main.resourceURL?.appendingPathComponent("Web").standardizedFileURL.path,
            url.standardizedFileURL.path.hasPrefix(root + "/") { decisionHandler(.allow); return }
         if navigationAction.navigationType == .linkActivated, ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") { NSWorkspace.shared.open(url) }

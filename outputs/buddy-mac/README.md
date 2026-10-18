@@ -1,4 +1,4 @@
-# Buddy for Mac · 0.21.1
+# Buddy for Mac · 0.22.0
 
 Buddy is a personal Mac app with minimal direct messages, 3D avatars, and agents whose names, roles, instructions, shapes, and colors you can change independently.
 
@@ -53,6 +53,12 @@ Only the bundled interface's main-frame native bridge can decide suggestions. Th
 `agent-proposals.json` stores suggestions, original configuration, saved edits, source conversation/reply, and decisions locally. Pending cards remain reviewable after stopping a reply or restarting. Group member suggestions attach to the parent group reply. Internal coordinator turns have no proposal tool. No proposal automatically resumes a task or delegates work after approval. The native proposal checks, real model tool calls, isolated Mac approval journey, and phone layout evidence are recorded in `../buddy-proposals-verification.json`.
 
 ## Connected folders
+
+Buddy desktop, in the sidebar, groups connected folders with an optional HTTPS repository reference. A project holds existing folder IDs and a repository link in `workspace.json` (`desktopProjects`); it never moves or copies those folders. New project and Edit connections preserve entered values on save failure. Connected folders remain visible even before being grouped. Open chat adds the project name, exact folder IDs and repository reference to an agent’s existing draft, without sending it or starting work. Repository references do not automatically clone, synchronize or push Git changes.
+
+Files now shows a naturally sorted, collapsible folder hierarchy instead of a flat path list. Empty folders remain visible; `venv`, `env`, `node_modules` and `__pycache__` appear as dependency folders with their contents omitted from listings. Other supported files remain addressable by exact path. Expanded branches are saved per connected folder. Listings retain their existing bounds and explicitly mark partial coverage.
+
+Markdown previews embed our Markdown Viewer’s native renderer, reading style, syntax colors, table layout, outline and offline KaTeX. Preview reads the connected original; Edit original / Save to original uses the same native version check and recoverable history as agent writes. A visible preview checks the original’s version periodically and offers Reload when it changes, preserving any draft. The document has no app bridge, scripts or network access. Supported relative raster images are read through the connected-folder boundary and embedded with bounds. See `MarkdownViewer/README.md` for preview limits. The separate Markdown Viewer app is not modified.
 
 The folder button opens actual files. Buddy starts with its own shared folder under `~/Library/Application Support/Buddy/Projects/<workspace>`. Folder & access → Change shared folder replaces that root; Connect another folder adds a folder on your Mac without replacing it. Up to twelve additional folders can be connected. The folder selector appears when more than one root is available. Agents discover these roots with `buddy_list_folders`, then use their stable `folderId` with list, read, and write tools. Show in Finder opens the selected root. Disconnect folder removes additional access without deleting files. Connecting, changing, or disconnecting a folder stops current file work; disconnected and outdated folder identities cannot be reused. Each root belongs to its workspace. Corrupt saved folder registrations reject additional access. File paths must remain inside their registered root. Hidden paths, symbolic links, hard links, devices, deletion, and file execution are unavailable. HTML opens in a sandboxed preview; code remains text.
 

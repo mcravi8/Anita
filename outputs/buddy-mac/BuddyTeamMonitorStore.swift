@@ -36,14 +36,25 @@ import CryptoKit
     }
     func setPolicy(_ args:[String:Any],state:[String:Any])throws->[String:Any] {
         let w=state["conversationWorkspace"] as! String;var policy=try self.policy(state),all=value["settings"] as? [String:[String:Any]] ?? [:]
+        let increasedLimit=(args["dailyLimitUSD"] as? Double).map{$0>(policy["dailyLimitUSD"] as? Double ?? 2)} ?? false
         let ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
         if let enabled=args["enabled"] as? Bool {policy["enabled"]=enabled}
         if args["supervisorId"] != nil {let id=args["supervisorId"] as? String ?? "";guard id.isEmpty || ids.contains(id) else{throw BuddyWorkerFailure(message:"Choose a current agent to oversee the team.")};if !id.isEmpty && id != policy["supervisorId"] as? String {var agents=policy["agents"] as? [String:[String:Any]] ?? [:],selected=agents[id] ?? [:];selected["proactive"]=true;agents[id]=selected;policy["agents"]=agents};policy["supervisorId"]=id.isEmpty ? NSNull():id as Any;policy["supervisorChosen"]=true}
         if let interval=args["intervalMinutes"] as? Int {guard [5,15,30,60].contains(interval) else{throw BuddyWorkerFailure(message:"Choose 5, 15, 30 or 60 minutes.")};policy["intervalMinutes"]=interval}
-        if let budget=args["dailyLimitUSD"] as? Double {guard budget.isFinite,budget>=0.1,budget<=10 else{throw BuddyWorkerFailure(message:"Choose a daily estimated limit from $0.10 to $10.")};policy["dailyLimitUSD"]=budget}
+        if let budget=args["dailyLimitUSD"] as? Double {guard budget.isFinite,budget>=0.1 else{throw BuddyWorkerFailure(message:"Choose a daily estimated limit of at least $0.10.")};policy["dailyLimitUSD"]=budget}
         if let id=args["agentId"] as? String {guard ids.contains(id) else{throw BuddyWorkerFailure(message:"This agent is no longer here.")};var agents=policy["agents"] as? [String:[String:Any]] ?? [:],p=agents[id] ?? [:];if let mode=args["proactive"] as? Bool {p["proactive"]=mode};if let sharing=args["participates"] as? Bool {p["participates"]=sharing};agents[id]=p;policy["agents"]=agents}
         policy["revision"]=(policy["revision"] as? Int ?? 0)+1;all[w]=policy
-        try mutate{value["settings"]=all;var jobs=checks;for i in jobs.indices where jobs[i]["workspace"] as? String==w && ["queued","running","budget"].contains(jobs[i]["status"] as? String ?? "") && jobs[i]["kind"] as? String != "memory" {jobs[i]["status"]="cancelled";jobs[i]["error"]="Team settings changed before this check finished."};value["checks"]=jobs}
+        try mutate {
+            value["settings"]=all;var jobs=checks
+            for i in jobs.indices where jobs[i]["workspace"] as? String==w {
+                if jobs[i]["kind"] as? String=="memory" {
+                    // A refused reservation never ran. A higher allowance may
+                    // retry it today without clearing actual or uncertain usage.
+                    if increasedLimit,jobs[i]["status"] as? String=="budget" {jobs[i]["status"]="queued";jobs[i]["error"]=""}
+                } else if ["queued","running","budget"].contains(jobs[i]["status"] as? String ?? "") {jobs[i]["status"]="cancelled";jobs[i]["error"]="Team settings changed before this check finished."}
+            }
+            value["checks"]=jobs
+        }
         return policy
     }
     func configuration(_ policy:[String:Any],agent:String)->[String:Any] {var p=(policy["agents"] as? [String:[String:Any]])?[agent] ?? [:];if p["proactive"]==nil{p["proactive"]=policy["supervisorId"] as? String==agent};if p["participates"]==nil{p["participates"]=true};return p}

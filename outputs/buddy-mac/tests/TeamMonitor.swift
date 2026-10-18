@@ -80,9 +80,15 @@ import Foundation
   let budgetRoot=root.appendingPathComponent("Budget",isDirectory:true);try FileManager.default.createDirectory(at:budgetRoot,withIntermediateDirectories:true)
   let budgetStore=try BuddyTeamMonitorStore(support:budgetRoot),policy=try budgetStore.policy(state),budgetJob=try budgetStore.enqueue(kind:"checkin",workspace:w,agent:maze,input:[:],fingerprint:"budget",policy:policy,selection:.init(provider:"claude",model:"fixture"),now:Date())
   require(try budgetStore.reserve(budgetJob,policy:["dailyLimitUSD":0.1],limit:0.2,now:Date())==false,"automatic calls cannot reserve above the configured daily estimate")
-  _ = try budgetStore.setPolicy(["dailyLimitUSD":3.5],state:state)
+  for invalid in [Double.nan,Double.infinity,-1,0] {
+   do{_ = try budgetStore.setPolicy(["dailyLimitUSD":invalid],state:state);require(false,"invalid daily limits are rejected")}catch{}
+  }
+  let waitingMemory=try budgetStore.enqueue(kind:"memory",workspace:w,agent:maze,input:[:],fingerprint:"waiting-memory",policy:policy,selection:.init(provider:"claude",model:"fixture"),now:Date())
+  require(try budgetStore.reserve(waitingMemory,policy:["dailyLimitUSD":0.1],limit:0.2,now:Date())==false,"blocked learning has not consumed a model call")
+  _ = try budgetStore.setPolicy(["dailyLimitUSD":35.0],state:state)
+  require(budgetStore.checks.first{$0["id"] as? String==waitingMemory["id"] as? String}?["status"] as? String=="queued","raising the daily limit makes blocked learning eligible today")
   let reopenedBudget=try BuddyTeamMonitorStore(support:budgetRoot)
-  require(try reopenedBudget.policy(state)["dailyLimitUSD"] as? Double==3.5,"an edited daily estimate persists when settings are reopened")
+  require(try reopenedBudget.policy(state)["dailyLimitUSD"] as? Double==35,"an edited daily estimate persists when settings are reopened")
   let reserveJob=try budgetStore.enqueue(kind:"checkin",workspace:w,agent:maze,input:[:],fingerprint:"reserved",policy:policy,selection:.init(provider:"claude",model:"fixture"),now:Date())
   require(try budgetStore.reserve(reserveJob,policy:policy,limit:0.2,now:Date()),"an allowed estimate is durably reserved before calling a model")
   let restarted=try BuddyTeamMonitorStore(support:budgetRoot)
@@ -92,6 +98,9 @@ import Foundation
   let brief=budgetStore.updates.last!
   require(brief["body"] as? String=="The AgentMail inbox needs your sign-in." && brief["detail"] as? String==verbose,"proactive DMs stay short while preserving complete diagnostics for expansion")
   require(BuddyTeamMonitorStore.brief("Task 5BD6689F-E3FE-4EC2-B92C-2C436E740F9B is waiting at 05:44:19Z.")=="There’s an update on your work. Open Work details.","technical IDs cannot leak into a proactive DM")
+  let usageBefore=try JSONSerialization.data(withJSONObject:budgetStore.value["daily"] ?? [:],options:.sortedKeys)
+  _ = try budgetStore.setPolicy(["dailyLimitUSD":50.0],state:state)
+  require(try JSONSerialization.data(withJSONObject:budgetStore.value["daily"] ?? [:],options:.sortedKeys)==usageBefore,"raising a daily limit preserves spent and uncertain reserved usage")
   let quiet=try budgetStore.setPolicy(["agentId":chief,"proactive":false],state:state)
   require(budgetStore.configuration(quiet,agent:chief)["proactive"] as? Bool==false,"Chief can be switched to quiet mode explicitly")
   gpt.shutdown()

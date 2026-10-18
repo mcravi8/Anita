@@ -23,6 +23,7 @@ import Foundation
         init(id: String, key: String, workspace: String, requestText: String, options: BuddyTurnOptions, agent: [String: Any], process: BuddyWorkerProcess) { self.id=id;self.key=key;self.workspace=workspace;self.requestText=requestText;self.options=options;self.agent=agent;self.process=process }
     }
     private var runs: [String: Run] = [:]
+    private var runOrder: [String] = []
     private var idle: [String:(run:Run,at:Date,revision:String)] = [:]
     private var timer: Timer?
     init(support: URL, primary: ConversationService, settings: BuddyAISettings, makeProcess: (() -> BuddyWorkerProcess)? = nil, keyReader: @escaping (String) -> String? = BuddyClaudeKey.read) {
@@ -55,6 +56,7 @@ import Foundation
         try FileManager.default.createDirectory(at:folder.appendingPathComponent("Config"),withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         try JSONSerialization.data(withJSONObject:["runId":id,"status":"reserved","limitUSD":choice.claudeBudgetUSD]).write(to:folder.appendingPathComponent("usage.json"),options:.atomic)
         runs[id]=run
+        runOrder.append(id); BuddyRecordLimit.prune(order: &runOrder, records: &runs) { $0.stopped && $0.status != "stopping" }
         run.process.onEvent = { [weak self,weak run] event in guard let self,let run else{return};self.consume(event,run:run) }
         var tools: [[String: Any]] = []
         if options.toolsEnabled {

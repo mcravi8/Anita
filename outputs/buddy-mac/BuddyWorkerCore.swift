@@ -131,6 +131,8 @@ enum BuddyWorkerWire {
     private(set) var paused: Bool
     static let interrupted = Set(["running", "waiting_review", "stopping"])
     static let terminal = Set(["completed", "cancelled"])
+    /// Finished tasks move to an archive file once the history gets long, so a routine that runs every hour never fills it up.
+    static let archiveTrigger = 900, archiveKeep = 600, archiveSizeTrigger = 24 * 1024 * 1024
     init(directory: URL) throws {
         self.directory = directory; url = directory.appendingPathComponent("tasks.json")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -141,6 +143,7 @@ enum BuddyWorkerWire {
                   tasks.allSatisfy({ ($0["id"] as? String).flatMap(UUID.init(uuidString:)) != nil && ($0["workspace"] as? String).flatMap(UUID.init(uuidString:)) != nil }), Set(tasks.compactMap { $0["id"] as? String }).count == tasks.count else { throw BuddyWorkerFailure(message: "Buddy couldn’t verify its saved background tasks. Restore tasks.json before starting the worker.") }
             jobs = tasks; paused = saved["paused"] as? Bool ?? false
         } else { jobs = []; paused = false }
+        if jobs.count > Self.archiveTrigger { try? archiveFinished(keeping: Self.archiveKeep) }
         for i in jobs.indices where Self.interrupted.contains(jobs[i]["status"] as? String ?? "") {
             var reviews = jobs[i]["reviews"] as? [[String: Any]] ?? []
             for r in reviews.indices { if reviews[r]["status"] as? String == "pending" { reviews[r]["status"] = "expired" } else if reviews[r]["status"] as? String == "answered" { reviews[r]["status"] = "uncertain" } }
@@ -148,6 +151,29 @@ enum BuddyWorkerWire {
             jobs[i]["status"] = "interrupted"; jobs[i]["progress"] = "The worker restarted. Review the last result and any external action before continuing. Nothing was automatically retried."
         }
         try persist()
+    }
+    /// Moves the oldest completed or cancelled tasks into their own file, leaving `keep` tasks in the list. Nothing is deleted. A task that
+    /// needs attention stays, and so does the newest task of every routine, because the next run builds on its result. The tasks leave the
+    /// list only after the archive file is safely written.
+    @discardableResult func archiveFinished(keeping keep: Int) throws -> Int {
+        guard jobs.count > keep else { return 0 }
+        func routineKey(_ job: [String: Any]) -> String? {
+            guard let routine = (job["routineSeriesID"] ?? job["routineID"]) as? String else { return nil }
+            return (job["workspace"] as? String ?? "") + "|" + (job["agentId"] as? String ?? "") + "|" + routine
+        }
+        var newest = Set<String>(), seen = Set<String>()
+        for job in jobs.reversed() { if let key = routineKey(job), seen.insert(key).inserted, let id = job["id"] as? String { newest.insert(id) } }
+        var excess = jobs.count - keep; var moved: [[String: Any]] = [], kept: [[String: Any]] = []
+        for job in jobs {
+            if excess > 0, Self.terminal.contains(job["status"] as? String ?? ""), !newest.contains(job["id"] as? String ?? "") { moved.append(job); excess -= 1 } else { kept.append(job) }
+        }
+        guard !moved.isEmpty else { return 0 }
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let file = directory.appendingPathComponent("tasks-archive-\(stamp)-\(UUID().uuidString.prefix(8)).json")
+        let data = try JSONSerialization.data(withJSONObject: ["version": 1, "archivedAt": stamp, "tasks": moved], options: [.sortedKeys])
+        try data.write(to: file, options: .atomic); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        jobs = kept
+        return moved.count
     }
     func persist() throws {
         let data = try JSONSerialization.data(withJSONObject: ["version": 1, "paused": paused, "tasks": jobs], options: [.sortedKeys])
@@ -169,6 +195,8 @@ enum BuddyWorkerWire {
               !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, goal.count <= 30000,
               ["research", "applications", "email", "general", "coding"].contains(kind), ["chatgpt", "claude"].contains(provider), (kind != "coding" || provider=="claude"), budget.isFinite, budget >= 0, budget <= 10 else { throw BuddyWorkerFailure(message: "Add a short task title, a clear brief, and a supported provider.") }
         if let old = jobs.first(where: { $0["workspace"] as? String == workspace && $0["agentId"] as? String == agent && $0["requestId"] as? String == requestId }) { return old }
+        let journalSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+        if jobs.count >= Self.archiveTrigger || journalSize > Self.archiveSizeTrigger { try? archiveFinished(keeping: journalSize > Self.archiveSizeTrigger ? 200 : Self.archiveKeep) }
         guard jobs.count < 1000, jobs.filter({ !Self.terminal.contains($0["status"] as? String ?? "") }).count < 30 else { throw BuddyWorkerFailure(message: "Finish or cancel some background tasks before adding more.") }
         let now = ISO8601DateFormatter().string(from: Date())
         var job: [String: Any] = ["id": UUID().uuidString, "workspace": workspace, "agentId": agent, "requestId": requestId, "title": title, "goal": goal, "kind": kind, "provider": provider, "budgetUSD": budget, "status": "queued", "progress": "Queued", "createdAt": now, "updatedAt": now, "attempt": 0, "events": [[String: Any]](), "result": "", "files": [[String: Any]]()]

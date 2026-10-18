@@ -46,6 +46,7 @@ struct BuddyFailure: LocalizedError {
     var agentPermission: ((String, [String]) -> Bool)?
     private var toolInputs: [String: BuddyToolInput] = [:]
     private var inputRecords: [String: [String: Any]] = [:]
+    private var runOrder: [String] = []
     private var invalidActionHistory = false
     private var actionJournalURL: URL { support.appendingPathComponent("connected-actions.json") }
     private var inputItems: [String: String] = [:]
@@ -330,6 +331,7 @@ struct BuddyFailure: LocalizedError {
             throw BuddyFailure(message: "This agent is already answering. Stop the reply or wait for it to finish.")
         }
         runs[runID] = ["runId": runID, "key": key, "requestText":text, "status": "starting", "text": "", "items": [String: String](), "order": [String](), "cancelled": false, "internal": options.internalRun, "finalOnly": options.finalAnswerOnly, "phases": [String: String](), "permissionKeys": options.permissionKeys ?? [key], "files": [[String: Any]](), "agentName": name, "agentId": options.actorId, "proposalsEnabled": options.proposalsEnabled, "extraTools": options.extraTools.compactMap { $0["name"] as? String }]
+        runOrder.append(runID); BuddyRecordLimit.prune(order: &runOrder, records: &runs) { !["starting", "answering", "stopping"].contains($0["status"] as? String ?? "") }
         runs[runID]?["inboxRoutine"] = options.inboxRoutine
         runs[runID]?["requiresRoutine"] = options.requiresRoutine
         runs[runID]?["authorizedUserText"] = options.authorizedUserText
@@ -600,7 +602,21 @@ struct BuddyFailure: LocalizedError {
         return ["accepted": true, "request": record]
     }
     private func saveInputRecords() throws {
+        archiveOldInputRecords()
         try JSONSerialization.data(withJSONObject: inputRecords).write(to: actionJournalURL, options: .atomic)
+    }
+    /// Past 9,000 records the oldest settled ones move to an archive file (written first, then removed), so the journal never fills up.
+    private func archiveOldInputRecords() {
+        let ids = BuddyActionHistory.archivable(inputRecords, live: Set(toolInputs.keys))
+        guard !ids.isEmpty else { return }
+        let moved = Dictionary(uniqueKeysWithValues: ids.compactMap { id in inputRecords[id].map { (id, $0) } })
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let file = support.appendingPathComponent("connected-actions-archive-\(stamp)-\(UUID().uuidString.prefix(8)).json")
+        do {
+            try JSONSerialization.data(withJSONObject: moved).write(to: file, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            for id in ids { inputRecords.removeValue(forKey: id) }
+        } catch { /* keep every record; the journal limit still protects it */ }
     }
     private func emitInput(_ record: [String: Any]) {
         try? saveInputRecords()

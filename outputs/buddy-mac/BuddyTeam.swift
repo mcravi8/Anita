@@ -60,6 +60,30 @@ struct BuddyTeamAgent: Codable, Equatable, Sendable {
     var payload: [String: Any] { ["name": name, "role": role, "description": description] }
 }
 
+/// Records of finished runs are never needed again after a while, but nothing removed them, so a long session kept every prompt and
+/// answer in memory. Past `trigger` records the oldest finished ones are dropped down to `keep`. A run that is still going stays.
+enum BuddyRecordLimit {
+    static func prune<Record>(order: inout [String], records: inout [String: Record], trigger: Int = 300, keep: Int = 200, isFinished: (Record) -> Bool) {
+        guard records.count > trigger else { return }
+        var excess = records.count - keep
+        for id in order where excess > 0 { if let record = records[id], isFinished(record) { records.removeValue(forKey: id); excess -= 1 } }
+        order.removeAll { records[$0] == nil }
+    }
+}
+
+/// The approval journal is permanent, and Buddy refuses new approvals when it is full. Only recent records are ever read, so past `trigger`
+/// records the oldest settled ones are handed back to be archived. Records still waiting, or whose outcome is uncertain, always stay: they
+/// are what stops an action being repeated.
+enum BuddyActionHistory {
+    static let settled: Set<String> = ["completed", "failed", "declined", "cancelled", "expired"]
+    static func archivable(_ records: [String: [String: Any]], live: Set<String>, trigger: Int = 9000, keep: Int = 5000) -> [String] {
+        guard records.count >= trigger else { return [] }
+        let ordered = records.filter { settled.contains($0.value["status"] as? String ?? "") && !live.contains($0.key) }
+            .sorted { (($0.value["createdAt"] as? String ?? ""), $0.key) < (($1.value["createdAt"] as? String ?? ""), $1.key) }
+        return ordered.prefix(max(0, records.count - keep)).map(\.key)
+    }
+}
+
 struct BuddyTeamRequest: Sendable {
     let runId: String
     let key: String

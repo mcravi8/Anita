@@ -269,3 +269,11 @@ Gmail review results expose an explicit `reviewID`. If a model supplies the curr
 Agent appearance is now one of four figure shapes (`diamond`, `sphere`, `hex`, `pill`) in the same seven colours. `BuddyAvatar` in `BuddyAgentProposals.swift` is the single list: suggestions, team plans and approvals validate against it, the model tool schemas offer only the new shapes, and the original names (`star`, `pebble`, `cube`, `clover`) are still accepted and saved as the figure that replaced them. An unknown shape is rejected; a missing one is the diamond.
 
 Settings → Appearance (Light, Dark, Match system) is saved in the workspace and sent to the app through `BuddyDesktop.setAppearance`. The app no longer forces the light appearance: it applies the choice to the window, title bar and system controls, remembers it in the app's preferences so the right theme is used before the page has loaded, and uses the matching page colour for the window and web view background. Until a choice is made the app stays light, as before.
+
+## History that cannot fill up
+
+Background tasks are saved in `Worker/tasks.json`. Past 900 tasks, or a 24 MB file, the oldest completed or cancelled tasks move to `Worker/tasks-archive-<time>.json` (owner-only, written before anything leaves the list, so nothing is deleted). Tasks that need attention stay, and so does the newest task of every routine, because the next run builds on its result. Archived tasks no longer appear in Background work. Before this, the list refused new work for good at 1,000 tasks, which an hourly routine reached in about six weeks.
+
+The approval journal (`connected-actions.json`) works the same way: past 9,000 records the oldest settled ones move to `connected-actions-archive-<time>.json`. Records that are waiting, answered or uncertain always stay, because they are what stops an action being repeated. In memory, finished conversation runs, Claude runs and group jobs are dropped oldest first once there are more than 300, and a run that is still going is never dropped.
+
+If a worker helper (the private browser, the Claude bridge or the coding shell) exits abnormally, its last error output is saved to `Worker/crash-<helper>.log` (owner-only, replaced by the next crash) and the task message gives the exit status. The raw output is not put in the message, which is stored with the task.

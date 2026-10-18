@@ -129,6 +129,16 @@ with tempfile.TemporaryDirectory(prefix='buddy-process-crash-') as temp:
  subprocess.run(['xcrun','swiftc',str(source/'BuddyWorkerCore.swift'),str(source/'BuddyWorkerProcess.swift'),str(source/'BuddyTransport.swift'),str(source/'tests/ProcessCrash.swift'),'-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)
 
+with tempfile.TemporaryDirectory(prefix='buddy-task-archive-') as temp:
+ binary=Path(temp)/'task-archive-tests'
+ subprocess.run(['xcrun','swiftc',str(source/'BuddyWorkerCore.swift'),str(source/'tests/TaskArchive.swift'),'-o',str(binary)],check=True)
+ subprocess.run([str(binary)],check=True)
+
+with tempfile.TemporaryDirectory(prefix='buddy-record-limits-') as temp:
+ binary=Path(temp)/'record-limit-tests'
+ subprocess.run(['xcrun','swiftc',str(source/'BuddyTeam.swift'),str(source/'BuddyAgentProposals.swift'),str(source/'BuddyProjectFiles.swift'),str(source/'BuddyDocuments.swift'),str(source/'tests/RecordLimits.swift'),'-o',str(binary)],check=True)
+ subprocess.run([str(binary)],check=True)
+
 with tempfile.TemporaryDirectory(prefix='buddy-routines-') as temp:
  binary=Path(temp)/'routine-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyWorkerCore.swift'),str(source/'tests/Routines.swift'),'-o',str(binary)],check=True)

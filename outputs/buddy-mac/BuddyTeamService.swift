@@ -29,6 +29,7 @@ import Foundation
         let stopped: Bool
     }
     private var jobs: [String: Job] = [:]
+    private var jobOrder: [String] = []
     private var children: [String: Child] = [:]
     private var waiting: [String: Set<String>] = [:]
     private var deadlines: [String: Task<Void, Never>] = [:]
@@ -42,6 +43,7 @@ import Foundation
             throw BuddyTeamFailure(message: "This group is already working. Stop the reply or wait for it to finish.")
         }
         let job = Job(request); jobs[request.runId] = job; emit(job)
+        jobOrder.append(request.runId); BuddyRecordLimit.prune(order: &jobOrder, records: &jobs) { !["starting", "answering", "stopping"].contains($0.status) }
         Task { await execute(job) }
         return ["accepted": true, "runId": request.runId]
     }

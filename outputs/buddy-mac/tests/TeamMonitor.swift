@@ -26,6 +26,23 @@ import Foundation
   require(updates.count==1 && updates[0]["agentId"] as? String==chief,"a real peer check-in reaches Chief once and stays out of the quiet peer's DM")
   require((updates[0]["sources"] as! [[String:Any]]).contains{$0["taskId"] as? String==task},"Chief update retains actual task-source provenance")
   require(checks.contains{$0["kind"] as? String=="checkin" && $0["status"] as? String=="completed"} && checks.contains{$0["kind"] as? String=="overview" && $0["status"] as? String=="completed"},"separate target-agent response and Chief summary have completed receipts")
+  let history=try monitor.handle(["action":"messages","agentId":maze],state:state,jobs:jobs)
+  let exchanges=history["messages"] as! [[String:Any]]
+  require(exchanges.count==1 && exchanges[0]["fromAgentId"] as? String==chief && exchanges[0]["toAgentId"] as? String==maze && exchanges[0]["status"] as? String=="completed","the actual completed peer check-in is inspectable with its true participants")
+  require(exchanges[0]["input"]==nil && exchanges[0]["sources"]==nil && exchanges[0]["output"]==nil,"message history excludes internal prompts and model context")
+  require((done["agentMessages"] as? [String:[String:Any]])?[maze]?["count"] as? Int==2,"the collapsed chat link counts a recorded request and response")
+  do{_ = try monitor.handle(["action":"messages"],state:state,jobs:jobs,actor:maze);require(false,"models cannot use the user-only full history endpoint")}catch{}
+  let reopenedJournal=try BuddyTeamMonitorStore(support:root)
+  require((try reopenedJournal.messages(state:state,agent:chief)["messages"] as! [[String:Any]]).count==1,"recorded messages survive reopening without replay")
+  try FileManager.default.createDirectory(at:root.appendingPathComponent("HistoryFixture"),withIntermediateDirectories:true)
+  let historyStore=try BuddyTeamMonitorStore(support:root.appendingPathComponent("HistoryFixture"))
+  for n in 0..<45 {let j=try historyStore.enqueue(kind:"checkin",workspace:w,agent:maze,input:["requesterId":chief,"question":"Fixture question \(n)"],fingerprint:"fixture-\(n)",policy:monitor.store.policy(state),selection:.init(provider:"claude",model:"fixture"),now:Date(),force:true);try historyStore.update(j["id"] as! String,["status":"completed","output":["body":"Fixture reply \(n)"]])}
+  let latestPage=try historyStore.messages(state:state,agent:chief),latestRows=latestPage["messages"] as! [[String:Any]]
+  require(latestRows.count==40 && latestRows.first?["question"] as? String=="Fixture question 5","history starts with the most recent saved page")
+  let earlierPage=try historyStore.messages(state:state,agent:chief,before:latestPage["nextCursor"] as? String)
+  require((earlierPage["messages"] as! [[String:Any]]).count==5 && earlierPage["nextCursor"] is NSNull,"earlier pages retain all saved exchanges without duplicating the boundary")
+  var foreignHistory=state;foreignHistory["conversationWorkspace"]=UUID().uuidString
+  require((try historyStore.messages(state:foreignHistory)["messages"] as! [[String:Any]]).isEmpty,"foreign workspace history stays inaccessible")
   let learned=(try BuddyAgentMemory.overlay(state,support:root)["agents"] as! [[String:Any]])[1]
   require((learned["description"] as? String)?.contains("concise")==true && (learned["learnedRules"] as? [[String:Any]])?.first?["messageId"] as? String=="user-pref","ongoing explicit preferences update effective instructions with exact user-message evidence")
   let callsURL=root.appendingPathComponent("TeamMonitor/fixture-calls.jsonl")

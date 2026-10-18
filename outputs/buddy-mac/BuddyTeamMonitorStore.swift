@@ -117,6 +117,25 @@ import CryptoKit
         let update:[String:Any]=["id":id,"workspace":job["workspace"]!,"agentId":agent,"checkId":job["id"]!,"body":Self.brief(body),"detail":detail ?? body,"sources":sources,"priority":priority,"checkStatus":checkStatus,"at":Self.stamp(now),"checkedAt":job["startedAt"] ?? Self.stamp(now)]
         try mutate{var entries=updates;guard entries.count<2000 else{throw BuddyWorkerFailure(message:"Saved team updates are full.")};entries.append(update);value["updates"]=entries}
     }
+    private func exchanges(state:[String:Any])->[[String:Any]] {
+        let w=state["conversationWorkspace"] as? String ?? "",ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
+        return checks.compactMap { j in
+            let input=j["input"] as? [String:Any] ?? [:]
+            guard j["workspace"] as? String==w,j["kind"] as? String=="checkin",let from=input["requesterId"] as? String,let to=j["agentId"] as? String,from != to,ids.contains(from),ids.contains(to) else{return nil}
+            let output=j["status"] as? String=="completed" ? j["output"] as? [String:Any] ?? [:]:[:]
+            let row:[String:Any]=["id":j["id"]!,"fromAgentId":from,"toAgentId":to,"question":input["question"] ?? "","body":output["body"] ?? "","detail":output["detail"] ?? "","status":j["status"] ?? "queued","createdAt":j["createdAt"] ?? "","startedAt":j["startedAt"] ?? "","finishedAt":j["finishedAt"] ?? "","error":j["error"] ?? ""]
+            return BuddyAgentMemory.privateValue(row) as? [String:Any]
+        }
+    }
+    func messages(state:[String:Any],agent:String?=nil,before:String?=nil)throws->[String:Any] {
+        let ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
+        if let agent,!ids.contains(agent){throw BuddyWorkerFailure(message:"This agent is no longer available.")}
+        let all=exchanges(state:state)
+        var rows=all.filter{agent==nil || $0["fromAgentId"] as? String==agent || $0["toAgentId"] as? String==agent}
+        if let before {guard let i=rows.firstIndex(where:{$0["id"] as? String==before}) else{throw BuddyWorkerFailure(message:"This history changed. Refresh to load the saved messages.")};rows=Array(rows.prefix(i))}
+        let page=Array(rows.suffix(40))
+        return ["workspace":state["conversationWorkspace"] ?? "","messages":page,"nextCursor":rows.count>40 ? page.first!["id"]! : NSNull(),"messageRevision":Self.hash(all)]
+    }
     func status(state:[String:Any])->[String:Any] {
         let w=state["conversationWorkspace"] as? String ?? "",ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
         var out=(value["settings"] as? [String:[String:Any]])?[w] ?? [:]
@@ -125,6 +144,16 @@ import CryptoKit
         out["journalRevision"]=value["journalRevision"] as? Int ?? 0
         out["updates"]=updates.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}
         out["observed"]=(value["observed"] as? [String:[String:Any]] ?? [:]).values.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}.map{r in r.filter{$0.key != "sources"}}
+        var summaries=[String:[String:Any]]()
+        let conversationRows=exchanges(state:state)
+        for row in conversationRows {
+            let from=row["fromAgentId"] as! String,to=row["toAgentId"] as! String
+            let hasReply = !(row["body"] as? String ?? "").isEmpty || !(row["detail"] as? String ?? "").isEmpty
+            let count=1+(hasReply ? 1:0)
+            for (id,peer) in [(from,to),(to,from)] {var s=summaries[id] ?? ["count":0,"peers":[String]()];s["count"]=(s["count"] as? Int ?? 0)+count;var peers=s["peers"] as? [String] ?? [];if !peers.contains(peer){peers.append(peer)};s["peers"]=peers;summaries[id]=s}
+        }
+        out["agentMessages"]=summaries
+        out["agentMessageRevision"]=Self.hash(conversationRows)
         out["daily"]=value["daily"] ?? [:];return out
     }
 }

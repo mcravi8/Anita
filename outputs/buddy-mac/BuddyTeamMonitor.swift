@@ -28,7 +28,7 @@ import Foundation
     private func response(_ raw:[String:Any],jobs:[[String:Any]],actor:String?,target:String?,now:Date)throws->[String:Any] {
         var out=try status(raw);guard let actor else{return out}
         let policy=try store.policy(raw),observed=try store.observed(raw,jobs:jobs,now:now),allowed=observed.filter{($0["agentId"] as? String==actor || store.configuration(policy,agent:$0["agentId"] as? String ?? "")["participates"] as? Bool != false) && (target==nil || $0["agentId"] as? String==target)}
-        out.removeValue(forKey:"profiles");out.removeValue(forKey:"updates")
+        out.removeValue(forKey:"profiles");out.removeValue(forKey:"updates");out.removeValue(forKey:"agentMessages");out.removeValue(forKey:"agentMessageRevision")
         out["automaticClaudeUsage"]=["dailyLimitUSD":out.removeValue(forKey:"dailyLimitUSD") ?? NSNull(),"sharedAcrossAgents":true,"appliesTo":["team_checkins","preference_learning"],"excludes":["chat_replies","background_tasks","scheduled_tasks"],"dailyUsage":out.removeValue(forKey:"daily") ?? [:]]
         let visible=Set(allowed.compactMap{$0["agentId"] as? String})
         out["observed"]=(out["observed"] as? [[String:Any]] ?? []).filter{visible.contains($0["agentId"] as? String ?? "")}
@@ -42,6 +42,7 @@ import Foundation
         try memory.synchronize(raw);let state=try BuddyAgentMemory.overlay(raw,support:support),w=state["conversationWorkspace"] as! String
         let action=args["action"] as? String ?? "status",agents=state["agents"] as? [[String:Any]] ?? []
         if let actor {guard agents.contains(where:{$0["id"] as? String==actor}) else{throw BuddyWorkerFailure(message:"This agent is no longer available.")}}
+        if action=="messages" {guard actor==nil else{throw BuddyWorkerFailure(message:"The full agent-message history is available in Buddy's user interface.")};return try store.messages(state:state,agent:args["agentId"] as? String,before:args["before"] as? String)}
         if action=="configure" {guard actor==nil else{throw BuddyWorkerFailure(message:"Change team-wide settings in Workspace settings → Teamwork & updates.")};_ = try store.setPolicy(args,state:state)}
         else if action=="set_proactive" {
             let id=actor ?? args["agentId"] as? String ?? ""

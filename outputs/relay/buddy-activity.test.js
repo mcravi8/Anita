@@ -18,3 +18,11 @@ test('resolved checks and worker-linked routine blockers do not create duplicate
  const repeated={workspace:'w',routines:Array.from({length:6},(_,n)=>({id:'r'+n,agentId:'inbox',status:'needs_attention',lastError:'Previous run needs attention.'}))};const grouped=A.collect(state,repeated);assert.equal(grouped.length,1);assert.equal(grouped[0].label,'6 scheduled checks');assert.equal(grouped[0].action,'background-work');
  const partial={...state,runs:{run:{runId:'run',target:'team',status:'completed',team:{partial:true}}}};assert.equal(A.collect(partial)[0].kind,'needs');partial.runs.run.team.partial=false;assert.equal(A.collect(partial)[0].kind,'finished');
 });
+test('read and unread controls clear badges without resolving work, persist, and distinguish a new failure',()=>{
+ const s=structuredClone(state),t={id:'t',agentId:'inbox',status:'failed',attempt:1,progress:'The cost is uncertain.'},w={workspace:'w',tasks:[t]};
+ const id=A.collect(s,w)[0].id;assert.equal(A.unreadCounts(A.collect(s,w)).needs,1);A.markRead(s,[id]);const loaded=JSON.parse(JSON.stringify(s));assert.equal(A.collect(loaded,w).length,1);assert.equal(A.unreadCounts(A.collect(loaded,w)).needs,0);assert.equal(t.status,'failed');A.markRead(loaded,[id],false);assert.equal(A.unreadCounts(A.collect(loaded,w)).needs,1);A.markRead(loaded,[id]);assert.equal(A.unreadCounts(A.collect(loaded,{workspace:'w',tasks:[{...t,attempt:2}]})).needs,1);
+});
+test('linked schedules share the actual task alert and check failures explain the cause',()=>{
+ const w={workspace:'w',tasks:[{id:'t',agentId:'inbox',status:'failed',routineSeriesID:'series',progress:'This task’s Claude budget is exhausted or its last cost is uncertain.'}],routines:Array.from({length:6},(_,n)=>({id:'r'+n,agentId:'inbox',routineSeriesID:'series',status:'needs_attention'}))};assert.equal(A.collect(state,w).length,1);assert.match(A.collect(state,w)[0].description,/additional allowance/);
+ const c=A.collect(state,{}, {workspace:'w',checks:[{id:'c',agentId:'chief',kind:'overview',status:'failed',error:'A team update referenced work outside its actual check-in.'}]})[0];assert.equal(c.checkId,'c');assert.match(c.description,/source reference/);assert.match(c.title,/Team update/);
+});

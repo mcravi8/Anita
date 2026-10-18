@@ -270,7 +270,7 @@ function navigate(kind,target){if(kind==='files'&&window.BuddyFiles?.native())re
 function chatSummary(targetId, fallback) {
   const draft=state.drafts[targetId];
   if(draft?.trim())return `Draft: ${draft.trim()}`;
-  const last=(state.messages[targetId]||[]).filter(m=>m.who).at(-1);
+  const last=(state.messages[targetId]||[]).filter(m=>m.who&&!(m.teamUpdate&&m.teamCheckStatus==='failed'&&!(m.teamSources||[]).length)).at(-1);
   return last ? `${last.who==='you'?'You: ':''}${(last.body&&(last.who==='you'?last.body:BuddyMarkdown.preview(last.body)))|| (BuddyChat.busy(last.status)?(window.BuddyActions?.pending(state,last.runId)?.length?'Needs your review':last.team?teamPhase(last.team.phase):''):'')}` : fallback;
 }
 function groupAvatar(groupId, small=false) {

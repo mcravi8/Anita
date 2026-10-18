@@ -35,6 +35,17 @@ import Foundation
         _ = try recovered.resume(id); require(try recovered.job(id)["status"] as? String == "queued", "explicit resume queues saved work")
         try recovered.setPaused(true); require(try BuddyWorkerStore(directory: root.appendingPathComponent("Worker")).paused, "queue pause survives restart")
         var invalid = false; do { _ = try store.create(workspace: workspace, agent: agent, requestId: "invalid", title: "x", goal: "x", kind: "email", provider: "claude", budget: 1000) } catch { invalid = true }; require(invalid,"invalid budget cannot enter queue")
+        let budgetStore=try BuddyWorkerStore(directory:root.appendingPathComponent("Budget")),budgetJob=try budgetStore.create(workspace:workspace,agent:agent,requestId:"budget",title:"Inbox scan",goal:"Read mail",kind:"email",provider:"claude",budget:0.5),bid=budgetJob["id"] as! String
+        try budgetStore.update(bid,["status":"failed","remainingBudgetUSD":0.0,"reservedBudgetUSD":0.5,"spentUSD":0.1])
+        do{_ = try budgetStore.resume(bid);require(false,"an exhausted attempt cannot queue another doomed retry without an allowance")}catch{}
+        let authorization=UUID().uuidString
+        let funded=try budgetStore.resume(bid,additionalBudgetUSD:0.3,authorizationID:authorization)
+        require(funded["remainingBudgetUSD"] as? Double==0.3 && funded["uncertainBudgetUSD"] as? Double==0.5 && funded["reservedBudgetUSD"] as? Double==0 && funded["spentUSD"] as? Double==0.1,"an explicit extra allowance preserves prior uncertain and confirmed usage")
+        _ = try budgetStore.resume(bid,additionalBudgetUSD:0.3,authorizationID:authorization)
+        require((try budgetStore.job(bid)["budgetAuthorizations"] as? [[String:Any]])?.count==1,"a repeated response cannot authorize the allowance twice")
+        do{_ = try budgetStore.resume(bid,additionalBudgetUSD:0.7,authorizationID:authorization);require(false,"an allowance receipt cannot be reused for a changed amount")}catch{}
+        try budgetStore.update(bid,["status":"failed","remainingBudgetUSD":0.0])
+        for invalid in [-1.0,0,20,Double.nan] {do{_ = try budgetStore.resume(bid,additionalBudgetUSD:invalid,authorizationID:UUID().uuidString);require(false,"invalid extra spending rejected")}catch{}}
         let support = root.appendingPathComponent("Data"), f = BuddyProjectFiles(support: support)
         try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: ["conversationWorkspace": workspace]).write(to: support.appendingPathComponent("workspace.json"))

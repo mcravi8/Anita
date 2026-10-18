@@ -159,10 +159,19 @@ enum BuddyWorkerWire {
         jobs.append(job); do { try persist() } catch { jobs.removeLast(); throw error }; return job
     }
     func setPaused(_ value: Bool) throws { let old = paused; paused = value; do { try persist() } catch { paused = old; throw error } }
-    func resume(_ id: String, continuingCoding:Bool=false) throws -> [String: Any] {
+    func resume(_ id: String, continuingCoding:Bool=false,additionalBudgetUSD:Double?=nil,authorizationID:String?=nil) throws -> [String: Any] {
         let job = try self.job(id)
+        let authorizations=job["budgetAuthorizations"] as? [[String:Any]] ?? []
+        if let authorizationID,let prior=authorizations.first(where:{$0["id"] as? String==authorizationID}) {guard prior["amountUSD"] as? Double==additionalBudgetUSD else{throw BuddyWorkerFailure(message:"The saved allowance differs from this request. Reopen the task to check it before continuing.")};return job}
         guard ["paused", "failed", "interrupted", "waiting_user"].contains(job["status"] as? String ?? "") || (continuingCoding && job["kind"] as? String=="coding" && job["status"] as? String=="completed") else { throw BuddyWorkerFailure(message: "This task can’t be resumed in its current state.") }
-        return try update(id, ["status": "queued", "progress": "Queued to continue from saved progress. Check existing external state before any send or submission."])
+        var fields:[String:Any] = ["status": "queued", "progress": "Queued to continue from saved progress. Check existing external state before any send or submission."]
+        if let amount=additionalBudgetUSD {
+            guard job["provider"] as? String=="claude",amount.isFinite,(0.1...10).contains(amount),(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0,let authorizationID,UUID(uuidString:authorizationID) != nil,authorizations.count<100 else{throw BuddyWorkerFailure(message:"Choose an additional Claude allowance from $0.10 to $10 for this paused task.")}
+            fields["budgetAuthorizations"]=authorizations+[["id":authorizationID,"amountUSD":amount,"at":ISO8601DateFormatter().string(from:Date())]]
+            fields["uncertainBudgetUSD"]=(job["uncertainBudgetUSD"] as? Double ?? 0)+(job["reservedBudgetUSD"] as? Double ?? 0)
+            fields["reservedBudgetUSD"]=0.0;fields["remainingBudgetUSD"]=amount
+        } else if job["provider"] as? String=="claude",(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0 {throw BuddyWorkerFailure(message:"Choose an additional Claude allowance in this task before resuming. Previous unconfirmed usage stays recorded.")}
+        return try update(id,fields)
     }
 }
 
@@ -240,6 +249,17 @@ enum BuddyWorkerWire {
             if action=="resume" { routines[i]["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:routines[i])) }
             try persist();return ["saved":true,"routine":routines[i]]
         } catch { routines=old;try? persist();throw error }
+    }
+    func resumeBlockedBy(_ job:[String:Any],now:Date=Date()) throws {
+        let original=routines
+        do {
+            for i in routines.indices where routines[i]["status"] as? String=="needs_attention" && routines[i]["workspace"] as? String==job["workspace"] as? String && routines[i]["agentId"] as? String==job["agentId"] as? String {
+                let same=routines[i]["lastTaskID"] as? String==job["id"] as? String || job["routineSeriesID"] != nil && routines[i]["routineSeriesID"] as? String==job["routineSeriesID"] as? String
+                guard same,routines[i]["lastError"] as? String=="The previous run needs attention. Review it before resuming this routine." else{continue}
+                routines[i]["status"]="active";routines[i]["lastError"]="";routines[i]["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:routines[i]))
+            }
+            if !NSArray(array:original).isEqual(to:routines){try persist()}
+        } catch {routines=original;throw error}
     }
     func enqueueDue(store:BuddyWorkerStore,workspace:String,now:Date=Date()) throws {
         let original=routines

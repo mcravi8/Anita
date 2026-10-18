@@ -2,6 +2,12 @@ import Foundation
 @main struct TeamMonitorTests {
  @MainActor static func require(_ value:Bool,_ message:String){if !value{fputs("FAILED: \(message)\n",stderr);exit(1)}}
  @MainActor static func main() async throws {
+  let known:[String:Any] = ["checkinIds":["report"],"reports":[["id":"report","sources":[["id":"worker:known-task"]]]]]
+  let output:[String:Any] = ["notify":true,"body":"Inbox needs sign-in.","priority":0,"sourceIds":["worker:known-task"]]
+  require(try BuddyTeamMonitor.checkedOutput(output,input:known,kind:"overview")["sourceIds"] as? [String]==["report"],"an exact supplied nested source resolves to its real enclosing report")
+  var foreignOutput=output;foreignOutput["sourceIds"]=["worker:foreign"]
+  do{_ = try BuddyTeamMonitor.checkedOutput(foreignOutput,input:known,kind:"overview");require(false,"unknown summary sources must remain rejected")}catch{}
+  require(try BuddyTeamMonitor.checkedOutput(["notify":false,"body":"","priority":0,"sourceIds":[String]()],input:["urgent":true],kind:"checkin")["notify"] as? Bool==false,"already surfaced blockers may remain quiet without manufacturing a check-in failure")
   let root=FileManager.default.temporaryDirectory.appendingPathComponent("buddy-monitor-"+UUID().uuidString+".noindex")
   try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
   let w=UUID().uuidString,chief=UUID().uuidString,maze=UUID().uuidString,task=UUID().uuidString

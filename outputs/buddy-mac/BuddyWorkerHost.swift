@@ -245,7 +245,7 @@ import Darwin
                 guard updates.joined().count <= 30000 else { throw BuddyWorkerFailure(message: "This task has too much follow-up context. Start a new task with a fresh brief.") }
                 try store.update(id, ["updates": updates])
             }
-            let resumed = try store.resume(id); try store.setPaused(false); return ["task": resumed]
+            let resumed = try store.resume(id,additionalBudgetUSD:request["additionalBudgetUSD"] as? Double,authorizationID:request["budgetAuthorizationID"] as? String); try routines.resumeBlockedBy(resumed); try store.setPaused(false); return ["task": resumed]
         }
         if operation == "review" {
             guard active == id, permitted(job), let reviewID = request["id"] as? String else { throw BuddyWorkerFailure(message: "This review is no longer active.") }
@@ -403,6 +403,7 @@ import Darwin
         let a = try agent(agentID, workspace: workspace)
         guard a["setupStatus"] as? String != "pending" else {throw BuddyWorkerFailure(message:"Finish this agent's setup in their chat before running this task.")}
         guard try providerSettings.current(workspace).enabled(job["provider"] as? String ?? "") else { _ = try store.update(id, ["status": "paused", "progress": "This provider is disconnected. Reconnect it in Settings → AI provider, then resume."]); return }
+        if job["provider"] as? String=="claude",(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0 {throw BuddyWorkerFailure(message:"Choose an additional Claude allowance in this task before resuming. Previous unconfirmed usage stays recorded.")}
         browser?.close(); browser = nil
         active = id; providerRevision = try providerSettings.current(workspace).revision(job["provider"] as? String ?? ""); authorization = authorizationData(job); stopped = false; startedAt = Date(); runID = UUID().uuidString
         lastActivityAt=startedAt

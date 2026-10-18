@@ -19,7 +19,7 @@ import Foundation
         require(coverage["pages"] as? Int==2 && coverage["matched"] as? Int==106 && coverage["partial"] as? Bool==false,"pagination records every page, not an invented 100-message cutoff")
         require(messages.contains{$0["subject"] as? String=="Zopa online assessment"} && reads.contains("mail-106"),"full source beyond position 100 is read")
         let receipts=try FileManager.default.contentsOfDirectory(at:reviews.root,includingPropertiesForKeys:nil)
-        let receipt=try String(contentsOf:receipts.first!,encoding:.utf8)
+        let receipt=try String(contentsOf:receipts.first{$0.lastPathComponent.hasPrefix(run+"-")}!,encoding:.utf8)
         require(receipt.contains("mail-106") && !receipt.contains("This is source evidence"),"durable receipts record actual IDs and never bodies")
         // A failed model run must not advance memory. No commit yet.
         reads=[];_ = try await reviews.review(workspace:workspace,agent:agent,runID:UUID().uuidString,query:"assessment",purpose:"Retry",routine:"daily",maxReads:150,allowed:{access},call:call)

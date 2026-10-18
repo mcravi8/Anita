@@ -114,6 +114,11 @@ with tempfile.TemporaryDirectory(prefix='buddy-inbox-review-') as temp:
  subprocess.run(['xcrun','swiftc',str(source/'BuddyInboxReview.swift'),str(source/'tests/InboxReview.swift'),'-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)
 
+with tempfile.TemporaryDirectory(prefix='buddy-incremental-inbox-',suffix='.noindex') as temp:
+ binary=Path(temp)/'buddy-incremental-inbox-tests'
+ subprocess.run(['xcrun','swiftc',str(source/'BuddyInboxReview.swift'),str(source/'tests/IncrementalInbox.swift'),'-o',str(binary)],check=True)
+ subprocess.run([str(binary)],check=True)
+
 with tempfile.TemporaryDirectory(prefix='buddy-prepared-inbox-') as temp:
  binary=Path(temp)/'prepared-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyInboxReview.swift'),str(source/'tests/PreparedInbox.swift'),'-o',str(binary)],check=True)

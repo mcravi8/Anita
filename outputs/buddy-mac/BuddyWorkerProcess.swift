@@ -40,9 +40,19 @@ import Security
         guard let input, process?.isRunning == true else { throw BuddyWorkerFailure(message: "The worker’s browser or Claude process stopped. Check the task before retrying.") }
         var data = try JSONSerialization.data(withJSONObject: value); data.append(10); try input.write(contentsOf: data)
     }
-    func request(_ payload: [String: Any]) async throws -> [String: Any] {
+    func request(_ payload: [String: Any], timeout:TimeInterval?=nil) async throws -> [String: Any] {
         next += 1; let id = next; var value = payload; value["id"] = id
-        return try await withCheckedThrowingContinuation { c in pending[id] = { c.resume(with: $0) }; do { try send(value) } catch { pending.removeValue(forKey: id)?(.failure(error)) } }
+        let seconds=timeout ?? (payload["command"] as? String=="run" ? min(360,((payload["timeoutSeconds"] as? NSNumber)?.doubleValue ?? 120)+30):45)
+        return try await withCheckedThrowingContinuation { c in
+            var deadline:Task<Void,Never>?
+            pending[id] = { deadline?.cancel();c.resume(with:$0) }
+            deadline=Task { [weak self] in
+                let duration=seconds.isFinite ? min(360,max(0.01,seconds)):45
+                do {try await Task.sleep(nanoseconds:UInt64(duration*1_000_000_000))}catch{return}
+                self?.pending.removeValue(forKey:id)?(.failure(BuddyWorkerFailure(message:"The operation stopped responding. Check its last result before trying again.")))
+            }
+            do { try send(value) } catch { pending.removeValue(forKey: id)?(.failure(error)) }
+        }
     }
     private func receive(_ data: Data) {
         for line in lines.append(data) {

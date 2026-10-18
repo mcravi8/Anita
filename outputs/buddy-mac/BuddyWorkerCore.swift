@@ -7,6 +7,13 @@ struct BuddyWorkerFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
+enum BuddyWorkerLiveness {
+    static func stalled(status:String,lastActivity:Date,now:Date=Date(),timeout:TimeInterval=180)->Bool {
+        // Waiting for an actual human review or private sign-in is not a stalled model.
+        ["starting","running"].contains(status) && now.timeIntervalSince(lastActivity)>timeout
+    }
+}
+
 enum BuddyWorkerWire {
     static let maximumBytes = 8 * 1024 * 1024
     static func directory(_ support: URL) -> URL {

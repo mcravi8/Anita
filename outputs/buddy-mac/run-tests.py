@@ -78,7 +78,7 @@ with tempfile.TemporaryDirectory(prefix='buddy-worker-integration-') as temp:
  binary=Path(temp)/'buddy-worker-integration'
  names=['BuddyWorkerCore.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyWorkerClient.swift','BuddyAgentMemory.swift','BuddyTeamMonitorStore.swift','BuddyTeamMonitor.swift','BuddyAISettings.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/WorkerIntegration.swift']
  subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
- subprocess.run([str(binary),str(source/'tests/worker-server.py'),str(source/'tests/coding-claude.py'),shutil.which('python3'),str(worker/'coding-shell.mjs'),shutil.which('node')],check=True)
+ subprocess.run([str(binary),str(source/'tests/worker-server.py'),str(source/'tests/coding-claude.py'),shutil.which('python3'),str(worker/'coding-shell.mjs'),shutil.which('node'),str(worker/'test/native-worker-session.mjs'),str(source/'tests/signin-browser.py'),str(source/'tests/process-timeout.py')],check=True)
 
 with tempfile.TemporaryDirectory(prefix='buddy-provider-test-') as temp:
  binary=Path(temp)/'buddy-provider-tests'

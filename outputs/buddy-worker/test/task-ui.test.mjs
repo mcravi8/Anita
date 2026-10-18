@@ -27,7 +27,7 @@ test('ordinary website task requests review and returns its verified result in t
     throw Error('Unexpected fixture operation '+p.operation);
    }};render();
   });
-  try { await page.locator('.reply-content').filter({hasText:'needs your review'}).waitFor({timeout:8000}); } catch(e) { console.error(await page.evaluate(()=>JSON.stringify({calls:taskCalls,messages:state.messages,body:document.querySelector('#messages')?.textContent})));throw e; }
+  try { await page.locator('.reply-content').filter({hasText:'need your approval'}).waitFor({timeout:8000}); } catch(e) { console.error(await page.evaluate(()=>JSON.stringify({calls:taskCalls,messages:state.messages,body:document.querySelector('#messages')?.textContent})));throw e; }
   assert.equal(await page.evaluate(()=>state.messages.chief.length),1);
   assert.equal(await page.locator('#message-input').inputValue(),'My existing draft');
   await page.getByRole('button',{name:'Review task'}).click();

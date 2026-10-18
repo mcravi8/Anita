@@ -7,7 +7,7 @@ import AppKit
         defer { try? FileManager.default.removeItem(at: support) }
         let workspace = UUID().uuidString, agent = UUID().uuidString
         try JSONSerialization.data(withJSONObject: ["conversationWorkspace": workspace, "agents": [["id": agent, "name": "Check", "role": "Fixture", "description": "Inert verification", "tools": [:]]]]).write(to: support.appendingPathComponent("workspace.json"))
-        let host = BuddyWorkerHost(support: support, executable: URL(fileURLWithPath: CommandLine.arguments[1]),makeCoding:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[2]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]))},makeCodingShell:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[4]),runtime:URL(fileURLWithPath:CommandLine.arguments[5]))},keyReader:{_ in "inert-fixture-key"})
+        let host = BuddyWorkerHost(support: support, executable: URL(fileURLWithPath: CommandLine.arguments[1]),makeBrowser:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[7]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]))},makeCoding:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[2]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]))},makeCodingShell:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[4]),runtime:URL(fileURLWithPath:CommandLine.arguments[5]))},makeClaude:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[6]),runtime:URL(fileURLWithPath:CommandLine.arguments[5]))},keyReader:{_ in "inert-fixture-key"})
         host.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer { host.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }
         let teamStatus = try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "team", "arguments": ["action": "status"]])
@@ -122,7 +122,27 @@ import AppKit
         _ = try BuddyAISettings(support:support).update(workspace,enabled:("chatgpt",false))
         let claudeBrowser=try await computer(["action":"start","title":"Claude website task","goal":"Open AgentMail in my browser."],requestID:"claude-browser")["task"] as! [String:Any]
         require(claudeBrowser["provider"] as? String=="claude" && claudeBrowser["status"] as? String=="queued","Claude website enqueue works with ChatGPT disconnected")
-        _ = try await computer(["action":"cancel","taskId":claudeBrowser["id"]!])
+        _ = try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"pauseAll","paused":false])
+        var browserDone:[String:Any]=[:]
+        for _ in 0..<120 {
+            let value=try await computer(["action":"status","taskId":claudeBrowser["id"]!])["task"] as! [String:Any]
+            if value["status"] as? String=="completed" {browserDone=value;break}
+            if value["status"] as? String=="failed" {throw BuddyFailure(message:"Ordinary Claude runtime failed: \(value["progress"] ?? "")")}
+            try await Task.sleep(nanoseconds:50_000_000)
+        }
+        require(browserDone["result"] as? String=="Opened the website and checked the observed session.","real ClaudeSession receives Swift's browser result with the same run ID")
+        require(abs((browserDone["spentUSD"] as? Double ?? 0)-0.02)<0.0001 && (browserDone["remainingBudgetUSD"] as? Double ?? 0)>0,"completed browser attempt confirms usage instead of leaving a silent reservation")
+        let observed=try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"detail","taskId":claudeBrowser["id"]!])["task"] as! [String:Any]
+        let browserEvents=observed["events"] as? [[String:Any]] ?? []
+        require(browserEvents.contains{$0["tool"] as? String=="buddy_browser" && $0["status"] as? String=="completed"},"ordinary Claude browser calls have bounded native activity receipts")
+        let rpc=BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[8]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]));try rpc.launch("fixture")
+        defer{rpc.close()};let began=Date()
+        do {_ = try await rpc.request(["command":"silent"],timeout:0.05);require(false,"silent RPC must time out")}catch{}
+        require(Date().timeIntervalSince(began)<2,"silent RPC has a bounded deadline")
+        let pong=try await rpc.request(["command":"ping"],timeout:1)
+        require(pong["pong"] as? Bool==true && pong["late"]==nil,"late timed-out response cannot resolve a newer request")
+        print("PASS: Swift worker → real ClaudeSession → native browser → matching run-ID response → confirmed completion/usage; RPC deadline and late-response isolation")
+
         print("PASS: ordinary browser-task IPC, selected provider, idempotency, status, continuation, cancellation, owner isolation, revoked permissions and Claude without ChatGPT")
 
     }

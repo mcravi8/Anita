@@ -9,8 +9,9 @@
   function deliverResult(state,t){
     if(!t||t.workspace!==state.conversationWorkspace||!state.agents.some(a=>a.id===t.agentId)||!deliverable(t))return false;
     state.messages[t.agentId]||=[];const id=deliveryID(t);if(state.messages[t.agentId].some(m=>m.id===id))return false;
-    const title=t.kind==='coding'?'Coding task':t.routineID?'Routine':'Task';
-    const body=t.status==='completed'?t.result:`${title} **${t.title}** ${t.status==='waiting_review'?'needs your review':t.status==='waiting_user'?'needs your input':'needs attention'}.\n\n${t.progress||'Open the task to continue.'}${t.result?'\n\n'+t.result:''}`;
+    const progress=String(t.progress||'').split('\n')[0].trim();
+    const brief=progress.length<=180?progress:'Open the task for details.';
+    const body=t.status==='completed'?t.result:t.status==='waiting_review'?`I need your approval to continue **${t.title}**.`:t.status==='waiting_user'?`I need your help to continue **${t.title}**. ${brief||'Open the task to continue.'}`:`I couldn’t finish **${t.title}**. ${brief||'Open the task for details.'}`;
     if(!body)return false;
     state.messages[t.agentId].push({id,who:t.agentId,body,time:new Date(t.updatedAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}),live:true,status:'completed',workerTaskID:t.id,workerStatus:t.status,coverage:t.coverage||[],files:t.files||[]});return true;
   }

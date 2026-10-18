@@ -4,7 +4,7 @@ import {ClaudeSession} from '../claude-session.mjs';
 const config={command:'start',apiKey:'fixture-key',budget:0.5,home:'/fixture/config',cwd:'/fixture',instructions:'Current agent policy',tools:[{name:'buddy_read',description:'Read',inputSchema:{type:'object',properties:{}}}],prompt:'first',runId:'one'};
 function fixture(){
   const prepared=[],events=[],calls=[];
-  const host=new ClaudeSession({startup:async({options})=>{const h={options,closed:false,used:false,close(){this.closed=true;},query(prompt){assert.equal(this.used,false);this.used=true;calls.push({prompt,options});return {async *[Symbol.asyncIterator](){yield {type:'assistant',message:{content:[{type:'text',text:'Observed answer'}]}};yield {type:'result',result:'Observed answer',total_cost_usd:0.04,is_error:false};},close(){}};}};prepared.push(h);return h;},tool:(name,description,schema,call)=>({name,call}),createSdkMcpServer:x=>x,fromJSONSchema:()=>({shape:{}}),write:x=>events.push(x)});
+  const host=new ClaudeSession({startup:async({options})=>{const h={options,closed:false,used:false,close(){this.closed=true;},query(prompt){assert.equal(this.used,false);this.used=true;calls.push({prompt,options});return {async *[Symbol.asyncIterator](){yield {type:'stream_event',event:{delta:{text:'PRIVATE_STREAM_CONTENT'}}};yield {type:'assistant',message:{content:[{type:'text',text:'Observed answer'}]}};yield {type:'result',result:'Observed answer',total_cost_usd:0.04,is_error:false};},close(){}};}};prepared.push(h);return h;},tool:(name,description,schema,call)=>({name,call}),createSdkMcpServer:x=>x,fromJSONSchema:()=>({shape:{}}),write:x=>events.push(x)});
   return {host,prepared,events,calls};
 }
 test('idle preparation runs no model; the next message uses a ready process with its own budget',async()=>{
@@ -30,4 +30,18 @@ test('equivalent JSON field order preserves the ready process',async()=>{
  const f=fixture();await f.host.start(config);await new Promise(r=>setImmediate(r));const ready=f.prepared[1];
  const reordered=Object.fromEntries(Object.entries({...config,runId:'two'}).reverse());reordered.tools=[{inputSchema:{properties:{},type:'object'},description:'Read',name:'buddy_read'}];
  await f.host.start(reordered);assert.equal(ready.used,true);assert.equal(ready.closed,false);f.host.close();
+});
+
+
+test('missing worker run IDs fail before SDK startup instead of silently losing tool responses',async()=>{
+ const f=fixture();await assert.rejects(f.host.start({...config,runId:undefined}),/missing its run ID/);
+ assert.equal(f.prepared.length,0);assert.equal(f.calls.length,0);assert.equal(f.host.busy,false);f.host.close();
+});
+
+
+test('streaming activity keeps live work observable without exposing token or thinking contents',async()=>{
+ const f=fixture();await f.host.start(config);
+ assert.equal(f.calls[0].options.includePartialMessages,true);
+ assert.deepEqual(f.events.find(e=>e.type==='activity'),{type:'activity',runId:'one'});
+ assert.equal(JSON.stringify(f.events).includes('PRIVATE_STREAM_CONTENT'),false);f.host.close();
 });

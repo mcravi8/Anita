@@ -4,6 +4,10 @@ import Foundation
     @MainActor static func main() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("buddy-worker-tests-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
+        let now=Date(),old=now.addingTimeInterval(-181)
+        require(BuddyWorkerLiveness.stalled(status:"running",lastActivity:old,now:now),"unresponsive running work is interrupted after three minutes")
+        require(!BuddyWorkerLiveness.stalled(status:"running",lastActivity:now,now:now),"active work is not interrupted")
+        for status in ["waiting_review","waiting_user","queued","completed","paused"] {require(!BuddyWorkerLiveness.stalled(status:status,lastActivity:old,now:now),"human and inactive states are not mistaken for stalled work")}
         let workspace = UUID().uuidString, agent = UUID().uuidString
         let store = try BuddyWorkerStore(directory: root.appendingPathComponent("Worker"))
         let first = try store.create(workspace: workspace, agent: agent, requestId: "once", title: "Fixture task", goal: "Research only", kind: "research", provider: "chatgpt", budget: 0), id = first["id"] as! String

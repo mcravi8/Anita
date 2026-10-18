@@ -15,7 +15,7 @@ export class ClaudeSession {
       const id=String(++this.next);this.pending.set(id,resolve);this.emit({type:'call',id,tool:def.name,arguments:args});
     })));
     const names=config.tools.map(t=>'mcp__buddy__'+t.name);
-    return {cwd:config.cwd,env:{PATH:process.env.PATH,HOME:config.home,TMPDIR:process.env.TMPDIR,ANTHROPIC_API_KEY:config.apiKey,CLAUDE_CONFIG_DIR:config.home,CLAUDE_AGENT_SDK_CLIENT_APP:'Buddy/0.16.0',DISABLE_AUTOUPDATER:'1',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1'},settingSources:[],strictMcpConfig:true,plugins:[],tools:[],allowedTools:names,permissionMode:'dontAsk',persistSession:false,maxTurns:60,maxBudgetUsd:config.budget,...(config.outputSchema?{outputFormat:{type:'json_schema',schema:config.outputSchema}}:{}),model:config.model||'claude-sonnet-4-6',systemPrompt:config.instructions,mcpServers:{buddy:this.createSdkMcpServer({name:'buddy',version:'1.0.0',tools})},canUseTool:async name=>!this.closed&&this.busy&&names.includes(name)?{behavior:'allow'}:{behavior:'deny',message:'Only current Buddy tools are available.'}};
+    return {cwd:config.cwd,env:{PATH:process.env.PATH,HOME:config.home,TMPDIR:process.env.TMPDIR,ANTHROPIC_API_KEY:config.apiKey,CLAUDE_CONFIG_DIR:config.home,CLAUDE_AGENT_SDK_CLIENT_APP:'Buddy/0.16.0',DISABLE_AUTOUPDATER:'1',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1'},settingSources:[],strictMcpConfig:true,plugins:[],tools:[],allowedTools:names,permissionMode:'dontAsk',persistSession:false,includePartialMessages:true,maxTurns:60,maxBudgetUsd:config.budget,...(config.outputSchema?{outputFormat:{type:'json_schema',schema:config.outputSchema}}:{}),model:config.model||'claude-sonnet-4-6',systemPrompt:config.instructions,mcpServers:{buddy:this.createSdkMcpServer({name:'buddy',version:'1.0.0',tools})},canUseTool:async name=>!this.closed&&this.busy&&names.includes(name)?{behavior:'allow'}:{behavior:'deny',message:'Only current Buddy tools are available.'}};
   }
   emit(event){this.write({...event,runId:this.runId});}
   async prepare(config) {
@@ -31,13 +31,15 @@ export class ClaudeSession {
   discardWarm(){const old=this.warm;this.warm=null;this.signature=null;old?.then(h=>h.close(),()=>{});}
   async start(config) {
     if(this.closed||this.busy)throw Error('The Claude connection is already in use or closed.');
+    if(typeof config.runId!=='string'||!config.runId.trim())throw Error('This Claude task is missing its run ID. No work was started.');
     if(!config.apiKey||!Number.isFinite(config.budget)||config.budget<=0||config.budget>10)throw Error('Connect Claude API credits and set a task budget first.');
-    this.busy=true;this.runId=config.runId;let result;
+    this.busy=true;this.runId=config.runId;let result,lastActivity=0;
     try {
       await this.prepare(config);
       const warm=await this.warm;this.warm=null;this.signature=null;
       this.session=warm.query(config.prompt);
       for await(const message of this.session){
+        if(message.type==='stream_event'&&Date.now()-lastActivity>2000){lastActivity=Date.now();this.emit({type:'activity'});}
         if(message.type==='assistant'){
           const text=message.message.content.filter(x=>x.type==='text').map(x=>x.text).join('\n');if(text)this.emit({type:'progress',text});
         }
@@ -50,6 +52,6 @@ export class ClaudeSession {
       if(!this.closed){this.prepare(config).catch(()=>{});if(result)this.emit(result);}
     }
   }
-  result(value){if(value.runId!==undefined&&value.runId!==this.runId)return;const resolve=this.pending.get(value.id);if(resolve){this.pending.delete(value.id);resolve({content:[{type:'text',text:JSON.stringify(value.result)}],isError:!!value.result?.error});}}
+  result(value){if(value.runId!==this.runId)return;const resolve=this.pending.get(value.id);if(resolve){this.pending.delete(value.id);resolve({content:[{type:'text',text:JSON.stringify(value.result)}],isError:!!value.result?.error});}}
   close(){this.closed=true;this.discardWarm();this.session?.close();}
 }

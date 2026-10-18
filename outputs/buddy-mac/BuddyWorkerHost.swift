@@ -57,6 +57,7 @@ import Darwin
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            BuddyWorkerProcess.logDirectory = root
             lockFD = Darwin.open(root.appendingPathComponent("worker.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
             guard lockFD >= 0, flock(lockFD, LOCK_EX | LOCK_NB) == 0 else { NSApp.terminate(nil); return }
             store = try BuddyWorkerStore(directory: root); routines = try BuddyRoutineStore(directory:root)
@@ -382,7 +383,7 @@ import Darwin
     }
     private func browserProcess(_ job: [String: Any]) throws -> BuddyWorkerProcess {
         guard privateBrowser == nil else{throw BuddyWorkerFailure(message:"Private Chrome is open for you. Finish sign-in before automated work resumes.")}
-        if let browser { return browser }
+        if let browser { if browser.isRunning { return browser }; browser.close(); self.browser = nil }
         let owner=job["browserAgentId"] as? String ?? job["agentId"] as! String
         let source=try agent(owner,workspace:job["workspace"] as! String)
         guard (source["tools"] as? [String:Bool])?["desktop"] != false,(source["tools"] as? [String:Bool])?["web"] != false else{throw BuddyWorkerFailure(message:"The shared website session is no longer available.")}
@@ -531,7 +532,7 @@ import Darwin
         commands.append(["id":commandID,"code":code,"network":network,"status":"running","at":ISO8601DateFormatter().string(from:Date())])
         try store.update(id,["commands":commands,"progress":"Running project command"])
         let p:BuddyWorkerProcess
-        if let ready=codingShell {p=ready} else {p=makeCodingShell();try p.launch("coding-shell.mjs");codingShell=p}
+        if let ready=codingShell,ready.isRunning {p=ready} else {codingShell?.close();p=makeCodingShell();try p.launch("coding-shell.mjs");codingShell=p}
         do {
             let result=try await p.request(["command":"run","cwd":directory(job).appendingPathComponent("Files").path,"scratch":directory(job).appendingPathComponent("Scratch").path,"code":code,"network":network,"timeoutSeconds":args["timeoutSeconds"] ?? 120])
             guard active==id,!stopped,permitted(job,tool:"projectFiles"),authorizationData(job)==authorization else {throw BuddyWorkerFailure(message:"Coding work stopped or its access changed. Check the command receipt before retrying.")}

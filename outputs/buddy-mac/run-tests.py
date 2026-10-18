@@ -124,6 +124,11 @@ with tempfile.TemporaryDirectory(prefix='buddy-prepared-inbox-') as temp:
  subprocess.run(['xcrun','swiftc',str(source/'BuddyInboxReview.swift'),str(source/'tests/PreparedInbox.swift'),'-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)
 
+with tempfile.TemporaryDirectory(prefix='buddy-process-crash-') as temp:
+ binary=Path(temp)/'process-crash-tests'
+ subprocess.run(['xcrun','swiftc',str(source/'BuddyWorkerCore.swift'),str(source/'BuddyWorkerProcess.swift'),str(source/'BuddyTransport.swift'),str(source/'tests/ProcessCrash.swift'),'-o',str(binary)],check=True)
+ subprocess.run([str(binary)],check=True)
+
 with tempfile.TemporaryDirectory(prefix='buddy-routines-') as temp:
  binary=Path(temp)/'routine-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyWorkerCore.swift'),str(source/'tests/Routines.swift'),'-o',str(binary)],check=True)

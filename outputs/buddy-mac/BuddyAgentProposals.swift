@@ -202,7 +202,7 @@ struct BuddyAgentProposal: Codable {
     private func records()throws->[[String:Any]] {
         guard FileManager.default.fileExists(atPath:file.path) else{return []}
         let data=try Data(contentsOf:file)
-        guard data.count<12*1024*1024,let rows=try JSONSerialization.jsonObject(with:data) as? [[String:Any]],rows.count<=1000,rows.allSatisfy({r in ["id","workspace","actorId","runId"].allSatisfy{(r[$0] as? String).flatMap(UUID.init(uuidString:)) != nil} && r["chat"] is String && r["revision"] is Int && r["label"] is String && r["draft"] is [String:Any] && ["pending","created","declined"].contains(r["status"] as? String ?? "")}) else{throw fail("Buddy couldn't verify saved team plans. Existing teams were kept.")};return rows
+        guard data.count<12*1024*1024,let rows=try JSONSerialization.jsonObject(with:data) as? [[String:Any]],rows.count<=1000,rows.allSatisfy({r in ["id","workspace","runId"].allSatisfy{(r[$0] as? String).flatMap(UUID.init(uuidString:)) != nil} && !(r["actorId"] as? String ?? "").isEmpty && (r["actorId"] as? String ?? "").count<=80 && r["chat"] is String && r["revision"] is Int && r["label"] is String && r["draft"] is [String:Any] && ["pending","created","declined"].contains(r["status"] as? String ?? "")}) else{throw fail("Buddy couldn't verify saved team plans. Existing teams were kept.")};return rows
     }
     private func save(_ rows:[[String:Any]])throws {let data=try JSONSerialization.data(withJSONObject:rows,options:.sortedKeys);guard data.count<12*1024*1024 else{throw fail("Team plan history is full.")};try data.write(to:file,options:.atomic);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:file.path)}
     static func creationRequest(_ text:String)->Bool {

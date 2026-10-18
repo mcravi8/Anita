@@ -36,8 +36,8 @@
     if(!body||message.setup||run&&/\b(?:explain|details|detail|why|breakdown|report|full|thorough)\b/i.test(run.text||''))return {body};
     const operational=message.teamPlanIds?.length||message.proposalIds?.length||message.routines?.length||message.workerTaskID;
     if(!operational||body.length<=360)return {body};
-    const paragraph=body.trim().split(/\n\s*\n/)[0],sentences=paragraph.match(/[^.!?]+[.!?](?:\s|$)|[^.!?]+$/g)||[paragraph];let short='';
-    for(const sentence of sentences.slice(0,2)){if((short+sentence).trim().length>360)break;short+=sentence;}
+    const paragraph=body.trim().split(/\n\s*\n/)[0];let short='',remaining=paragraph;
+    for(let i=0;i<2&&remaining;i++){const end=remaining.search(/[.!?](?=\s|$)/),sentence=end<0?remaining:remaining.slice(0,end+1);if((short+' '+sentence).trim().length>360)break;short=(short+' '+sentence).trim();remaining=end<0?'':remaining.slice(end+1).trimStart();}
     short=short.trim();if(!short)short=paragraph.slice(0,320).replace(/\s+\S*$/,'')+'…';
     return {body:short,details:body};
   }

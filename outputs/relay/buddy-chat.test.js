@@ -32,6 +32,10 @@ test('worker result details collapse even without a conversation run; errors rem
  const body='Please reconnect Gmail.\n\n'+('Observed diagnostic detail. '.repeat(40)),m={body,workerTaskID:'task',error:'Gmail disconnected'};
  assert.equal(Chat.presentation(seed(),m).body,'Please reconnect Gmail.');assert.equal(Chat.presentation(seed(),m).details,body);assert.equal(m.error,'Gmail disconnected');
 });
+test('brief previews retain email addresses and Markdown links intact',()=>{
+ const body='I created **matteo-chief@agentmail.to** on the free plan. Seven checks are saved.\n\n'+('Details. '.repeat(80));
+ const shown=Chat.presentation(seed(),{body,workerTaskID:'task'});assert.equal(shown.body,'I created **matteo-chief@agentmail.to** on the free plan. Seven checks are saved.');assert.equal(shown.details,body);
+});
 test('delegated routine receipts require the registered owner and a participating creator',()=>{
  const s=seed(),r=Chat.begin(s,'a'),routine={id:'r',workspace:s.conversationWorkspace,agentId:'b',nextRun:'2026-10-19T15:00:00Z'};
  assert.equal(Chat.apply(s,{type:'routine',runId:r.run.runId,routine}),false);

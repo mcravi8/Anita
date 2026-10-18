@@ -61,7 +61,7 @@
     const requested=question?bubble(r.fromAgentId,question):`<p class="agent-exchange-system">${esc(agentName(r.fromAgentId))} requested an automatic check-in.</p>`;
     const more=body&&detail&&body!==detail?`<details><summary>Details</summary><div class="reply-markdown">${BuddyMarkdown.render(detail)}</div></details>`:'';
     const reply=r.status==='completed'?(body||detail?bubble(r.toAgentId,body||detail,more,true):'<p class="agent-exchange-system">Check-in completed without a message.</p>'):'';
-    return `<section class="agent-exchange" data-agent-exchange="${esc(r.id)}"><div class="agent-exchange-heading"><span>${esc(agentName(r.fromAgentId))} → ${esc(agentName(r.toAgentId))}</span><time>${esc(time(r.createdAt))}</time></div>${requested}${reply}${r.status!=='completed'?`<p class="agent-exchange-status ${['failed','interrupted'].includes(r.status)?'is-error':''}" role="status">${esc(status(r.status))}${r.error?` · ${esc(r.error)}`:''}</p>`:''}</section>`;
+    return `<section class="agent-exchange" data-agent-exchange="${esc(r.id)}"><div class="agent-exchange-heading"><span>${who(r.fromAgentId)} → ${who(r.toAgentId)}</span><time>${esc(time(r.createdAt))}</time></div>${requested}${reply}${r.status!=='completed'?`<p class="agent-exchange-status ${['failed','interrupted'].includes(r.status)?'is-error':''}" role="status">${esc(status(r.status))}${r.error?` · ${esc(r.error)}`:''}</p>`:''}</section>`;
   }
   function draw(){
     const panel=document.querySelector('[data-agent-message-panel]');if(!panel)return;

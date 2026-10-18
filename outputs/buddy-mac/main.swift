@@ -7,13 +7,26 @@ import AppKit
     private let filePreviews = BuddyFilePreview()
     private let supportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Buddy", isDirectory: true)
     private var stateURL: URL { supportURL.appendingPathComponent("workspace.json") }
+    private static let appearanceKey = "BuddyAppearance"
+    // The page colour of the light and dark themes, so the window never flashes the wrong one while the page loads.
+    private static let pageBackground = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(srgbRed: 18 / 255, green: 18 / 255, blue: 17 / 255, alpha: 1) : NSColor(srgbRed: 251 / 255, green: 250 / 255, blue: 248 / 255, alpha: 1)
+    }
+    /// Light, dark, or whatever the Mac is using. The page saves the same choice in the workspace and tells the app.
+    private func applyAppearance(_ choice: String) {
+        switch choice {
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "system": NSApp.appearance = nil
+        default: NSApp.appearance = NSAppearance(named: .aqua)
+        }
+    }
     private lazy var conversations = ConversationService(support: supportURL)
     private lazy var ai = BuddyAIRouter(support: supportURL, chatgpt: conversations)
     private lazy var agentSetup = BuddyAgentSetup(support:supportURL)
     private lazy var teamwork = BuddyTeamService(conversations: ai)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.appearance = NSAppearance(named: .aqua)
+        applyAppearance(UserDefaults.standard.string(forKey: Self.appearanceKey) ?? "light")
         if let icon = Bundle.main.url(forResource: "Buddy", withExtension: "icns") {
             NSApp.applicationIconImage = NSImage(contentsOf: icon)
         }
@@ -82,7 +95,7 @@ import AppKit
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Buddy"
         window.titlebarAppearsTransparent = true
-        window.backgroundColor = NSColor(calibratedWhite: 0.985, alpha: 1)
+        window.backgroundColor = Self.pageBackground
         window.minSize = NSSize(width: 760, height: 660)
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenPrimary]
@@ -100,6 +113,7 @@ import AppKit
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.autoresizingMask = [.width, .height]
+        webView.underPageBackgroundColor = Self.pageBackground
         window.contentView = webView
         self.webView = webView
         guard let resources = Bundle.main.resourceURL?.appendingPathComponent("Web", isDirectory: true) else { showFailure("Buddy’s interface is missing."); return }
@@ -122,6 +136,7 @@ import AppKit
           worker: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'worker', payload}),
           initialState: \(stateLiteral)[0],
           saveState: value => window.webkit.messageHandlers.buddy.postMessage({kind: 'saveState', value}),
+          setAppearance: choice => window.webkit.messageHandlers.buddy.postMessage({kind: 'appearance', choice}),
           exportFile: (name, content) => window.webkit.messageHandlers.buddy.postMessage({kind: 'exportFile', name, content}),
           connectionStatus: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'connectionStatus'}),
           signIn: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'signIn'}),
@@ -410,6 +425,11 @@ import AppKit
         case "showProjectFolder":
             do { let context = try workspaceContext(); let scope = try (body["folderId"] as? String).map { BuddyFileScope(workspace: context.workspace, folderId: $0) } ?? conversations.projectFiles.scope(context.workspace); NSWorkspace.shared.open(try conversations.projectFiles.location(scope)); replyHandler(["opened": true], nil) }
             catch { replyHandler(nil, error.localizedDescription) }
+        case "appearance":
+            guard let choice = body["choice"] as? String, ["light", "dark", "system"].contains(choice) else { replyHandler(nil, "Unsupported appearance."); return }
+            UserDefaults.standard.set(choice, forKey: Self.appearanceKey)
+            applyAppearance(choice)
+            replyHandler(["appearance": choice], nil)
         case "openChatGPT":
             NSWorkspace.shared.open(URL(string: "https://chatgpt.com")!)
             replyHandler(["opened": true], nil)

@@ -2,7 +2,7 @@
   'use strict';
   const uid=()=>globalThis.crypto.randomUUID();
   const Interview=root.BuddyAgentSetup||(typeof module!=='undefined'?require('./buddy-agent-setup'):null);
-  const defaults=()=>({name:'Buddy',role:'Getting started',description:Interview.bootstrap,avatarShape:'star',avatarColor:'lilac',tools:{web:true,projectFiles:true},groupIds:[]});
+  const defaults=()=>({name:'Buddy',role:'Getting started',description:Interview.bootstrap,avatarShape:'diamond',avatarColor:'lilac',tools:{web:true,projectFiles:true},groupIds:[]});
   function blank(){return {version:1,messagingRevision:2,agents:[],groups:[],tasks:[],files:[],messages:{},drafts:{},attachments:{},proposals:[],runs:{},lastView:{kind:'chat',target:null},conversationWorkspace:uid(),onboarding:{version:1,status:'pending',registrationId:uid(),draft:defaults()}};}
   function migrate(value){
     if(!value.onboarding){const draft=defaults();let suffix=1;while(value.agents.some(a=>a.name.toLowerCase()===draft.name.toLowerCase())){draft.name=suffix===1?'My Buddy':`My Buddy ${suffix}`;suffix++;}value.onboarding={version:1,status:'pending',registrationId:uid(),draft};}
@@ -38,7 +38,7 @@
     document.getElementById('onboarding-root').innerHTML=`<section class="onboarding-screen" role="dialog" aria-modal="true" aria-labelledby="setup-title"><div class="onboarding-scroll"><div class="onboarding-card"><div class="onboarding-brand">${buddyLogo()}<span>Buddy</span></div><h1 id="setup-title">Your first Buddy.</h1><p class="onboarding-intro">Give them a name. They’ll learn the job in chat.</p><form id="buddy-setup-form">${picker.slice(0,cut)}<details class="onboarding-look"><summary>Change their look${icon('down')}</summary>${picker.slice(cut)}</details><div class="field"><label for="setup-name">Name</label><input id="setup-name" value="${esc(c.name)}" placeholder="What should we call them?" maxlength="40" required autocomplete="off"></div><div id="setup-connection" class="onboarding-connection"></div><p id="setup-status" class="onboarding-status" role="status"></p><p id="setup-error" class="field-error" role="alert">${esc(workspaceReadError||'')}</p><button type="submit" class="primary-button onboarding-submit" ${workspaceReadError?'disabled':''}>Start chatting${icon('arrow')}</button>${state.agents.length?'<button type="button" class="onboarding-later" data-setup-later>Back to my chats</button><p class="onboarding-preserved">Your existing chats and files stay saved.</p>':''}</form></div></div></section>`;
     document.querySelector('.config-preview small').textContent='A few questions, then ready to help.';
     const form=document.getElementById('buddy-setup-form');
-    const update=()=>{const value=read();state.onboarding.draft=value;document.getElementById('config-avatar-preview').innerHTML=configuredAvatar(value);document.getElementById('config-preview-name').textContent=value.name.trim()||'Your Buddy';for(const image of document.querySelectorAll('[data-shape-preview]'))image.style.filter=avatarFilter(image.dataset.shapePreview,value.avatarColor);save();};
+    const update=()=>{const value=read();state.onboarding.draft=value;refreshAvatarPreview(document,value);document.getElementById('config-preview-name').textContent=value.name.trim()||'Your Buddy';save();};
     form.addEventListener('input',update);form.addEventListener('change',update);
     document.querySelector('[data-setup-later]')?.addEventListener('click',dismiss);
     form.addEventListener('submit',async event=>{

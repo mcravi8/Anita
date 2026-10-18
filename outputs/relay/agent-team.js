@@ -2,68 +2,33 @@
 'use strict';
 const RelayTeam = (() => {
   const shapeOptions = [
-    {id:'star',name:'Star',asset:'morgan',hue:270,originalColor:'lilac'},
-    {id:'pebble',name:'Pebble',asset:'atlas',hue:220,originalColor:'blue'},
-    {id:'cube',name:'Cube',asset:'nova',hue:30,originalColor:'peach'},
-    {id:'clover',name:'Clover',asset:'scout',hue:145,originalColor:'mint'}
+    {id:'diamond',name:'Diamond'},
+    {id:'sphere',name:'Sphere'},
+    {id:'hex',name:'Hex'},
+    {id:'pill',name:'Pill'}
   ];
+  // ink is the figure colour on a light surface, inkDark on a dark one, text the author-name colour on light.
+  // buddy-figures.js draws with the same inks; a test keeps the two tables equal.
   const colorOptions = [
-    {id:'lilac',name:'Lilac',hue:270,swatch:'#b9a0eb',text:'#73549d'},
-    {id:'blue',name:'Light blue',swatch:'#74c9f2',text:'#27789e'},
-    {id:'peach',name:'Peach',hue:30,swatch:'#f3a45d',text:'#9a5c2c'},
-    {id:'mint',name:'Green',swatch:'#55b964',text:'#2b7836'},
-    {id:'red',name:'Autumn red',swatch:'#bf4a34',text:'#883624',ink:'#ffffff'},
-    {id:'gold',name:'Yellow',swatch:'#ffe02f',text:'#806c08'},
-    {id:'cobalt',name:'Blue',swatch:'#4776df',text:'#345ba6',ink:'#ffffff'}
+    {id:'lilac',name:'Lilac',ink:'#8a63d2',inkDark:'#b9a0eb',text:'#6a46b0'},
+    {id:'blue',name:'Light blue',ink:'#1f9bd6',inkDark:'#74c9f2',text:'#17739e'},
+    {id:'peach',name:'Peach',ink:'#e07a2c',inkDark:'#f3a45d',text:'#a3541a'},
+    {id:'mint',name:'Green',ink:'#2e9a48',inkDark:'#66c975',text:'#237536'},
+    {id:'red',name:'Autumn red',ink:'#b8432e',inkDark:'#e2684f',text:'#8f3020'},
+    {id:'gold',name:'Yellow',ink:'#d4a300',inkDark:'#ffe02f',text:'#806300'},
+    {id:'cobalt',name:'Blue',ink:'#3561d8',inkDark:'#7fa0ff',text:'#2a4db0'}
   ];
   const copy = value => JSON.parse(JSON.stringify(value));
   const uid = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const legacy = {morgan:['star','lilac'],atlas:['pebble','blue'],nova:['cube','peach'],scout:['clover','mint']};
-  // Every shape uses the same surface palette. These measured source-lightness
-  // landmarks align the four different original materials before recoloring.
-  const lightness = {
-    star:[0,.2527,.4907,.5110,.5396,.6214,.7109,.7762,.8868,.9825,1],
-    pebble:[0,.1458,.2712,.2830,.3002,.3534,.4313,.5392,.6749,.8764,1],
-    cube:[0,.1612,.3966,.4198,.4576,.5375,.5960,.6534,.7253,.8971,1],
-    clover:[0,.3508,.4721,.5399,.5726,.6572,.7597,.8282,.8983,.9678,1]
-  };
-  const surfaceStops = [0,.01,.02,.05,.1,.25,.5,.75,.9,.99,1];
+  // Saved workspaces and model suggestions may still name the original 3D shapes or the first four personas.
+  const legacyShape = {star:'diamond',pebble:'sphere',cube:'hex',clover:'pill'};
+  const legacy = {morgan:['diamond','lilac'],atlas:['sphere','blue'],nova:['hex','peach'],scout:['pill','mint']};
+  const normalizedShapeId = id => legacyShape[id]||id;
   const normalizedColorId = id => ({rose:'red',stone:'cobalt'}[id]||id);
-  const rgb = hex => [1,3,5].map(i=>parseInt(hex.slice(i,i+2),16)/255);
-  function surfaceColor(colorId,stop) {
-    const base=rgb((colorOptions.find(c=>c.id===normalizedColorId(colorId))||colorOptions[0]).swatch);
-    if(stop<=.01){const face=rgb('#323440');return face.map(v=>v*(.38+stop*62));}
-    // Shadows stay in the selected hue; glossy highlights approach white.
-    const shade=stop<=.5?.58+.42*((stop-.02)/.48):1;
-    const highlight=stop>.5?Math.min(.95,(stop-.5)*1.9):0;
-    return base.map(v=>v*Math.max(.58,shade)*(1-highlight)+highlight);
-  }
-  function avatarColorTables(shapeId,colorId) {
-    const source=lightness[shapeId]||lightness.star;
-    const targets=surfaceStops.map(stop=>surfaceColor(colorId,stop));
-    return [0,1,2].map(channel=>Array.from({length:257},(_,sample)=>{
-      const value=sample/256;
-      let upper=source.findIndex(level=>level>=value);
-      if(upper<=0)return targets[0][channel];
-      const lower=upper-1,fraction=(value-source[lower])/(source[upper]-source[lower]);
-      return targets[lower][channel]+fraction*(targets[upper][channel]-targets[lower][channel]);
-    }));
-  }
-  function avatarFilter(shapeId,colorId) {
-    const a=appearance({avatarShape:shapeId,avatarColor:colorId});
-    return `url(#buddy-avatar-${a.avatarShape}-${a.avatarColor})`;
-  }
-  function avatarFilterMarkup() {
-    const filters=shapeOptions.flatMap(shape=>colorOptions.map(color=>{
-      const tables=avatarColorTables(shape.id,color.id);
-      return `<filter id="buddy-avatar-${shape.id}-${color.id}" color-interpolation-filters="sRGB"><feColorMatrix type="matrix" values=".2126 .7152 .0722 0 0 .2126 .7152 .0722 0 0 .2126 .7152 .0722 0 0 0 0 0 1 0"/><feComponentTransfer>${['R','G','B'].map((channel,i)=>`<feFunc${channel} type="table" tableValues="${tables[i].map(v=>v.toFixed(5)).join(' ')}"/>`).join('')}<feFuncA type="identity"/></feComponentTransfer></filter>`;
-    })).join('');
-    return `<svg id="buddy-avatar-filters" xmlns="http://www.w3.org/2000/svg" width="0" height="0" aria-hidden="true" style="position:absolute;pointer-events:none"><defs>${filters}</defs></svg>`;
-  }
   function appearance(agent={}) {
     const fallback=legacy[agent.color]||legacy.morgan;
     return {
-      avatarShape:shapeOptions.some(s=>s.id===agent.avatarShape)?agent.avatarShape:fallback[0],
+      avatarShape:shapeOptions.some(s=>s.id===normalizedShapeId(agent.avatarShape))?normalizedShapeId(agent.avatarShape):fallback[0],
       avatarColor:colorOptions.some(c=>c.id===normalizedColorId(agent.avatarColor))?normalizedColorId(agent.avatarColor):fallback[1]
     };
   }
@@ -145,6 +110,6 @@ const RelayTeam = (() => {
     Object.assign(proposal,{status:'declined',decidedBy:'you',decidedAt:new Date().toISOString()});
     return proposal;
   }
-  return {shapeOptions,colorOptions,copy,appearance,config,migrate,validate,createAgent,updateAgent,proposeAgent,saveProposal,approveProposal,declineProposal,avatarFilter,avatarFilterMarkup,avatarColorTables};
+  return {shapeOptions,colorOptions,legacyShape,copy,appearance,config,migrate,validate,createAgent,updateAgent,proposeAgent,saveProposal,approveProposal,declineProposal};
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=RelayTeam;

@@ -16,6 +16,16 @@ import Foundation
   let config:[String:Any] = ["name":"Sage","role":"Writer","description":"Draft friendly plant-shop copy.","avatarShape":"cube","avatarColor":"red","reason":"A writer would help draft the launch."]
   let result=try store.propose(scope,executionRunId:run,callId:"call-1",arguments:config),p=result["proposal"] as! [String:Any],id=p["id"] as! String
   check(result["added"] as? Bool == false,"A model proposal must not add an agent")
+  check((p["suggested"] as? [String:Any])?["avatarShape"] as? String == "hex","A model that still names the old 3D shape must get the figure that replaced it")
+  for (given,expected) in [("diamond","diamond"),("sphere","sphere"),("hex","hex"),("pill","pill"),("star","diamond"),("pebble","sphere"),("cube","hex"),("clover","pill")] {
+   var shaped=config;shaped["avatarShape"]=given
+   check(try store.configuration(shaped,state:original,human:true).avatarShape == expected,"Shape \(given) should be saved as \(expected)")
+  }
+  var shapeless=config;shapeless["avatarShape"]=nil
+  check(try store.configuration(shapeless,state:original,human:true).avatarShape == "diamond","A missing shape should default to the diamond")
+  var unknownShape=config;unknownShape["avatarShape"]="triangle"
+  rejects({try store.configuration(unknownShape,state:original,human:true)},"An unknown shape was accepted")
+  check(BuddyAvatar.shapes == ["diamond","sphere","hex","pill"] && BuddyAvatar.colors.count == 7,"The figure set changed unexpectedly")
   check((try read()["agents"] as? [[String:Any]])?.count == 1,"Pending suggestion created an agent")
   check((try store.propose(scope,executionRunId:run,callId:"call-1",arguments:config)["proposal"] as? [String:Any])?["id"] as? String == id,"Duplicate tool call created a new suggestion")
   let reloaded=BuddyAgentProposals(support:root)

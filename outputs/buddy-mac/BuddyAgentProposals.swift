@@ -1,5 +1,14 @@
 import Foundation
 
+/// Agents are drawn as halftone figures: four shapes in seven inks. Saved workspaces and models that still use the
+/// original 3D shape names are accepted and become the figure that replaced them.
+enum BuddyAvatar {
+    static let shapes = ["diamond", "sphere", "hex", "pill"]
+    static let colors = ["lilac", "blue", "peach", "mint", "red", "gold", "cobalt"]
+    static let legacyShapes = ["star": "diamond", "pebble": "sphere", "cube": "hex", "clover": "pill"]
+    static func shape(_ value: String) -> String? { let id = legacyShapes[value] ?? value; return shapes.contains(id) ? id : nil }
+}
+
 struct BuddyProposalFailure: LocalizedError {
     let message: String
     var errorDescription: String? { message }
@@ -84,8 +93,8 @@ struct BuddyAgentProposal: Codable {
         }
         let name = try text("name", 40), role = try text("role", 55), description = try text("description", 1500)
         guard !(state["agents"] as? [[String: Any]] ?? []).contains(where: { ($0["name"] as? String)?.lowercased() == name.lowercased() }) else { throw failure("An agent already has this name. Choose a different name.") }
-        let shape = value["avatarShape"] as? String ?? "star", color = value["avatarColor"] as? String ?? "lilac"
-        guard ["star", "pebble", "cube", "clover"].contains(shape), ["lilac", "blue", "peach", "mint", "red", "gold", "cobalt"].contains(color) else { throw failure("Choose an available shape and color.") }
+        let color = value["avatarColor"] as? String ?? "lilac"
+        guard let shape = BuddyAvatar.shape(value["avatarShape"] as? String ?? "diamond"), BuddyAvatar.colors.contains(color) else { throw failure("Choose an available shape and color.") }
         let groups = human ? (value["groupIds"] as? [String] ?? []) : []
         guard Set(groups).count == groups.count, groups.allSatisfy({ id in (state["groups"] as? [[String: Any]] ?? []).contains { $0["id"] as? String == id && ($0["members"] as? [String] ?? []).count < 16 } }) else { throw failure("A selected group is unavailable or full. Choose another group.") }
         let choices = value["tools"] as? [String: Bool] ?? [:]
@@ -183,7 +192,7 @@ struct BuddyAgentProposal: Codable {
         }
         result["agents"] = agents; result["messages"] = messages; result["groups"] = groups; return result
     }
-    static let tools: [[String: Any]] = [["type": "function", "name": "buddy_propose_agent", "description": "Suggest a new specialist agent for the user to review. This saves a pending suggestion, never creates or approves it. For an explicit user request to CREATE agents or teams, use buddy_build_team instead. Prefer existing registered agents. Suggest at most three per request. Names, roles, instructions and appearance remain editable before human approval.", "inputSchema": ["type": "object", "properties": ["name": ["type": "string", "maxLength": 40], "role": ["type": "string", "maxLength": 55], "description": ["type": "string", "maxLength": 1500], "reason": ["type": "string", "maxLength": 800], "avatarShape": ["type": "string", "enum": ["star", "pebble", "cube", "clover"]], "avatarColor": ["type": "string", "enum": ["lilac", "blue", "peach", "mint", "red", "gold", "cobalt"]]], "required": ["name", "role", "description", "reason", "avatarShape", "avatarColor"], "additionalProperties": false]], BuddyTeamBuilder.tool]
+    static let tools: [[String: Any]] = [["type": "function", "name": "buddy_propose_agent", "description": "Suggest a new specialist agent for the user to review. This saves a pending suggestion, never creates or approves it. For an explicit user request to CREATE agents or teams, use buddy_build_team instead. Prefer existing registered agents. Suggest at most three per request. Names, roles, instructions and appearance remain editable before human approval.", "inputSchema": ["type": "object", "properties": ["name": ["type": "string", "maxLength": 40], "role": ["type": "string", "maxLength": 55], "description": ["type": "string", "maxLength": 1500], "reason": ["type": "string", "maxLength": 800], "avatarShape": ["type": "string", "enum": BuddyAvatar.shapes], "avatarColor": ["type": "string", "enum": ["lilac", "blue", "peach", "mint", "red", "gold", "cobalt"]]], "required": ["name", "role", "description", "reason", "avatarShape", "avatarColor"], "additionalProperties": false]], BuddyTeamBuilder.tool]
 }
 
 /// Plans are journaled before committing the whole team in one workspace write.
@@ -326,5 +335,5 @@ struct BuddyAgentProposal: Codable {
         return out
     }
     static let guidance="Use buddy_build_team to create a requested team, add teammates to an existing team, or create one standalone agent. First list existing agents/teams and reuse suitable members. For action=create quote the user's exact current creation request in authorizationQuote. Native authorization decides whether it is created directly or saved as a pending suggestion. For your own unsolicited idea use action=propose; the user must approve it. A unique pending plan can be created after an explicit go-ahead using its planId. New teammates normally start with your complete job-specific role/instructions and ask only for missing details; interviewNewAgents=true instead starts the normal individual interview. Give each a distinct name and suitable look. Keep saved IDs internal. Confirm only the actual created/proposed outcome in a short DM. If the user also requests recurring work, use buddy_manage_routine with the new agentId, hours and exact authorizationQuote to save it now; do not leave setup as instructions for the teammate to do later. Creating a team registers a real group chat; it does not launch work or change external permissions/reviews. Never claim another agent has worked merely because it was created."
-    static let tool:[String:Any] = ["type":"function","name":"buddy_build_team","description":guidance,"inputSchema":["type":"object","additionalProperties":false,"properties":["action":["type":"string","enum":["list","create","propose"]],"planId":["type":"string"],"authorizationQuote":["type":"string"],"teamName":["type":"string","maxLength":70],"objective":["type":"string","maxLength":1500],"groupId":["type":"string","description":"Existing team ID when adding members; omit to create a new team."],"existingAgentIds":["type":"array","items":["type":"string"]],"includeCreator":["type":"boolean"],"interviewNewAgents":["type":"boolean"],"reason":["type":"string","maxLength":800],"newAgents":["type":"array","maxItems":8,"items":["type":"object","additionalProperties":false,"properties":["name":["type":"string","maxLength":40],"role":["type":"string","maxLength":55],"description":["type":"string","maxLength":1500],"avatarShape":["type":"string","enum":["star","pebble","cube","clover"]],"avatarColor":["type":"string","enum":["lilac","blue","peach","mint","red","gold","cobalt"]]],"required":["name","role","description","avatarShape","avatarColor"]]]],"required":["action"]]]
+    static let tool:[String:Any] = ["type":"function","name":"buddy_build_team","description":guidance,"inputSchema":["type":"object","additionalProperties":false,"properties":["action":["type":"string","enum":["list","create","propose"]],"planId":["type":"string"],"authorizationQuote":["type":"string"],"teamName":["type":"string","maxLength":70],"objective":["type":"string","maxLength":1500],"groupId":["type":"string","description":"Existing team ID when adding members; omit to create a new team."],"existingAgentIds":["type":"array","items":["type":"string"]],"includeCreator":["type":"boolean"],"interviewNewAgents":["type":"boolean"],"reason":["type":"string","maxLength":800],"newAgents":["type":"array","maxItems":8,"items":["type":"object","additionalProperties":false,"properties":["name":["type":"string","maxLength":40],"role":["type":"string","maxLength":55],"description":["type":"string","maxLength":1500],"avatarShape":["type":"string","enum":BuddyAvatar.shapes],"avatarColor":["type":"string","enum":["lilac","blue","peach","mint","red","gold","cobalt"]]],"required":["name","role","description","avatarShape","avatarColor"]]]],"required":["action"]]]
 }

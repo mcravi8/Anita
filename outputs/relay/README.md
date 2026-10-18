@@ -17,7 +17,8 @@ Then open `http://127.0.0.1:4173`. There are no dependencies or build steps.
 - Set up your first Buddy: choose a name and look. Start chatting saves the agent and immediately opens its job interview in the DM. In the Mac app, Claude asks relevant follow-ups and generates editable instructions once the brief is clear. Fresh workspaces start without sample agents. Setup choices and answers persist across reloads.
 - Use the plus beside Chats to create an agent or a group.
 - Click the conversation title or three dots for agent/group details and instructions.
-- Pick a 3D shape and one of seven colors independently from the agent's name, role, instructions, and tool preferences.
+- Pick a figure (Diamond, Sphere, Hex or Pill) and one of seven colors independently from the agent's name, role, instructions, and tool preferences. The preview is the live figure.
+- Settings → Appearance switches between Light, Dark and Match system.
 - Open a conversation's details → Create a similar agent to start from a copy of that agent's configuration. Editing the new agent does not change the original.
 - Open New chat → Agent suggestions → Try a sample suggestion to review the approval journey. Change the suggested configuration, save it for later, decline it, or approve and add it to selected groups.
 - Click the folder in a conversation header for shared Files, Tasks, and Computer tabs.
@@ -57,33 +58,26 @@ The native Mac integration exposes only pending suggestion creation to model tur
 - `buddy-files.js` / `.css` / `.test.js`: native shared-file interface and receipt/conflict checks.
 - `buddy-onboarding.js` / `.css` / `.test.js`: empty initial workspace, migration, resumable setup, and atomic first-agent registration.
 - `buddy-agent-setup.js` / `.test.js`: immediate first question, native interview snapshots, retry/stop, profile updates and manual edits.
-- `assets/`: four transparent 3D avatar PNGs and the exact generation prompts in `prompts.json`. Created with built-in image generation; original output images were copied into this project unchanged.
-- `assets/buddy-logo.svg`: vector logo with the agents' glossy eyes and smile on a white background, also used as the browser icon.
+- `buddy-figures.js` / `.test.js`: the halftone figure engine (shape distance fields, springs, blinking, eyes, progress rings) and the runtime that paints every `canvas[data-fig]` and the sidebar dot field.
+- `buddy-figure-modes.js` / `.test.js`: turns real workspace state into figure modes and hand-offs.
+- `buddy-theme.js` / `.css` / `.test.js`: Light, Dark and Match system, the design tokens, and the restyled surfaces. Loaded last.
+- `assets/buddy-logo.svg`: the Buddy mark, used as the browser icon. The in-app logo is a live figure.
 
-Avatar paths:
-
-- `assets/morgan-3d.png`: lilac star.
-- `assets/atlas-3d.png`: blue pebble.
-- `assets/nova-3d.png`: orange cube.
-- `assets/scout-3d.png`: mint clover.
-
-The Buddy source ZIP includes all assets and their prompts. `../buddy.html` is a standalone version with styles, script, logo, and avatar images embedded. Existing saved chats and settings retain their storage key across the app rename.
-
-## Verification
-
-The messaging redesign was checked at desktop (1440 × 900), intermediate (1024 × 768), and phone (390 × 844) sizes. Verified direct/group navigation, new-chat menu, avatar selection and cancellation, shared-work drawer and task details, draft persistence across reload, empty chat search, phone chat-list navigation, and Escape returning focus from a drawer. No page-level overflow was observed on the tested phone/intermediate layouts; the composer stays visible. The previous version's task handoff, file editing, local message submission, and creation forms remain in the app.
-
-The configurable-team revision was checked on desktop and phone. Verified creating a same-shape agent with independent name/color/instructions, unchanged original settings, editing and saving a pending proposal across reload, approval into a selected group, and declining without adding a member. The phone review scrolls vertically with no horizontal overflow and 44 px decision buttons. Seven domain tests cover migration, pending-proposal isolation, actor guards, saved edits, idempotent approval, configuration independence, atomic validation, and decline finality. Run them with `node --test agent-team.test.js`.
-
-Dialogs contain focus and hide the background from accessibility navigation. The interface supports visible keyboard focus and reduced-motion CSS. Screen-reader operation, storage-failure behavior, file-picker interaction, real network failures and computer operations were not verified in the original frontend pass. Native live model verification is recorded separately in `../buddy-conversations-verification.json`.
+The Buddy source ZIP includes all assets. `../buddy.html` is an earlier standalone version with styles, script, logo and the old 3D avatar images embedded; it was not regenerated for the figures.
 
 The icon polish pass replaced the uneven settings outline with a symmetric gear and removed inherited padding from document badges. Rendered SVG centers match their badge centers on desktop and phone. Chat header/composer buttons, shared-file and task drawers, document details, task details, and Settings were visually inspected; the tested phone views have no horizontal overflow. Settings and detail text now follow Buddy's neutral palette. These changes leave the data and approval flows unchanged.
 
-## Consistent agent colors
+## Figures, the dot-field sidebar and appearance
 
-All four shapes now use the same Lilac, Light blue, Peach, Green, Autumn red, Yellow, and Blue palette. `agent-team.js` generates SVG color filters that align measured lightness landmarks from each original avatar, then apply shared surface midtones, shadows, and highlights. The original PNG files, transparent edges, silhouettes, glossy lighting, and faces are retained. This replaces the old hue rotation that left Pebble and Cube darker and more saturated.
+Agents are halftone dot figures in one ink colour with the eyes cut out as negative space. The four shapes are Diamond, Sphere, Hex and Pill; the saved IDs are `diamond`, `sphere`, `hex` and `pill`. Saved workspaces, proposals, model suggestions and team plans that still say `star`, `pebble`, `cube` or `clover` are read as the figure that replaced them (`agent-team.js` `migrate()`/`appearance()`, `BuddyAvatar` in the native app). Unknown shapes fall back to the diamond instead of breaking the avatar.
 
-Existing `rose` appearances migrate to `red`, and removed grey (`stone`) migrates to the new deeper Blue (`cobalt`) in agents and suggested, edited, and approved proposal configurations. Existing `blue`, `mint`, and `gold` IDs remain valid and now display Light blue, Green, and Yellow. Green is a richer leaf green; Autumn red uses a warm rust red; deeper Blue is distinct from Light blue. Live shape/color previews share the same filters as chat avatars. The selected-color check uses dark ink on light colors and white on Autumn red and Blue. All 28 final combinations were visually inspected in a separate preview, and Blue/Cube, Green/Clover, and Autumn red/Star switching and cancellation were checked in the real creation dialog. Ten team tests include palette matching and migration preservation; proof is saved in `../buddy-agent-colors.png`, `../buddy-agent-color-picker.png`, and `../buddy-agent-colors-verification.json`.
+The seven colour IDs are unchanged (`lilac`, `blue`, `peach`, `mint`, `red`, `gold`, `cobalt`; earlier `rose` and `stone` still migrate to `red` and `cobalt`). Each has a light ink, a dark ink and an author-name colour in `agent-team.js`; `buddy-figures.js` draws with the same inks and a test keeps the tables equal.
+
+`BuddyFigures.avatarHTML(agentOrGroup, size)` returns a `canvas[data-fig]`; one `requestAnimationFrame` loop paints every visible one (alternating halves of the list, about 30 fps each) and skips canvases that are off screen. CSS decides how large a figure is drawn. The whole chat-list sidebar is one dot field: rows hold empty slots and the field draws each head at the slot's measured position, so hand-offs, needs pulses and the selected and hover bands can travel between rows. Eyes follow the cursor while it is over the sidebar.
+
+Figure motion comes from real state (`buddy-figure-modes.js`, synced after every render and save): a reply that is starting is *planning*, streaming is *working* (progress ring), an action review waiting on you is *needs* (pulse, looks at you), a finished reply is *done* (spin, sparkles, back to ready after 1.7 s) and a failed one is *stuck* (tilt, back to ready after 8 s). In a group run the lead plans while members watch the lead, the member whose step is running works while the others watch them, work moving between members is a hand-off, and a completed run is *done* for everyone, 160 ms apart. Opening the app never replays old runs.
+
+Appearance is saved in the workspace as `theme` (`light`, `dark` or `system`; missing means light). `buddy-theme.js` writes the resolved theme to `<html data-theme>` and every stylesheet reads the tokens in `buddy-theme.css`. The Mac app is told the choice (`BuddyDesktop.setAppearance`) so the window, title bar and system controls match. The fonts are Geist and Geist Mono, bundled in `assets/fonts/` (SIL Open Font License, see `OFL.txt`), with the system fonts as the fallback.
 
 ## Connections
 

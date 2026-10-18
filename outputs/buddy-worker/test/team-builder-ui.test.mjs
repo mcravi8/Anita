@@ -23,7 +23,7 @@ test('team review keeps edits after a failed save, then adds the real receipt an
       BuddyTeamBuilderUI.merge(state,[fixturePlan]);render();BuddyTeamBuilderUI.review('plan');
     });
     await page.locator('.team-plan-member summary').click();
-    assert.equal(await page.locator('[data-new-shape="0"] option:checked').textContent(),'Clover');
+    assert.equal(await page.locator('[data-new-shape="0"] option:checked').textContent(),'Pill');
     assert.equal(await page.locator('[data-new-color="0"] option:checked').textContent(),'Green');
     await page.locator('[data-new-name="0"]').fill('Evidence scout');
     await page.locator('[data-new-instructions="0"]').fill('Verify primary sources and flag uncertainty.');

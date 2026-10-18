@@ -19,7 +19,7 @@ def reset(support,stop=stop_worker):
         saved={name:json.loads(data) for name,data in raw.items()};state=saved['workspace.json'];workspace=state['conversationWorkspace'];uuid.UUID(workspace)
         if state.get('version')!=1 or not isinstance(state.get('agents'),list):raise RuntimeError('Could not verify the saved workspace.')
         count=len(state['agents']);state.update(agents=[],groups=[],tasks=[],messages={},drafts={},attachments={},proposals=[],runs={},agentSetup={},messagingRevision=2,lastView={'kind':'chat','target':None})
-        state['onboarding']={'version':1,'status':'pending','registrationId':str(uuid.uuid4()),'draft':{'name':'Buddy','role':'Getting started','description':BOOTSTRAP,'avatarShape':'star','avatarColor':'lilac','tools':{'web':True,'projectFiles':True,'desktop':True},'groupIds':[]}}
+        state['onboarding']={'version':1,'status':'pending','registrationId':str(uuid.uuid4()),'draft':{'name':'Buddy','role':'Getting started','description':BOOTSTRAP,'avatarShape':'diamond','avatarColor':'lilac','tools':{'web':True,'projectFiles':True,'desktop':True},'groupIds':[]}}
         if 'agent-models.json' in saved:saved['agent-models.json']['workspaces'].pop(workspace,None)
         if 'agent-interviews.json' in saved:saved['agent-interviews.json']['records']={k:r for k,r in saved['agent-interviews.json']['records'].items() if r['workspace']!=workspace}
         if 'agent-memory.json' in saved:saved['agent-memory.json']['records']={k:r for k,r in saved['agent-memory.json']['records'].items() if r['workspace']!=workspace}

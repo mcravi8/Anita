@@ -1,7 +1,7 @@
 .brand-logo{display:block;width:28px;height:28px;object-fit:contain;flex-shrink:0;filter:none}
-.connection-mark.branded{position:relative;background:#fff;border:1px solid #eeedf1;color:#8a8491}
+.connection-mark.branded{position:relative;background:var(--card);border:1px solid var(--line);color:var(--text3)}
 .connection-mark.branded>.icon{position:absolute;width:21px;height:21px}
-.connection-mark.branded>.brand-logo{position:relative;width:27px;height:27px;background:#fff}
+.connection-mark.branded>.brand-logo{position:relative;width:27px;height:27px;background:var(--card)}
 .connection-mark.branded:has(>.brand-logo)>.icon{visibility:hidden}
 .provider-symbol>.brand-logo{width:27px;height:27px}
 .provider-row>div.provider-identity{display:flex;flex-direction:row;align-items:center;gap:11px}

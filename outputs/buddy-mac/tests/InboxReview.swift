@@ -25,12 +25,20 @@ import Foundation
         reads=[];_ = try await reviews.review(workspace:workspace,agent:agent,runID:UUID().uuidString,query:"assessment",purpose:"Retry",routine:"daily",maxReads:150,allowed:{access},call:call)
         require(reads.count==106,"uncommitted reads retry after a failed/stopped model run")
         var missingAnalysis=false;do{try reviews.commit(runID:run)}catch{missingAnalysis=true};require(missingAnalysis,"reading bodies alone cannot advance a routine before every source is analyzed")
-        func record(_ result:[String:Any],runID:String) throws {
+        func record(_ result:[String:Any],runID:String,useRunID:Bool=false) throws {
             let c=result["coverage"] as! [String:Any],m=result["messages"] as! [[String:Any]]
-            _ = try reviews.record(runID:runID,workspace:workspace,agent:agent,args:["reviewID":c["id"]!,"findings":m.filter{$0["fullyRead"] as? Bool==true}.map{["messageID":$0["id"]!,"status":"action_required","summary":"Source invitation; completion not established."]}])
+            let saved=try reviews.record(runID:runID,workspace:workspace,agent:agent,args:["reviewID":useRunID ? runID:c["id"]!,"findings":m.filter{$0["fullyRead"] as? Bool==true}.map{["messageID":$0["id"]!,"status":"action_required","summary":"Source invitation; completion not established."]}])
+            require(saved["reviewID"] as? String==c["id"] as? String,"recording returns the actual source review ID")
         }
         var omission=false;do{_ = try reviews.record(runID:run,workspace:workspace,agent:agent,args:["reviewID":coverage["id"]!,"findings":[]])}catch{omission=true};require(omission,"per-message review cannot silently omit a source")
-        try record(report,runID:run)
+        require(report["reviewID"] as? String==coverage["id"] as? String,"the record tool's exact reviewID is explicit at the top of the read result")
+        let receiptFile=reviews.root.appendingPathComponent(run+"-"+(coverage["id"] as! String)+".json"),extraID=UUID().uuidString,extraFile=reviews.root.appendingPathComponent(run+"-"+extraID+".json")
+        var extra=try JSONSerialization.jsonObject(with:Data(contentsOf:receiptFile)) as! [String:Any];extra["id"]=extraID
+        try JSONSerialization.data(withJSONObject:extra).write(to:extraFile)
+        do{try record(report,runID:run,useRunID:true);require(false,"an ambiguous run-ID alias must not guess a source review")}catch{}
+        try FileManager.default.removeItem(at:extraFile)
+        do{_ = try reviews.record(runID:run,workspace:UUID().uuidString,agent:agent,args:["reviewID":run,"findings":[]]);require(false,"run-ID recovery cannot read another workspace's sources")}catch{}
+        try record(report,runID:run,useRunID:true)
         try reviews.commit(runID:run);try reviews.commit(runID:run)
         reads=[];ids += ["new-followup","failed-message"];fail=["failed-message"]
         let day2=UUID().uuidString,second=try await reviews.review(workspace:workspace,agent:agent,runID:day2,query:"assessment",purpose:"Morning",routine:"daily",allowed:{access},call:call)

@@ -57,6 +57,11 @@ import Foundation
         try reopenedBatch.enqueueDue(store:batchQueue,workspace:w,now:wake)
         require(batchQueue.jobs.count==1,"a batch catches up only once after sleep")
         require(batchQueue.jobs.allSatisfy{$0["browserOrigin"] as? String=="https://console.agentmail.to" && $0["browserAgentId"] as? String==a},"the exact website scope reaches scheduled task execution")
+        let occurrence=batchQueue.jobs[0],occurrenceRule=occurrence["routineID"] as! String,newOwner=UUID().uuidString
+        _ = try reopenedBatch.manage(["action":"update","routineID":occurrenceRule,"browserAgentId":newOwner,"browserOrigin":"https://console.agentmail.to"],workspace:w,agent:inbox,requestID:"repair-session",provider:"claude",budget:0.5,now:now)
+        require(reopenedBatch.browserScope(for:occurrence)?["browserAgentId"] as? String==newOwner,"retry can reuse the repaired saved website delegation without copying credentials")
+        var foreignOccurrence=occurrence;foreignOccurrence["agentId"]=a
+        require(reopenedBatch.browserScope(for:foreignOccurrence)==nil,"another agent cannot inherit this routine's website delegation")
         let series=reopenedBatch.routines.first!["routineSeriesID"] as! String
         require(reopenedBatch.routines.allSatisfy{$0["routineSeriesID"] as? String==series},"all daily checks share the same review memory")
         try batchQueue.update(batchQueue.jobs[0]["id"] as! String,["status":"completed","result":"Retain a verified unresolved deadline"])
@@ -65,6 +70,15 @@ import Foundation
         var invalidBatch=plan;invalidBatch["hours"]=[8,8]
         do{_ = try batch.manage(invalidBatch,workspace:w,agent:inbox,requestID:"bad",provider:"claude",budget:0.5,now:now);require(false,"invalid batch rejected")}catch{}
         require(try BuddyRoutineStore(directory:batchRoot).routines.count==7,"failed batches preserve existing schedules")
+        try batchQueue.update(batchQueue.jobs.last!["id"] as! String,["status":"completed","result":"Prior verified findings"])
+        let nextTimes=reopenedBatch.routines.map{$0["nextRun"] as! String},manualRequest=UUID().uuidString
+        let manual=try reopenedBatch.runNow(occurrenceRule,workspace:w,agent:inbox,requestID:manualRequest,store:batchQueue)
+        let sameManual=try reopenedBatch.runNow(occurrenceRule,workspace:w,agent:inbox,requestID:manualRequest,store:batchQueue)
+        require(manual["id"] as? String==sameManual["id"] as? String && batchQueue.jobs.count==3,"explicit run-now requests are idempotent and do not duplicate work")
+        require(manual["previousRoutineResult"] as? String=="Prior verified findings" && manual["routineSeriesID"] as? String==series && manual["inboxQuery"] as? String=="","manual verification keeps routine memory and prior findings")
+        require(reopenedBatch.routines.map{$0["nextRun"] as! String}==nextTimes,"running a saved check now never changes its normal intervals")
+        require(reopenedBatch.routines.first{$0["id"] as? String==occurrenceRule}?["lastTaskID"] as? String==manual["id"] as? String,"prepared results can find the manual run through the saved routine")
+        do{_ = try reopenedBatch.runNow(occurrenceRule,workspace:w,agent:inbox,requestID:UUID().uuidString,store:batchQueue);require(false,"overlapping manual scans rejected")}catch{}
         print("PASS: saved schedule receipt, local timezone/weekdays/DST, deduplication, one wake catch-up, restart idempotency, non-overlap, prior findings, interrupted-run attention and durable pause")
     }
 }

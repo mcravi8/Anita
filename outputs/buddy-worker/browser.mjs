@@ -29,6 +29,14 @@ export async function publicURL(raw, resolver=lookup, testOrigin='') {
   if(!addresses.length||addresses.some(x=>!publicAddress(x.address)))throw Error('Local and private network pages are unavailable in Buddy’s browser.');
   return url.href;
 }
+// A delegated site may refresh its existing Clerk cookie, but the model never
+// gets access to Clerk pages, tokens or a different redirect destination.
+export function sessionRefreshDestination(shared,raw){
+  try{
+    const site=new URL(shared),url=new URL(raw),back=new URL(url.searchParams.get('redirect_url'));
+    return site.protocol==='https:'&&url.protocol==='https:'&&!url.username&&!url.password&&url.hostname==='clerk.'+site.hostname&&url.port===site.port&&url.pathname==='/v1/client/handshake'&&back.origin===site.origin&&!back.username&&!back.password;
+  }catch{return false;}
+}
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const runFile=promisify(execFile);
 export class PrivateBrowser {
@@ -61,7 +69,30 @@ export class PrivateBrowser {
     await this.closeAutomation(); await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);await this.profileLock();
     // Use Chrome's real encrypted profile, never Playwright's mock Keychain/basic password store.
     this.context=await chromium.launchPersistentContext(this.profile,{channel:'chrome',headless:!headed,chromiumSandbox:true,acceptDownloads:false,permissions:[],serviceWorkers:'block',ignoreDefaultArgs:['--password-store=basic','--use-mock-keychain','--disable-sync'],args:['--disable-extensions','--disable-background-networking']});
-    await this.context.route('**/*',async route=>{try{const r=route.request(),url=new URL(await publicURL(r.url(),lookup,this.testOrigin)),payload=r.url()+' '+(r.postData()||'');if(this.sharedOrigin&&r.isNavigationRequest()&&!r.frame().parentFrame()&&!this.googleFlow&&url.origin!==this.sharedOrigin)throw Error('Outside shared website session.');for(const [secret,origin] of this.secretOrigins)if(url.origin!==origin&&(payload.includes(secret)||payload.includes(encodeURIComponent(secret))))throw Error('Private sign-in data cannot be sent to another origin.');if(this.sharedOrigin&&r.isNavigationRequest()&&!r.frame().parentFrame()&&!this.googleFlow){const response=await route.fetch({maxRedirects:0});const location=response.headers().location;if(location&&response.status()>=300&&response.status()<400)this.assertScope(new URL(location,r.url()).href);await route.fulfill({response});}else await route.continue();}catch{await route.abort('blockedbyclient');}});
+    await this.context.route('**/*',async route=>{
+      const request=route.request();
+      let navigation=request.isNavigationRequest();
+      if(navigation){try{navigation=!request.frame().parentFrame();}catch{/* A popup's first request precedes its frame. Treat it as top-level. */}}
+      try{
+        const url=new URL(await publicURL(request.url(),lookup,this.testOrigin)),payload=request.url()+' '+(request.postData()||'');
+        if(this.sharedOrigin&&navigation&&!this.googleFlow&&url.origin!==this.sharedOrigin&&!(this.sessionRefresh&&sessionRefreshDestination(this.sharedOrigin,url.href)))throw Error('Outside shared website session.');
+        for(const [secret,origin] of this.secretOrigins)if(url.origin!==origin&&(payload.includes(secret)||payload.includes(encodeURIComponent(secret))))throw Error('Private sign-in data cannot be sent to another origin.');
+        if(this.sharedOrigin&&navigation&&!this.googleFlow){
+          const response=await route.fetch({maxRedirects:0}),location=response.headers().location;
+          if(location&&response.status()>=300&&response.status()<400){
+            const destination=new URL(location,request.url());
+            if(destination.origin!==this.sharedOrigin){
+              if(url.origin!==this.sharedOrigin||!sessionRefreshDestination(this.sharedOrigin,destination.href)||(this.sessionRefreshes||0)>=2)throw Error('Website redirected outside the delegated session to '+destination.origin);
+              this.sessionRefresh=true;this.sessionRefreshes=(this.sessionRefreshes||0)+1;
+            }else if(url.origin!==this.sharedOrigin)this.sessionRefresh=false;
+          }
+          await route.fulfill({response});
+        }else await route.continue();
+      }catch(error){
+        if(navigation)this.blockedNavigation=String(error.message||error).split('\n')[0].replace(/https?:\/\/[^\s)]+/g,raw=>{try{return new URL(raw).origin;}catch{return '[website]';}}).slice(0,800);
+        await route.abort('blockedbyclient');
+      }
+    });
     if(!headed)this.context.on('page',p=>{if(p===this.page)return;if(this.googleFlow&&!this.googleFlow.popup){this.googleFlow.popup=p;return;}p.close().catch(()=>{});});
     this.page=this.context.pages()[0]||await this.context.newPage();this.page.setDefaultTimeout(12000);
     this.page.on('dialog',dialog=>dialog.dismiss().catch(()=>{}));
@@ -99,7 +130,7 @@ export class PrivateBrowser {
     this.snapshot={id:randomUUID(),signature:await this.signature(),url:this.page.url()};
     return this.scrub({snapshotId:this.snapshot.id,url:this.safeURL(),title:await this.page.title(),text:(await this.page.locator('body').innerText().catch(()=>'' )).slice(0,26000),controls});
   }
-  async navigate(url){this.assertScope(url);await this.ready();await this.page.goto(await publicURL(url,lookup,this.testOrigin),{waitUntil:'domcontentloaded',timeout:30000});return this.read();}
+  async navigate(url){this.assertScope(url);await this.ready();this.blockedNavigation=null;try{await this.page.goto(await publicURL(url,lookup,this.testOrigin),{waitUntil:'domcontentloaded',timeout:30000});}catch(error){if(this.blockedNavigation)throw Error('Website navigation blocked: '+this.blockedNavigation);throw error;}return this.read();}
   async prepare(args){
     await this.ready();this.assertScope();
     if((await this.privacy()).private)throw Error('This sign-in step is private. Request buddy_browser_signin instead of reading or filling credentials.');

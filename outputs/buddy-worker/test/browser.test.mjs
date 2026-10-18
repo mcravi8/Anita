@@ -1,11 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {publicAddress,publicURL,PrivateBrowser} from '../browser.mjs';
+import {publicAddress,publicURL,PrivateBrowser,sessionRefreshDestination} from '../browser.mjs';
 import {mkdtemp,rm,symlink,writeFile,readFile,chmod} from 'node:fs/promises';
 import {tmpdir,hostname} from 'node:os';
 import {join} from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+
+test('delegated Clerk refresh only permits the exact hosted handshake returning to the same website',()=>{
+ const origin='https://console.agentmail.to';
+ const handshake=back=>'https://clerk.console.agentmail.to/v1/client/handshake?redirect_url='+encodeURIComponent(back)+'&__session=private-fixture-token';
+ assert.equal(sessionRefreshDestination(origin,handshake(origin+'/dashboard')),true);
+ for(const raw of [handshake('https://other.example/'),handshake('https://console.agentmail.to.evil.example/'),handshake('http://console.agentmail.to/'),handshake(origin).replace('/handshake','/sign-in'),handshake(origin).replace('clerk.console.agentmail.to','attacker.example'),handshake(origin).replace('https://clerk','http://clerk'),handshake(origin).replace('clerk.console','user:password@clerk.console')])assert.equal(sessionRefreshDestination(origin,raw),false,raw);
+ assert.equal(sessionRefreshDestination(origin,'https://clerk.console.agentmail.to/v1/client/handshake'),false);
+});
 import {createServer} from 'node:http';
 test('private, mapped IPv6 and ambiguous network destinations are rejected',async()=>{
   for(const ip of ['127.0.0.1','10.2.3.4','172.16.2.1','192.168.0.1','169.254.169.254','100.64.0.1','0.0.0.0','224.0.0.1','::1','fc00::1','::ffff:127.0.0.1','2001:db8::1'])assert.equal(publicAddress(ip),false,ip);

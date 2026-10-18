@@ -135,6 +135,24 @@ import AppKit
         let observed=try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"detail","taskId":claudeBrowser["id"]!])["task"] as! [String:Any]
         let browserEvents=observed["events"] as? [[String:Any]] ?? []
         require(browserEvents.contains{$0["tool"] as? String=="buddy_browser" && $0["status"] as? String=="completed"},"ordinary Claude browser calls have bounded native activity receipts")
+        let checkpointBrowser=try await computer(["action":"start","title":"Inbox checkpoint fixture","goal":"BROWSER_CHECKPOINT_FIXTURE"],requestID:"browser-checkpoint")["task"] as! [String:Any],checkpointID=checkpointBrowser["id"] as! String
+        var checkpointAccounted=false
+        for _ in 0..<120 {
+            let value=try await computer(["action":"status","taskId":checkpointID])["task"] as! [String:Any]
+            if value["status"] as? String=="waiting_user",value["reservedBudgetUSD"] as? Double==0,(value["spentUSD"] as? Double ?? 0)>0 {
+                require(abs((value["remainingBudgetUSD"] as? Double ?? 0)-0.47)<0.0001,"normal checkpoint returns unused Claude allowance");checkpointAccounted=true;break
+            }
+            try await Task.sleep(nanoseconds:50_000_000)
+        }
+        require(checkpointAccounted,"browser checkpoint lets the SDK return actual usage instead of being killed")
+        _ = try await computer(["action":"continue","taskId":checkpointID,"goal":"CONTINUE_CHECKPOINT with the user's missing detail."],requestID:"checkpoint-continue")
+        var checkpointFinished=false
+        for _ in 0..<120 {
+            let value=try await computer(["action":"status","taskId":checkpointID])["task"] as! [String:Any]
+            if value["status"] as? String=="completed" {require(abs((value["spentUSD"] as? Double ?? 0)-0.05)<0.0001,"continuation preserves accumulated actual costs");checkpointFinished=true;break}
+            try await Task.sleep(nanoseconds:50_000_000)
+        }
+        require(checkpointFinished,"ordinary browser task resumes from its confirmed unused allowance without another budget request")
         let rpc=BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[8]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]));try rpc.launch("fixture")
         defer{rpc.close()};let began=Date()
         do {_ = try await rpc.request(["command":"silent"],timeout:0.05);require(false,"silent RPC must time out")}catch{}

@@ -24,6 +24,31 @@ import Foundation
         var passwordOnly=googlePlan;passwordOnly["googleAvailable"]=false;require(!BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:passwordOnly,jobs:[approved]),"only an observed Google button gets automatic reuse")
         for status in ["pending","declined","uncertain"] {var review=approval;review["status"]=status;var wrong=approved;wrong["reviews"]=[review];require(!BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:googlePlan,jobs:[wrong]),"unconfirmed or declined reviews cannot authorize login")}
         let store = try BuddyWorkerStore(directory: root.appendingPathComponent("Worker"))
+        let emailRoot=root.appendingPathComponent("MailCompletion"),emailFiles=emailRoot.appendingPathComponent("Files")
+        try FileManager.default.createDirectory(at:emailFiles,withIntermediateDirectories:true)
+        var mail:[String:Any]=["kind":"email","browserOrigin":"https://console.agentmail.to","browserError":"Website navigation blocked: outside delegated session"]
+        require(BuddyWorkerMailCompletion.issue(mail,directory:emailRoot,startedAt:now,now:now)==mail["browserError"] as? String,"a blocked mailbox cannot be reported as a completed scan")
+        let execution=UUID().uuidString,receiptTime=ISO8601DateFormatter().string(from:now)
+        mail["executionRunID"]=execution;mail["browserPages"]=[["url":"https://console.agentmail.to/inboxes","runID":execution,"at":receiptTime]]
+        require(BuddyWorkerMailCompletion.issue(mail,directory:emailRoot,startedAt:now,now:now) != nil,"an inbox list alone is not a finished mailbox review")
+        var ledger:[String:Any]=["checkedAt":receiptTime,"mailboxURL":"https://console.agentmail.to/inboxes","timestampSource":"native-browser","nativeRunID":execution,"complete":false,"messages":[[String:Any]]()]
+        let ledgerFile=emailFiles.appendingPathComponent("agentmail-review.json")
+        try JSONSerialization.data(withJSONObject:ledger).write(to:ledgerFile)
+        require(BuddyWorkerMailCompletion.issue(mail,directory:emailRoot,startedAt:now,now:now) != nil,"a partial mailbox ledger stays incomplete")
+        ledger["complete"]=true;try JSONSerialization.data(withJSONObject:ledger).write(to:ledgerFile)
+        require(BuddyWorkerMailCompletion.issue(mail,directory:emailRoot,startedAt:now,now:now)==nil,"an observed mailbox with a current completed ledger can finish")
+        ledger["checkedAt"]=ISO8601DateFormatter().string(from:now.addingTimeInterval(-3600));try JSONSerialization.data(withJSONObject:ledger).write(to:ledgerFile)
+        require(BuddyWorkerMailCompletion.issue(mail,directory:emailRoot,startedAt:now,now:now) != nil,"copying an old ledger cannot pass as a fresh mailbox check")
+        let mailboxURL="https://console.agentmail.to/dashboard/inboxes/chief%40agentmail.to",stamp=ISO8601DateFormatter().string(from:now)
+        mail["id"]=UUID().uuidString;mail["browserPages"]=[["url":mailboxURL,"at":stamp,"runID":execution]]
+        ledger["mailboxURL"]=mailboxURL;ledger["checkedAt"]=ISO8601DateFormatter().string(from:now.addingTimeInterval(3600))
+        let normalized=BuddyWorkerMailCompletion.normalizeLedger(["path":"agentmail-review.json","content":String(data:try JSONSerialization.data(withJSONObject:ledger),encoding:.utf8)!],job:mail,startedAt:now)
+        let stamped=try JSONSerialization.jsonObject(with:Data((normalized["content"] as! String).utf8)) as! [String:Any]
+        require(stamped["checkedAt"] as? String==stamp && stamped["timestampSource"] as? String=="native-browser","the actual browser receipt replaces guessed model timestamps")
+        try JSONSerialization.data(withJSONObject:stamped).write(to:ledgerFile)
+        require(BuddyWorkerMailCompletion.issue(mail,directory:emailRoot,startedAt:now,now:now)==nil,"a native stamped receipt completes only its actual execution")
+        mail["executionRunID"]=UUID().uuidString
+        require(BuddyWorkerMailCompletion.issue(mail,directory:emailRoot,startedAt:now,now:now) != nil,"a prior attempt's receipt cannot certify a resumed scan")
         let first = try store.create(workspace: workspace, agent: agent, requestId: "once", title: "Fixture task", goal: "Research only", kind: "research", provider: "chatgpt", budget: 0), id = first["id"] as! String
         let duplicate = try store.create(workspace: workspace, agent: agent, requestId: "once", title: "Other title", goal: "Other brief", kind: "research", provider: "chatgpt", budget: 0)
         require(duplicate["id"] as? String == id && store.jobs.count == 1, "unknown response retry is idempotent")

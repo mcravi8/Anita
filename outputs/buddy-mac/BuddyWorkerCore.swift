@@ -33,6 +33,23 @@ enum BuddyWorkerLiveness {
     }
 }
 
+enum BuddyWorkerMailCompletion {
+    static func normalizeLedger(_ args:[String:Any],job:[String:Any],startedAt:Date)->[String:Any] {
+        guard args["path"] as? String=="agentmail-review.json",args["folderId"]==nil || args["folderId"] as? String==job["id"] as? String,let execution=job["executionRunID"] as? String,let content=args["content"] as? String,let data=content.data(using:.utf8),data.count<=256000,var ledger=try? JSONSerialization.jsonObject(with:data) as? [String:Any],let url=ledger["mailboxURL"] as? String,let page=(job["browserPages"] as? [[String:Any]])?.last(where:{$0["url"] as? String==url && $0["runID"] as? String==execution}),let stamp=page["at"] as? String,let time=ISO8601DateFormatter().date(from:stamp),time>=startedAt.addingTimeInterval(-1) else{return args}
+        // Timestamps come from the browser receipt, never the model's clock.
+        ledger["checkedAt"]=stamp;ledger["timestampSource"]="native-browser";ledger["nativeRunID"]=execution
+        guard let saved=try? JSONSerialization.data(withJSONObject:ledger,options:[.sortedKeys]),let text=String(data:saved,encoding:.utf8) else{return args}
+        var result=args;result["content"]=text;return result
+    }
+    static func issue(_ job:[String:Any],directory:URL,startedAt:Date,now:Date=Date())->String? {
+        guard job["kind"] as? String=="email",job["browserOrigin"] as? String=="https://console.agentmail.to" else{return nil}
+        guard !(job["browserPages"] as? [[String:Any]] ?? []).isEmpty else{return (job["browserError"] as? String).flatMap{$0.isEmpty ? nil:$0} ?? "AgentMail was not checked. No authenticated mailbox page was read."}
+        let file=directory.appendingPathComponent("Files/agentmail-review.json")
+        guard let data=try? Data(contentsOf:file),data.count<=256000,let ledger=try? JSONSerialization.jsonObject(with:data) as? [String:Any],ledger["complete"] as? Bool==true,ledger["timestampSource"] as? String=="native-browser",let execution=job["executionRunID"] as? String,ledger["nativeRunID"] as? String==execution,let checked=ledger["checkedAt"] as? String,let url=ledger["mailboxURL"] as? String,(job["browserPages"] as? [[String:Any]] ?? []).contains(where:{$0["runID"] as? String==execution && $0["url"] as? String==url && $0["at"] as? String==checked}),let time=ISO8601DateFormatter().date(from:checked),time>=startedAt.addingTimeInterval(-1),time<=now.addingTimeInterval(120),ledger["messages"] is [[String:Any]] else{return "AgentMail review is incomplete. The scan has not been marked successful; its source ledger must be finished."}
+        return nil
+    }
+}
+
 enum BuddyWorkerSignInPolicy {
     static func reuseGoogle(job:[String:Any],plan:[String:Any],jobs:[[String:Any]])->Bool {
         guard plan["mode"] as? String=="signin",plan["googleAvailable"] as? Bool==true,let origin=plan["origin"] as? String,let url=URL(string:origin),url.scheme=="https",url.host != nil,let workspace=job["workspace"] as? String,let agent=(job["browserAgentId"] ?? job["agentId"]) as? String,job["browserOrigin"]==nil || job["browserOrigin"] as? String==origin else{return false}
@@ -236,7 +253,9 @@ enum BuddyWorkerWire {
                 if index==nil,let model,!model.isEmpty {value["model"]=model}
                 for field in ["title","goal","hour","minute","weekdays","timeZone","query","kind","browserAgentId","browserOrigin"] { if let v=args[field],!(v is NSNull) { value[field]=v } }
                 try Self.validate(value)
-                value["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:value));value["status"]="active";value["lastError"]=""
+                let timingChanged=index.map {i in ["hour","minute","weekdays","timeZone"].contains{field in !NSDictionary(dictionary:["value":routines[i][field]!]).isEqual(to:["value":value[field]!])}} ?? true
+                if timingChanged {value["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:value))}
+                if index==nil {value["status"]="active";value["lastError"]=""}
                 // Repeated tool calls cannot create duplicate copies of the exact same routine.
                 if action=="create",let existing=routines.first(where:{r in ["workspace","agentId","title","goal","query","timeZone","browserAgentId","browserOrigin"].allSatisfy{r[$0] as? String==value[$0] as? String} && r["hour"] as? Int==value["hour"] as? Int && r["minute"] as? Int==value["minute"] as? Int && r["weekdays"] as? [Int]==value["weekdays"] as? [Int]}) { return ["saved":true,"routine":existing] }
                 if let index { routines[index]=value } else { routines.append(value) }
@@ -249,6 +268,26 @@ enum BuddyWorkerWire {
             if action=="resume" { routines[i]["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:routines[i])) }
             try persist();return ["saved":true,"routine":routines[i]]
         } catch { routines=old;try? persist();throw error }
+    }
+    func browserScope(for job:[String:Any])->[String:Any]? {
+        guard let rule=routines.first(where:{$0["id"] as? String==job["routineID"] as? String && $0["workspace"] as? String==job["workspace"] as? String && $0["agentId"] as? String==job["agentId"] as? String}),let owner=rule["browserAgentId"] as? String,let origin=rule["browserOrigin"] as? String else{return nil}
+        return ["browserAgentId":owner,"browserOrigin":origin]
+    }
+    func runNow(_ id:String,workspace:String,agent:String,requestID:String,store:BuddyWorkerStore) throws -> [String:Any] {
+        guard UUID(uuidString:requestID) != nil,let index=routines.firstIndex(where:{$0["id"] as? String==id && $0["workspace"] as? String==workspace && $0["agentId"] as? String==agent}),routines[index]["status"] as? String=="active" else{throw BuddyWorkerFailure(message:"Choose an active saved routine to run now.")}
+        let rule=routines[index]
+        let request="routine:manual:"+id+":"+requestID
+        if let existing=store.jobs.first(where:{$0["workspace"] as? String==workspace && $0["requestId"] as? String==request}) {return existing}
+        let series=rule["routineSeriesID"] as? String
+        let prior=store.jobs.last{$0["workspace"] as? String==workspace && $0["agentId"] as? String==agent && ($0["routineID"] as? String==id || series != nil && $0["routineSeriesID"] as? String==series)}
+        guard prior==nil || BuddyWorkerStore.terminal.contains(prior?["status"] as? String ?? "") else{throw BuddyWorkerFailure(message:"This routine already has unfinished work. Open its current task instead of starting another scan.")}
+        let job=try store.create(workspace:workspace,agent:agent,requestId:request,title:rule["title"] as! String,goal:rule["goal"] as! String,kind:rule["kind"] as! String,provider:rule["provider"] as! String,budget:rule["budgetUSD"] as! Double,model:rule["model"] as? String)
+        var fields:[String:Any]=["routineID":id,"inboxQuery":rule["query"] ?? "","previousRoutineResult":prior?["result"] ?? "","manualRun":true]
+        for key in ["routineSeriesID","browserAgentId","browserOrigin"] {if let value=rule[key]{fields[key]=value}}
+        let saved=try store.update(job["id"] as! String,fields)
+        let old=routines;routines[index]["lastTaskID"]=saved["id"]
+        do{try persist()}catch{routines=old;throw error}
+        return saved
     }
     func resumeBlockedBy(_ job:[String:Any],now:Date=Date()) throws {
         let original=routines

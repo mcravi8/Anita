@@ -86,5 +86,44 @@ import AppKit
         _ = try BuddyAISettings(support:support).update(workspace,enabled:("claude",false))
         do {_ = try await call(["action":"start","title":"Must not run","goal":"Claude is disconnected."],requestID:"disconnected");require(false,"disconnected coding must fail")}catch{}
         print("PASS: coding enqueue, real native file/command/preview, persistent SDK resume, budget accounting, exact internet-command review, and disconnected-provider rejection")
+        _ = try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"pauseAll","paused":true])
+        func computer(_ args:[String:Any],owner:String?=nil,requestID:String="ordinary-website-request") async throws -> [String:Any] {
+            try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"computer","agentId":owner ?? agent,"requestId":requestID,"arguments":args])
+        }
+        let ordinary=try await computer(["action":"start","title":"Create AgentMail inbox","goal":"Open AgentMail and create an inbox in my existing account."])["task"] as! [String:Any],browserID=ordinary["id"] as! String
+        require(ordinary["status"] as? String=="queued" && ordinary["provider"] as? String=="chatgpt","ordinary website request queues without background wording")
+        let sameBrowser=try await computer(["action":"start","title":"Create AgentMail inbox","goal":"Open AgentMail and create an inbox in my existing account."])["task"] as! [String:Any]
+        require(sameBrowser["id"] as? String==browserID,"unknown browser enqueue response is safe to retry")
+        let listed=try await computer(["action":"status"])["tasks"] as! [[String:Any]]
+        require(listed.contains{$0["id"] as? String==browserID} && listed.allSatisfy{$0["goal"]==nil && $0["reviews"]==nil},"task status exposes own non-coding records without review or brief payloads")
+        let inspected=try await computer(["action":"status","taskId":browserID])["task"] as! [String:Any]
+        require(inspected["status"] as? String=="queued" && inspected["pendingReviewCount"] as? Int==0,"queued receipt remains distinct from completed work")
+        do {_ = try await computer(["action":"continue","taskId":browserID,"goal":"Do it again"]);require(false,"queued task must not be duplicated by continuation")}catch{}
+        _ = try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"pause","taskId":browserID])
+        _ = try await computer(["action":"continue","taskId":browserID,"goal":"Use chief as the requested address."])
+        let continued=try await computer(["action":"status","taskId":browserID])["task"] as! [String:Any]
+        require((continued["updates"] as? [String])?.last=="Use chief as the requested address.","ordinary follow-up reuses the same task with missing details")
+        _ = try await computer(["action":"cancel","taskId":browserID])
+        _ = try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"pauseAll","paused":true])
+        do {_ = try await computer(["action":"status","taskId":codingID]);require(false,"browser tool cannot claim coding sessions")}catch{}
+        let second=UUID().uuidString
+        var fixture=try JSONSerialization.jsonObject(with:Data(contentsOf:support.appendingPathComponent("workspace.json"))) as! [String:Any]
+        var agents=fixture["agents"] as! [[String:Any]];agents.append(["id":second,"name":"Other","tools":[:]]);fixture["agents"]=agents
+        try JSONSerialization.data(withJSONObject:fixture).write(to:support.appendingPathComponent("workspace.json"),options:.atomic)
+        for action in ["status","cancel","continue"] {
+            do {_ = try await computer(["action":action,"taskId":browserID,"goal":"Not mine"],owner:second);require(false,"browser tool cannot inspect or control another agent's task")}catch{}
+        }
+        agents[0]["tools"]=["desktop":false];fixture["agents"]=agents;try JSONSerialization.data(withJSONObject:fixture).write(to:support.appendingPathComponent("workspace.json"),options:.atomic)
+        do {_ = try await computer(["action":"start","title":"Denied","goal":"Open a website"],requestID:"denied");require(false,"revoked browser permission prevents enqueue")}catch{}
+        agents[0]["tools"]=[String:Bool]();fixture["agents"]=agents;try JSONSerialization.data(withJSONObject:fixture).write(to:support.appendingPathComponent("workspace.json"),options:.atomic)
+        _ = try BuddyAISettings(support:support).update(workspace,enabled:("claude",true))
+        _ = try BuddyAISettings(support:support).update(workspace,provider:"claude")
+        try BuddyAgentModels(support:support).set(workspace:workspace,agent:agent,selection:.initial("claude"))
+        _ = try BuddyAISettings(support:support).update(workspace,enabled:("chatgpt",false))
+        let claudeBrowser=try await computer(["action":"start","title":"Claude website task","goal":"Open AgentMail in my browser."],requestID:"claude-browser")["task"] as! [String:Any]
+        require(claudeBrowser["provider"] as? String=="claude" && claudeBrowser["status"] as? String=="queued","Claude website enqueue works with ChatGPT disconnected")
+        _ = try await computer(["action":"cancel","taskId":claudeBrowser["id"]!])
+        print("PASS: ordinary browser-task IPC, selected provider, idempotency, status, continuation, cancellation, owner isolation, revoked permissions and Claude without ChatGPT")
+
     }
 }

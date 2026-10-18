@@ -22,6 +22,17 @@ import Foundation
         var options=BuddyTurnOptions();options.actorId=agent;options.fileScope=try primary.projectFiles.scope(workspace);options.history="Earlier ChatGPT answer"
         func send(_ text:String,_ options:BuddyTurnOptions) throws->String {let id=UUID().uuidString;_ = try router.send(["runId":id,"key":key,"agent":["name":"Check","role":"Provider fixture","description":"Inert verification"],"text":text],options:options);return id}
         func terminal(_ id:String)->Bool{events.contains{$0["type"] as? String == "run" && $0["runId"] as? String == id && ["completed","failed","stopped"].contains($0["status"] as? String ?? "")}}
+        var browserOptions=options;browserOptions.extraTools=BuddyWorkerClient.tools;browserOptions.instructions=BuddyWorkerClient.taskGuidance
+        browserOptions.authorizedUserText="Create an inbox in my AgentMail account."
+        var computerCalls=0
+        primary.extraToolHandler={tool,args,context in
+            require(tool=="buddy_computer_task" && args["action"] as? String=="start" && context["agentId"] as? String==agent && context["authorizedUserText"] as? String=="Create an inbox in my AgentMail account.","ordinary action keeps its actual user brief and actor across providers")
+            computerCalls += 1;return ["task":["id":"fixture-browser","status":"queued","title":"Create AgentMail inbox"]]
+        }
+        _ = try settings.update(workspace,enabled:("chatgpt",false))
+        let browserClaude=try send("COMPUTER_TASK",browserOptions);await wait{terminal(browserClaude)}
+        require(computerCalls==1 && events.contains{$0["runId"] as? String==browserClaude && $0["status"] as? String=="completed"},"Claude routes its native browser task with ChatGPT disconnected")
+        _ = try settings.update(workspace,enabled:("chatgpt",true))
         let first=try send("HISTORY_CHECK",options);await wait{terminal(first)}
         require(events.contains{$0["runId"] as? String == first && $0["text"] as? String == "Claude fixture answer" && $0["status"] as? String == "completed"},"selected Claude actually answers through Claude bridge with real prior history")
         let second=try send("HISTORY_CHECK second message",options);await wait{terminal(second)}
@@ -44,6 +55,13 @@ import Foundation
         _ = try await router.select(workspace:workspace,provider:"chatgpt",budget:nil)
         let group2=try send("SCHEMA_CLAUDE",grouped);await wait{terminal(group2)}
         require(events.contains{$0["runId"] as? String == group2 && ($0["text"] as? String)?.contains("\"ok\"") == true},"in-flight group keeps its provider and structured planning output")
+        primary.extraToolHandler={tool,args,context in
+            require(tool=="buddy_computer_task" && context["authorizedUserText"] as? String=="Create an inbox in my AgentMail account.","ChatGPT browser tool keeps ordinary current request context")
+            computerCalls += 1;return ["task":["id":"fixture-browser-gpt","status":"queued"]]
+        }
+        let browserGPT=try send("COMPUTER_TASK",browserOptions);await wait{terminal(browserGPT)}
+        require(computerCalls==2 && events.contains{$0["runId"] as? String==browserGPT && $0["status"] as? String=="completed"},"ChatGPT routes the same native browser task")
+        primary.extraToolHandler={tool,args,context in return ["saved":true,"agentId":agent,"proactive":true]}
         let gpt=try send("GPT_CHECK",options);await wait{terminal(gpt)}
         require(events.contains{$0["runId"] as? String == gpt && $0["text"] as? String == "ChatGPT fixture answer" && $0["status"] as? String == "completed"},"new turns use selected ChatGPT without changing history")
         let fakeGPTProactive=try send("Keep me updated.",proactiveOptions);await wait{terminal(fakeGPTProactive)}

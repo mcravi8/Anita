@@ -7,6 +7,11 @@ for line in sys.stdin:
  config=json.loads(line);assert config['command']=='start' and config['apiKey']=='fixture-key'
  assert 0.1<=config['budget']<=10 and all(t['name'].startswith('buddy_') for t in config['tools'])
  prompt=config['prompt']
+ if 'COMPUTER_TASK' in prompt:
+  assert 'buddy_computer_task' in [t['name'] for t in config['tools']]
+  assert 'user does not need to say' in config['instructions']
+  out({'type':'call','id':'browser-1','tool':'buddy_computer_task','arguments':{'action':'start','title':'Create AgentMail inbox','goal':'Open AgentMail and create the requested inbox in the existing account.'}})
+  result=json.loads(sys.stdin.readline());assert result['result']['task']['status']=='queued',result
  if 'BUILD_TEAM_CLAUDE' in prompt:
   out({'type':'call','id':'team-1','tool':'buddy_build_team','arguments':{'action':'create','teamName':'Claude research','objective':'Research public evidence','reason':'Source gathering','authorizationQuote':'Create a research team.','newAgents':[{'name':'Claude scout','role':'Researcher','description':'Research primary sources and ask only for missing scope.','avatarShape':'clover','avatarColor':'mint'}]}})
   result=json.loads(sys.stdin.readline());assert result['result'].get('created'),result

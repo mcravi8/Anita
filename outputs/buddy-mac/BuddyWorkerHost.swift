@@ -108,6 +108,28 @@ import Darwin
         guard request["workspace"] as? String == current, UUID(uuidString: current) != nil else { throw BuddyWorkerFailure(message: "This workspace is no longer active.") }
         let operation = request["operation"] as? String ?? "status"
         if operation=="team" {return try monitor.handle(request["arguments"] as? [String:Any] ?? [:],state:state(),jobs:store.jobs,actor:request["actorId"] as? String,authorizedText:request["authorizedText"] as? String ?? "")}
+        if operation=="computer" {
+            let agentID=request["agentId"] as? String ?? "",a=try agent(agentID,workspace:current),args=request["arguments"] as? [String:Any] ?? [:],action=args["action"] as? String ?? ""
+            if action=="status" {
+                if let id=args["taskId"] as? String {
+                    let job=try store.job(id)
+                    guard job["workspace"] as? String==current,job["agentId"] as? String==agentID,job["kind"] as? String != "coding" else {throw BuddyWorkerFailure(message:"This task belongs to another agent or is a coding session.")}
+                    return ["task":chatTask(job)]
+                }
+                return ["tasks":store.jobs.filter{$0["workspace"] as? String==current && $0["agentId"] as? String==agentID && $0["kind"] as? String != "coding"}.map{job in ["id":job["id"] ?? "","title":job["title"] ?? "","status":job["status"] ?? "","progress":job["progress"] ?? "","provider":job["provider"] ?? "","model":job["model"] ?? ""]}]
+            }
+            if action=="start" {
+                guard (a["tools"] as? [String:Bool])?["desktop"] != false,(a["tools"] as? [String:Bool])?["web"] != false else {throw BuddyWorkerFailure(message:"This agent's browser or web access is off.")}
+                return try await handle(["operation":"create","workspace":current,"agentId":agentID,"requestId":request["requestId"] ?? "","title":args["title"] ?? "","goal":args["goal"] ?? "","kind":"general"])
+            }
+            guard ["continue","cancel"].contains(action),let id=args["taskId"] as? String else {throw BuddyWorkerFailure(message:"Choose start, status, continue or cancel with a task ID.")}
+            let job=try store.job(id)
+            guard job["workspace"] as? String==current,job["agentId"] as? String==agentID,job["kind"] as? String != "coding" else {throw BuddyWorkerFailure(message:"This task belongs to another agent or is a coding session.")}
+            if action=="cancel" {await stop(id,status:"cancelled");return ["task":chatTask(try store.job(id))]}
+            guard permitted(job,tool:"desktop"),permitted(job,tool:"web") else {throw BuddyWorkerFailure(message:"Reconnect this task's provider and enable browser access before continuing.")}
+            guard ["paused","failed","interrupted","waiting_user"].contains(job["status"] as? String ?? ""),let goal=args["goal"] as? String,!goal.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else {throw BuddyWorkerFailure(message:"This task is not paused, or needs the user's missing details. Check its current state instead of starting it again.")}
+            return try await handle(["operation":"resume","workspace":current,"taskId":id,"message":goal])
+        }
         if operation=="coding" {
             let agentID=request["agentId"] as? String ?? "",a=try agent(agentID,workspace:current),args=request["arguments"] as? [String:Any] ?? [:],action=args["action"] as? String ?? ""
             if action=="status" {
@@ -130,7 +152,7 @@ import Darwin
             _ = try store.update(id,["updates":updates]);let result=try store.resume(id,continuingCoding:true);return ["task":result]
         }
         if operation == "status" {
-            let jobs = store.jobs.filter { $0["workspace"] as? String == current }.map { job -> [String: Any] in var out = job; out.removeValue(forKey: "goal"); out.removeValue(forKey: "events"); out.removeValue(forKey: "reviews"); out.removeValue(forKey: "result"); return out }
+            let jobs = store.jobs.filter { $0["workspace"] as? String == current }.map { job -> [String: Any] in var out = job; out["attentionKey"]=attentionKey(job); out.removeValue(forKey: "goal"); out.removeValue(forKey: "events"); out.removeValue(forKey: "reviews"); out.removeValue(forKey: "result"); return out }
             return ["online": true, "paused": store.paused, "tasks": jobs, "routines":routines.routines.filter{$0["workspace"] as? String==current}, "scheduleError":(try? String(contentsOf:root.appendingPathComponent("schedule-error.txt"),encoding:.utf8)) ?? "", "privateBrowser": privateAgent.map { ["agentId": $0, "taskId": privateTask as Any? ?? NSNull()] } as Any? ?? NSNull(), "claudeConnected": try providerSettings.current(current).claudeEnabled && BuddyClaudeKey.read(current) != nil, "defaultProvider": try providerSettings.current(current).provider, "agentModels":try agentModels.ensure(workspace:current,agents:((try state())["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String},provider:providerSettings.current(current).provider).mapValues(\.payload), "claudeBudgetUSD": try providerSettings.current(current).claudeBudgetUSD, "nodeAvailable": BuddyWorkerProcess.runtime != nil, "computer": "This Mac · private browser and files"]
         }
         if operation == "openGoogle" {
@@ -190,7 +212,7 @@ import Darwin
         let id = request["taskId"] as? String ?? "", job = try store.job(id)
         guard job["workspace"] as? String == current else { throw BuddyWorkerFailure(message: "This task belongs to another workspace.") }
         if operation == "detail" {
-            var value = job; value["reviews"] = mergedReviews(job)
+            var value = job; value["reviews"] = mergedReviews(job); value["attentionKey"]=attentionKey(job)
             if permitted(job, tool: "projectFiles"), let scope = try? files(job).scope(current), let listed = try? files(job).list(scope) { value["fileList"] = listed["files"] ?? [] }
             return ["task": value]
         }
@@ -238,6 +260,18 @@ import Darwin
             return try f.preview(scope, path: path, page: request["page"] as? Int ?? 1)
         }
         throw BuddyWorkerFailure(message: "Unsupported worker request.")
+    }
+    private func attentionKey(_ job:[String:Any])->String {
+        let ids=mergedReviews(job).filter{$0["status"] as? String=="pending"}.compactMap{$0["id"] as? String}.sorted()
+        return ids.isEmpty ? (job["progress"] as? String ?? "") : ids.joined(separator:":")
+    }
+    private func chatTask(_ job:[String:Any])->[String:Any] {
+        var value=job
+        for key in ["events","reviews","signInPermission","authorization","codingSessionID"] {value.removeValue(forKey:key)}
+        value["attentionKey"]=attentionKey(job)
+        value["pendingReviewCount"]=mergedReviews(job).filter{$0["status"] as? String=="pending"}.count
+        value["instruction"]="Use actual task state. Queued/running is not complete. Native reviews and private sign-in are handled by the user in this task; never approve or enter credentials through chat. Before retrying any uncertain external action, reconcile the website and saved receipts."
+        return value
     }
     private func mergedReviews(_ job: [String: Any]) -> [[String: Any]] {
         var reviews = job["reviews"] as? [[String: Any]] ?? []

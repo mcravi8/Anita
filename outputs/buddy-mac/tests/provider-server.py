@@ -24,7 +24,10 @@ for line in sys.stdin:
   seq+=1;r={'thread':{'id':'thread-'+str(seq)}}
  elif method=='turn/start':
   seq+=1;turn='turn-'+str(seq);tid=p['threadId'];out({'id':m['id'],'result':{'turn':{'id':turn,'status':'inProgress'}}})
-  if 'BUILD_TEAM_GPT' in str(p.get('input')):
+  if 'COMPUTER_TASK' in str(p.get('input')):
+   rid='browser-'+str(seq);calls[rid]=(tid,turn)
+   out({'id':rid,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':rid,'tool':'buddy_computer_task','arguments':{'action':'start','title':'Create AgentMail inbox','goal':'Open AgentMail and create the requested inbox in the existing account.'}}})
+  elif 'BUILD_TEAM_GPT' in str(p.get('input')):
    rid='team-'+str(seq);calls[rid]=(tid,turn)
    out({'id':rid,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':rid,'tool':'buddy_build_team','arguments':{'action':'create','teamName':'GPT research','objective':'Research public evidence','reason':'Independent source review','authorizationQuote':'Create a research team.','newAgents':[{'name':'GPT reviewer','role':'Reviewer','description':'Verify primary evidence and ask only for missing scope.','avatarShape':'cube','avatarColor':'gold'}]}}})
   elif 'SAVE_PROACTIVE' in str(p.get('input')):

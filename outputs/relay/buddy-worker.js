@@ -4,15 +4,17 @@
   const canResume=(status,kind)=>['paused','interrupted','failed','waiting_user'].includes(status)||(kind==='coding'&&status==='completed');
   const pending=task=>(task.reviews||[]).filter(r=>r.status==='pending');
   const authTitle=mode=>mode==='signup'?'Create an account':mode==='verification'?'Verify your email':'Sign in privately';
-  const deliveryID=t=>`worker-${t.id}-${Number(t.attempt)||0}-${t.status}`;
+  const deliverable=t=>['completed','failed','interrupted','waiting_review','waiting_user'].includes(t?.status);
+  const deliveryID=t=>`worker-${t.id}-${Number(t.attempt)||0}-${t.status}${['waiting_review','waiting_user'].includes(t.status)?'-'+encodeURIComponent(t.attentionKey||t.progress||''):''}`;
   function deliverResult(state,t){
-    if((!t?.routineID&&t?.kind!=='coding')||t.workspace!==state.conversationWorkspace||!state.agents.some(a=>a.id===t.agentId)||!['completed','failed','interrupted'].includes(t.status))return false;
+    if(!t||t.workspace!==state.conversationWorkspace||!state.agents.some(a=>a.id===t.agentId)||!deliverable(t))return false;
     state.messages[t.agentId]||=[];const id=deliveryID(t);if(state.messages[t.agentId].some(m=>m.id===id))return false;
-    const body=t.status==='completed'?t.result:`${t.kind==='coding'?'Coding task':'Routine'} **${t.title}** needs attention.\n\n${t.progress||'Open the last run to continue.'}${t.result?'\n\n'+t.result:''}`;
+    const title=t.kind==='coding'?'Coding task':t.routineID?'Routine':'Task';
+    const body=t.status==='completed'?t.result:`${title} **${t.title}** ${t.status==='waiting_review'?'needs your review':t.status==='waiting_user'?'needs your input':'needs attention'}.\n\n${t.progress||'Open the task to continue.'}${t.result?'\n\n'+t.result:''}`;
     if(!body)return false;
-    state.messages[t.agentId].push({id,who:t.agentId,body,time:new Date(t.updatedAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}),live:true,status:'completed',workerTaskID:t.id,coverage:t.coverage||[],files:t.files||[]});return true;
+    state.messages[t.agentId].push({id,who:t.agentId,body,time:new Date(t.updatedAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}),live:true,status:'completed',workerTaskID:t.id,workerStatus:t.status,coverage:t.coverage||[],files:t.files||[]});return true;
   }
-  const api={labels,canResume,pending,authTitle,deliveryID,deliverResult};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
+  const api={labels,canResume,pending,authTitle,deliverable,deliveryID,deliverResult};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
   let snapshot={online:false,tasks:[],routines:[],paused:false},detail=null,view='list',routine=null,busy=false,error='',last='',preview=null;
   const drafts=new Map();
@@ -56,7 +58,7 @@
   }
   async function deliverRoutineResults(){
     let changed=false;
-    for(const t of snapshot.tasks.filter(t=>(t.routineID||t.kind==='coding')&&['completed','failed','interrupted'].includes(t.status)&&findAgent(t.agentId)&&!(state.messages[t.agentId]||[]).some(m=>m.id===deliveryID(t))).slice(0,10)){
+    for(const t of snapshot.tasks.filter(t=>deliverable(t)&&findAgent(t.agentId)&&!(state.messages[t.agentId]||[]).some(m=>m.id===deliveryID(t))).slice(0,10)){
       const value=(await request({operation:'detail',taskId:t.id})).task;if(deliverResult(state,value)){changed=true;}
     }
     if(changed){save();if(ui.view.kind==='chat')refreshLiveChat(ui.view.target);else render();}

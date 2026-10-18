@@ -31,8 +31,8 @@ with tempfile.TemporaryDirectory(prefix='buddy-build-', suffix='.noindex') as te
     plist = {
         'CFBundleName': 'Buddy', 'CFBundleDisplayName': 'Buddy',
         'CFBundleIdentifier': 'app.buddy.desktop', 'CFBundleExecutable': 'Buddy',
-        'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.22.2',
-        'CFBundleVersion': '32', 'CFBundleIconFile': 'Buddy.icns',
+        'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.23.0',
+        'CFBundleVersion': '33', 'CFBundleIconFile': 'Buddy.icns',
         'LSMinimumSystemVersion': '13.0', 'NSHighResolutionCapable': True,
         'NSPrincipalClass': 'NSApplication', 'LSApplicationCategoryType': 'public.app-category.productivity',
         'NSHumanReadableCopyright': 'Buddy · Personal teamwork edition',
@@ -48,7 +48,7 @@ with tempfile.TemporaryDirectory(prefix='buddy-build-', suffix='.noindex') as te
     helper_binary = helper / 'Contents/MacOS/BuddyWorker'
     helper_binary.parent.mkdir(parents=True)
     shutil.copyfile(binary, helper_binary); helper_binary.chmod(0o755)
-    helper_info = {'CFBundleName': 'Buddy Worker', 'CFBundleIdentifier': 'app.buddy.workerhelper', 'CFBundleExecutable': 'BuddyWorker', 'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.22.2', 'CFBundleVersion': '32', 'LSUIElement': True, 'LSMinimumSystemVersion': '13.0', 'NSPrincipalClass': 'NSApplication'}
+    helper_info = {'CFBundleName': 'Buddy Worker', 'CFBundleIdentifier': 'app.buddy.workerhelper', 'CFBundleExecutable': 'BuddyWorker', 'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '0.23.0', 'CFBundleVersion': '33', 'LSUIElement': True, 'LSMinimumSystemVersion': '13.0', 'NSPrincipalClass': 'NSApplication'}
     (helper / 'Contents/Info.plist').write_bytes(plistlib.dumps(helper_info))
     subprocess.run(['codesign', '--force', '--sign', signing_identity, '--timestamp=none', '--identifier', 'app.buddy.workerhelper', str(helper)], check=True)
     renderer = build / 'render-icon'

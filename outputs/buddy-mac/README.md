@@ -1,4 +1,4 @@
-# Buddy for Mac · 0.22.2
+# Buddy for Mac · 0.23.0
 
 Buddy is a personal Mac app with minimal direct messages, 3D avatars, and agents whose names, roles, instructions, shapes, and colors you can change independently.
 
@@ -176,7 +176,7 @@ Verification adds offline model-discovery pagination and failure fixtures, saved
 
 Claude-to-ChatGPT service requests clear the parent Claude model ID before starting the bounded OpenAI turn. The delegate uses the OpenAI account default, while the parent keeps its chosen Claude model. The delegate propagates the primary transport’s executable override, allowing an entirely offline integration fixture. That fixture reproduced the previous `This OpenAI model is unavailable` failure and now verifies both actual routed model IDs and a completed delegate receipt.
 
-Every chat turn and background worker receives native runtime facts naming its provider/model, authentication method, the existing Codex app-server/Claude Agent SDK integrations, supported reviewed service actions, and the currently disabled shell/build/test/session-manager capabilities. These facts distinguish restrictions in Buddy from capabilities of the underlying SDKs and supersede older capability claims. They do not grant new tools or permissions. The paused coding-session manager remains unbuilt; ordinary background work is not presented as a full coding session.
+Every chat turn and background worker receives native runtime facts naming its provider/model, authentication method, the existing Codex app-server/Claude Agent SDK integrations, supported reviewed service actions, and the currently disabled shell/build/test/session-manager capabilities. These facts distinguish restrictions in Buddy from capabilities of the underlying SDKs and supersede older capability claims. They do not grant new tools or permissions. The Claude coding-session manager uses the saved Claude API connection; the OpenAI coding-session manager remains unbuilt. Ordinary browser/research work is not presented as a coding session.
 
 ## Buddy 0.18 — Claude coding sessions
 
@@ -233,3 +233,10 @@ The main chat receives a compact Created/Suggested card. Created teams appear in
 Inert native tests cover direct creation, existing membership, interview mode, exact human authorization, pending edit/approval/decline, retries, workspace isolation, preservation and real Claude/ChatGPT tool round trips. Frontend tests cover receipt deduplication, manual-edit/membership precedence and invalid/foreign receipts.
 
 The 0.21.1 update keeps monitor diagnostics separate from worker transport errors, so healthy preference snapshots and saved settings receipts load through the actual private IPC connection. Native integration fixtures cover that path.
+
+
+## Automatic task execution · 0.23.0
+
+Normal action requests can invoke `buddy_computer_task` directly from an agent DM. Both model providers receive the same task guidance: choose execution from the user's objective, without requiring the words background, worker or computer. Website interactions use the private persistent browser even when no site connector exists. Claude browser work uses the saved Claude model/API connection and does not require ChatGPT. Simple connected-service/file operations stay in chat; coding and recurring requests retain their dedicated tools. Capability questions, hypothetical examples and retrieved instructions do not authorize task execution.
+
+The native task tool starts, lists, inspects, continues or cancels the current agent's non-coding tasks. Continuation reuses the saved task and browser profile; it is rejected for running/completed tasks or another agent's work. Existing provider/model selection, spending limits, browser permissions, private authentication and exact action reviews remain in force. The legacy background task tool also no longer requires special user wording. Completion, errors, interruptions and distinct review/sign-in blockers for every task return once to the owning DM with a task link; reopening does not duplicate deliveries. Website success still requires actual browser/service receipts. This change does not make arbitrary websites guaranteed to succeed or remove native action reviews.

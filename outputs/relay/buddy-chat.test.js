@@ -21,3 +21,22 @@ test('reopening repairs old empty completions while retaining actual proposal an
 
 test('actual email coverage survives partial runs and reconnect; invented shapes are ignored',()=>{const s=seed(),r=Chat.begin(s,'a'),c={id:'receipt',query:'newer_than:90d assessment',read:2,unread:1,partial:true};Chat.apply(s,{type:'run',runId:r.run.runId,status:'answering',coverage:[c,{query:'invented'}]});c.read=99;assert.equal(s.messages.a[1].coverage.length,1);assert.equal(s.messages.a[1].coverage[0].read,2);Chat.apply(s,{type:'run',runId:r.run.runId,status:'failed',error:'offline'});assert.equal(s.messages.a[1].coverage[0].partial,true);});
 test('routine receipts attach only to their actual workspace and agent and never finish a reply',()=>{const s=seed(),r=Chat.begin(s,'a'),routine={id:'saved',workspace:s.conversationWorkspace,agentId:'a',title:'Morning review',nextRun:'2026-10-17T16:00:00Z',status:'active'};assert.equal(Chat.apply(s,{type:'routine',runId:r.run.runId,routine:{...routine,workspace:'wrong'}}),false);assert.equal(Chat.apply(s,{type:'routine',runId:r.run.runId,routine}),true);assert.equal(s.messages.a[1].routines[0].id,'saved');assert.equal(r.run.status,'starting');Chat.apply(s,{type:'routine',runId:r.run.runId,routine:{...routine,status:'paused'}});assert.equal(s.messages.a[1].routines.length,1);assert.equal(s.messages.a[1].routines[0].status,'paused');});
+
+test('operational replies show a brief result and preserve expandable detail without changing history',()=>{
+ const s=seed(),r=Chat.begin(s,'a'),body='Inbox is created. Seven checks are saved.\n\n'+('Technical scheduling detail. '.repeat(40)),m={runId:r.run.runId,body,routines:[{id:'r'}]};
+ const shown=Chat.presentation(s,m);assert.equal(shown.body,'Inbox is created. Seven checks are saved.');assert.equal(shown.details,body);assert.equal(m.body,body);
+ assert.equal(Chat.presentation(s,{...m,routines:[]}).body,body);
+ r.run.text='Explain the full details';assert.deepEqual(Chat.presentation(s,m),{body});
+});
+test('worker result details collapse even without a conversation run; errors remain independent',()=>{
+ const body='Please reconnect Gmail.\n\n'+('Observed diagnostic detail. '.repeat(40)),m={body,workerTaskID:'task',error:'Gmail disconnected'};
+ assert.equal(Chat.presentation(seed(),m).body,'Please reconnect Gmail.');assert.equal(Chat.presentation(seed(),m).details,body);assert.equal(m.error,'Gmail disconnected');
+});
+test('delegated routine receipts require the registered owner and a participating creator',()=>{
+ const s=seed(),r=Chat.begin(s,'a'),routine={id:'r',workspace:s.conversationWorkspace,agentId:'b',nextRun:'2026-10-19T15:00:00Z'};
+ assert.equal(Chat.apply(s,{type:'routine',runId:r.run.runId,routine}),false);
+ assert.equal(Chat.apply(s,{type:'routine',runId:r.run.runId,routine,delegatedBy:'a'}),true);
+ assert.equal(Chat.apply(s,{type:'routine',runId:r.run.runId,routine:{...routine,agentId:'missing'},delegatedBy:'a'}),false);
+ const g=grouped(),gr=Chat.begin(g,'team');assert.equal(Chat.apply(g,{type:'routine',runId:gr.run.runId,routine:{...routine,workspace:g.conversationWorkspace},delegatedBy:'a'}),true);
+ assert.equal(Chat.apply(g,{type:'routine',runId:gr.run.runId,routine:{...routine,workspace:g.conversationWorkspace},delegatedBy:'outsider'}),false);
+});

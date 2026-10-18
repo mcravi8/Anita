@@ -163,7 +163,7 @@ import Darwin
         if operation == "openChromeSettings",let id=privateAgent {
             guard active==nil else{throw BuddyWorkerFailure(message:"The agent is finishing its pause. Try again in a moment.")}
             let p:BuddyWorkerProcess
-            if let opened=privateBrowser {p=opened}else{p=makeBrowser();try p.launch("browser.mjs",arguments:[root.appendingPathComponent("Browsers/"+id).path]);privateBrowser=p}
+            if let opened=privateBrowser {p=opened}else{p=makeBrowser();try p.launch("browser.mjs",arguments:privateBrowserArguments(id));privateBrowser=p}
             _ = try await p.request(["command":"manualGoogle"])
             return ["opened":true,"private":true]
         }
@@ -171,7 +171,7 @@ import Darwin
             let id=request["agentId"] as? String ?? "", a=try agent(id,workspace:current)
             guard (a["tools"] as? [String:Bool])?["desktop"] != false,(a["tools"] as? [String:Bool])?["web"] != false else{throw BuddyWorkerFailure(message:"Browser access is off for this agent.")}
             guard privateAgent == nil,active == nil else{throw BuddyWorkerFailure(message:"Finish the current private sign-in or pause the running task first.")}
-            let p=makeBrowser();try p.launch("browser.mjs",arguments:[root.appendingPathComponent("Browsers/"+id).path])
+            let p=makeBrowser();try p.launch("browser.mjs",arguments:privateBrowserArguments(id))
             privateQueueWasPaused=store.paused;try store.setPaused(true);try markPrivate(agent:id,task:nil)
             do{_ = try await p.request(["command":"manualGoogle"])}catch{p.close();try? FileManager.default.removeItem(at:privateMarker);try? store.setPaused(privateQueueWasPaused);throw error}
             privateBrowser=p;privateAgent=id;privateTask=nil
@@ -181,7 +181,7 @@ import Darwin
             guard let id=privateAgent else{throw BuddyWorkerFailure(message:"No private sign-in is open in this worker.")}
             guard active == nil else{throw BuddyWorkerFailure(message:"The agent is finishing its pause. Try Finish private sign-in again in a moment.")}
             let p:BuddyWorkerProcess
-            if let opened=privateBrowser{p=opened}else{p=makeBrowser();try p.launch("browser.mjs",arguments:[root.appendingPathComponent("Browsers/"+id).path]);privateBrowser=p}
+            if let opened=privateBrowser{p=opened}else{p=makeBrowser();try p.launch("browser.mjs",arguments:privateBrowserArguments(id));privateBrowser=p}
             _ = try await p.request(["command":"finishManual"])
             p.close();let task=privateTask;privateBrowser=nil;privateAgent=nil;privateTask=nil;try? FileManager.default.removeItem(at:privateMarker)
             try store.setPaused(privateQueueWasPaused)
@@ -193,6 +193,11 @@ import Darwin
         }
         if operation == "routine" {
             let id=request["agentId"] as? String ?? "",args=request["arguments"] as? [String:Any] ?? [:]
+            if let actor=request["actorId"] as? String {
+                guard try BuddyRoutineAuthorization.owner(args,actor:actor,runID:request["runId"] as? String ?? "",text:request["authorizedText"] as? String ?? "",state:state())==id else{throw BuddyWorkerFailure(message:"The delegated routine owner changed.")}
+                if let source=args["browserAgentId"] as? String {guard source==actor else{throw BuddyWorkerFailure(message:"An agent may delegate only its own website session.")}}
+            }
+            if let source=args["browserAgentId"] as? String {let owner=try agent(source,workspace:current);guard (owner["tools"] as? [String:Bool])?["desktop"] != false,(owner["tools"] as? [String:Bool])?["web"] != false else{throw BuddyWorkerFailure(message:"The source agent's browser access is off.")}}
             if !["pause","delete","list"].contains(args["action"] as? String ?? "") { _ = try agent(id,workspace:current) }
             let choice=try providerSettings.current(current)
             let selected=try agentModels.selection(workspace:current,agent:id) ?? .initial(choice.provider)
@@ -293,6 +298,10 @@ import Darwin
         }
         return reviews
     }
+    private func privateBrowserArguments(_ id:String)->[String] {
+        let job=privateTask.flatMap{try? store.job($0)}
+        return [root.appendingPathComponent("Browsers/"+(job?["browserAgentId"] as? String ?? id)).path,job?["browserOrigin"] as? String ?? ""]
+    }
     private func openPrivate(_ job:[String:Any],p:BuddyWorkerProcess) async throws {
         guard privateAgent == nil else{throw BuddyWorkerFailure(message:"Finish the current private sign-in first.")}
         privateQueueWasPaused=store.paused;try store.setPaused(true)
@@ -360,11 +369,16 @@ import Darwin
     private func browserProcess(_ job: [String: Any]) throws -> BuddyWorkerProcess {
         guard privateBrowser == nil else{throw BuddyWorkerFailure(message:"Private Chrome is open for you. Finish sign-in before automated work resumes.")}
         if let browser { return browser }
-        let p = makeBrowser(); try p.launch("browser.mjs", arguments: [root.appendingPathComponent("Browsers/" + (job["agentId"] as! String)).path]); browser = p; return p
+        let owner=job["browserAgentId"] as? String ?? job["agentId"] as! String
+        let source=try agent(owner,workspace:job["workspace"] as! String)
+        guard (source["tools"] as? [String:Bool])?["desktop"] != false,(source["tools"] as? [String:Bool])?["web"] != false else{throw BuddyWorkerFailure(message:"The shared website session is no longer available.")}
+        let p = makeBrowser(); try p.launch("browser.mjs", arguments: [root.appendingPathComponent("Browsers/" + owner).path,job["browserOrigin"] as? String ?? ""]); browser = p; return p
     }
     private func authorizationData(_ job: [String: Any]) -> Data {
         guard let a = try? agent(job["agentId"] as? String ?? "", workspace: job["workspace"] as? String ?? ""), let data = try? JSONSerialization.data(withJSONObject: a, options: [.sortedKeys]) else { return Data() }
-        return data + ((try? Data(contentsOf: support.appendingPathComponent("connection-access.json"))) ?? Data())
+        let source=(job["browserAgentId"] as? String).flatMap{try? agent($0,workspace:job["workspace"] as? String ?? "")}
+        let sourceData=source.flatMap{try? JSONSerialization.data(withJSONObject:$0,options:.sortedKeys)} ?? Data()
+        return data + sourceData + ((try? Data(contentsOf: support.appendingPathComponent("connection-access.json"))) ?? Data())
     }
     private func tick() async {
         if let current=try? state(){await monitor.tick(state:current,jobs:store.jobs,paused:store.paused || privateAgent != nil)}
@@ -419,7 +433,7 @@ import Darwin
         """
         let previous = (job["result"] as? String).flatMap{$0.isEmpty ? nil:$0} ?? job["previousRoutineResult"] as? String ?? ""
         var inboxEvidence:String?
-        if let query=job["inboxQuery"] as? String,!query.isEmpty,let routine=job["routineID"] as? String {
+        if let query=job["inboxQuery"] as? String,!query.isEmpty,let routine=(job["routineSeriesID"] ?? job["routineID"]) as? String {
             guard try providerSettings.current(workspace).chatgptEnabled else { throw BuddyWorkerFailure(message:"This email routine needs ChatGPT/Gmail connected. Its email memory has not advanced.") }
             let report=try await service.reviewInbox(workspace:workspace,agent:agentID,runID:runID!,query:query,purpose:job["title"] as? String ?? "Routine email review",routine:routine+":"+query+":"+(job["goal"] as? String ?? "")) { self.active==id && !self.stopped && self.permitted(job) && (try? self.providerSettings.current(workspace).chatgptEnabled)==true }
             guard active==id,!stopped else { return }
@@ -440,7 +454,7 @@ import Darwin
             if permitted(job, tool: "projectFiles") { tools += BuddyProjectFiles.tools }
             try p.send(["command": "start", "runId":runID!, "model":job["model"] as? String ?? "claude-sonnet-4-6", "apiKey": key, "budget": budget, "cwd": folder.appendingPathComponent("Files").path, "home": home.path, "prompt": prompt, "instructions": instructions, "tools": tools])
         } else {
-            var options = BuddyTurnOptions();options.selectedModel=job["model"] as? String; options.proposalsEnabled = false; options.fileScope = scope; options.actorId = agentID; options.instructions = instructions; options.extraTools = Self.tools.filter { $0["name"] as? String != "buddy_connected_services" };options.inboxEvidence=inboxEvidence;options.inboxRoutine=(job["routineID"] as? String).map{$0+":"+(job["inboxQuery"] as? String ?? "")+":"+(job["goal"] as? String ?? "")}
+            var options = BuddyTurnOptions();options.selectedModel=job["model"] as? String; options.proposalsEnabled = false; options.fileScope = scope; options.actorId = agentID; options.instructions = instructions; options.extraTools = Self.tools.filter { $0["name"] as? String != "buddy_connected_services" };options.inboxEvidence=inboxEvidence;options.inboxRoutine=((job["routineSeriesID"] ?? job["routineID"]) as? String).map{$0+":"+(job["inboxQuery"] as? String ?? "")+":"+(job["goal"] as? String ?? "")}
             options.proposalScope = BuddyProposalScope(workspace: workspace, chat: id, actorId: agentID, replyRunId: runID!)
             _ = try service.send(["runId": runID!, "key": workspace + ":" + agentID, "agent": ["name": a["name"] ?? "Buddy", "role": a["role"] ?? "", "description": a["description"] ?? ""], "text": prompt], options: options)
         }
@@ -615,7 +629,7 @@ import Darwin
         }
         if name=="buddy_review_inbox" {
             guard let service,let runID,try providerSettings.current(job["workspace"] as! String).chatgptEnabled,let query=args["query"] as? String,let purpose=args["purpose"] as? String else { throw BuddyWorkerFailure(message:"Gmail review is unavailable.") }
-            let result=try await service.reviewInbox(workspace:job["workspace"] as! String,agent:job["agentId"] as! String,runID:runID,query:query,purpose:purpose,routine:(job["routineID"] as? String).map{$0+":"+query+":"+(job["goal"] as? String ?? "")}) { self.active==id && !self.stopped && self.permitted(job) && (try? self.providerSettings.current(job["workspace"] as! String).chatgptEnabled)==true }
+            let result=try await service.reviewInbox(workspace:job["workspace"] as! String,agent:job["agentId"] as! String,runID:runID,query:query,purpose:purpose,routine:((job["routineSeriesID"] ?? job["routineID"]) as? String).map{$0+":"+query+":"+(job["goal"] as? String ?? "")}) { self.active==id && !self.stopped && self.permitted(job) && (try? self.providerSettings.current(job["workspace"] as! String).chatgptEnabled)==true }
             if let value=result["coverage"] { var reports=(try store.job(id))["coverage"] as? [Any] ?? [];reports.append(value);try store.update(id,["coverage":reports]) };return result
         }
         if name=="buddy_browser_signin" {

@@ -145,3 +145,16 @@ test('Google login waits for a client-rendered sign-in page instead of clicking 
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-google-spa-')),b=new PrivateBrowser(root,{testOrigin:origin,testGooglePath:'/google/'});
  try{await b.navigate(origin+'/sign-up');const plan=await b.prepareSignIn('signin'),result=await b.useSaved(plan.token);assert.equal(result.performed,true);assert.equal(result.method,'google');assert.match(result.page.text,/Signed in through SPA Google/);assert.equal(registration,0);assert.ok(signin>=1);}finally{await b.close();await rm(root,{recursive:true,force:true});await new Promise(r=>server.close(r));}
 });
+
+test('delegated browser retains the existing session while restricting access to the shared website',async()=>{
+ let outsideHits=0;const outside=createServer((req,res)=>{outsideHits++;res.end('<h1>Other site</h1>');});await new Promise(r=>outside.listen(0,'127.0.0.1',r));const other=`http://127.0.0.1:${outside.address().port}`;
+ const server=createServer((req,res)=>{if(req.url==='/redirect'){res.writeHead(302,{Location:other});return res.end();}res.setHeader('Content-Type','text/html');res.end('<h1>Existing signed-in mailbox fixture</h1>');});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-shared-site-')),profile=join(root,'profile');
+ let b=new PrivateBrowser(profile,{testOrigin:origin});
+ try{
+  await b.navigate(origin);await b.context.addCookies([{name:'session',value:'fixture-session',url:origin,expires:Math.floor(Date.now()/1000)+3600}]);await b.close();
+  b=new PrivateBrowser(profile,{testOrigin:origin,sharedOrigin:origin});const page=await b.navigate(origin);assert.match(page.text,/Existing signed-in mailbox/);assert.equal((await b.context.cookies(origin)).find(c=>c.name==='session')?.value,'fixture-session');
+  await assert.rejects(b.navigate(other),/only for/);await assert.rejects(b.navigate(origin+'/redirect'));assert.equal(outsideHits,0,'cross-origin redirects never reach the other website');
+  b.assertScope(origin+'/inboxes');assert.throws(()=>b.assertScope(other),/only for/);
+ }finally{await b.close();await rm(root,{recursive:true,force:true});await new Promise(r=>server.close(r));await new Promise(r=>outside.close(r));}
+});

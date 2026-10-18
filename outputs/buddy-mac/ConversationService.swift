@@ -774,7 +774,7 @@ struct BuddyFailure: LocalizedError {
                 Task {
                     do {
                         let result=try await handler(tool,arguments,context)
-                        if tool=="buddy_manage_routine",result["saved"] as? Bool==true,(result["routine"] as? [String:Any])?["status"] as? String=="active" { self.runs[runID]?["routineReceipt"]=true }
+                        if tool=="buddy_manage_routine",result["saved"] as? Bool==true,((result["routine"] as? [String:Any])?["status"] as? String=="active" || !(result["routines"] as? [[String:Any]] ?? []).isEmpty) { self.runs[runID]?["routineReceipt"]=true }
                         if tool=="buddy_team",result["saved"] as? Bool==true,result["agentId"] as? String==self.runs[runID]?["agentId"] as? String,let enabled=result["proactive"] as? Bool {self.runs[runID]?["proactiveReceipt"]=enabled}
                         self.answerFileCall(message,result:result,success:true)
                     }

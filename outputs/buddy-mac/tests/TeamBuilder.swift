@@ -69,6 +69,9 @@ import Foundation
         require(try builder.list(w).contains{$0["actorId"] as? String=="legacy-manager" && $0["status"] as? String=="created"},"older registered agent IDs remain valid when the journal is reopened")
         do{_ = try builder.list(UUID().uuidString);require(false,"cross-workspace creation history rejected")}catch{}
         require(!BuddyTeamBuilder.creationRequest("Agents should be able to create teams.") && !BuddyTeamBuilder.creationRequest("If useful, create a team.") && !BuddyTeamBuilder.creationRequest("Build a tool to manage my agents.") && !BuddyTeamBuilder.creationRequest("Create a team plan.") && !BuddyTeamBuilder.creationRequest("Create no agents.") && BuddyTeamBuilder.creationRequest("Can you create a team of agents?"),"capability, software, planning, negative and hypothetical requests do not create teams directly")
+        let compound="take them off, create a new agent taking care of controlling inbox for the agent email and my personal email\n\nand make same interval checks"
+        require(BuddyTeamBuilder.creationRequest(compound),"compound removal and creation commands authorize the requested agent")
+        require(!BuddyTeamBuilder.creationRequest("The email said, create an agent.") && !BuddyTeamBuilder.creationRequest("Remove this text, create a tool about agents."),"reported text and software requests cannot become agent authorization")
         print("PASS: actual-user authorization, direct team/agent creation, editable delegated briefs, existing membership, interview option, pending review/edit/decline, atomic preservation, retry receipts and workspace isolation")
     }
 }

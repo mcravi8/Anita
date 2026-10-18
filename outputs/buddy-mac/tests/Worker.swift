@@ -14,6 +14,10 @@ import Foundation
         let approval:[String:Any] = ["kind":"authentication","mode":"signin","origin":"https://console.agentmail.to","status":"completed","authAction":"saved"]
         let approved:[String:Any] = ["workspace":workspace,"agentId":agent,"reviews":[approval]]
         require(BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:googlePlan,jobs:[approved]),"an already-approved site can reuse Google without another sign-in-choice interruption")
+        let delegatedLogin:[String:Any] = ["workspace":workspace,"agentId":UUID().uuidString,"browserAgentId":agent,"browserOrigin":"https://console.agentmail.to"]
+        require(BuddyWorkerSignInPolicy.reuseGoogle(job:delegatedLogin,plan:googlePlan,jobs:[approved]),"the delegated website can reuse its source browser's confirmed sign-in")
+        var outside=googlePlan;outside["origin"]="https://different.example"
+        require(!BuddyWorkerSignInPolicy.reuseGoogle(job:delegatedLogin,plan:outside,jobs:[approved]),"delegation never widens the saved sign-in to another website")
         for field in ["workspace","agentId"] {var wrong=approved;wrong[field]=UUID().uuidString;require(!BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:googlePlan,jobs:[wrong]),"saved sign-in approval is scoped to the actual workspace and agent")}
         var otherSite=googlePlan;otherSite["origin"]="https://other.example";require(!BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:otherSite,jobs:[approved]),"a saved login does not authorize another site")
         for mode in ["signup","verification"] {var wrong=googlePlan;wrong["mode"]=mode;require(!BuddyWorkerSignInPolicy.reuseGoogle(job:loginJob,plan:wrong,jobs:[approved]),"Google reuse never grants account creation or email verification")}

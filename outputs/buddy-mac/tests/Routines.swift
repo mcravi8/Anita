@@ -38,6 +38,30 @@ import Foundation
         let dst=try BuddyRoutineStore.next(after:f.date(from:"2026-10-31T18:00:00Z")!,rule:["timeZone":"America/Los_Angeles","hour":9,"minute":0,"weekdays":[1,2,3,4,5,6,7]])
         require(f.string(from:dst)=="2026-11-01T17:00:00Z","schedule keeps 9 local across daylight saving")
         var bad=false;do{_ = try rules.manage(["action":"create","title":"invalid","goal":"x","kind":"email"],workspace:w,agent:a,requestID:"bad",provider:"chatgpt",budget:0,now:now)}catch{bad=true};require(bad,"email routines require a targeted search")
+        let inbox=UUID().uuidString,run=UUID().uuidString,user=UUID().uuidString,text="take them off, create a new agent for my inbox and make same interval checks"
+        let authority:[String:Any] = ["agents":[["id":a,"name":"Chief"],["id":inbox,"name":"Inbox","managedBy":a]],"runs":[run:["target":a,"status":"answering","userId":user]],"messages":[a:[["id":user,"who":"you","body":text]]]]
+        let delegated:[String:Any] = ["agentId":inbox,"authorizationQuote":text]
+        require(try BuddyRoutineAuthorization.owner(delegated,actor:a,runID:run,text:text,state:authority)==inbox,"the actual user can authorize scheduling for a managed teammate")
+        do{_ = try BuddyRoutineAuthorization.owner(delegated,actor:a,runID:run,text:"every day",state:authority);require(false,"forged schedule authority rejected")}catch{}
+        let batchRoot=root.appendingPathComponent("Batch"),batch=try BuddyRoutineStore(directory:batchRoot),batchQueue=try BuddyWorkerStore(directory:batchRoot)
+        let hours=[8,10,12,14,16,18,20]
+        let plan:[String:Any] = ["action":"create","title":"Inbox checks","goal":"Read both requested inboxes","kind":"general","hours":hours,"minute":0,"weekdays":[1,2,3,4,5,6,7],"timeZone":"America/Los_Angeles","browserAgentId":a,"browserOrigin":"https://console.agentmail.to"]
+        let receipt=try batch.manage(plan,workspace:w,agent:inbox,requestID:"handoff",provider:"claude",budget:0.5,now:now)
+        _ = try batch.manage(plan,workspace:w,agent:inbox,requestID:"handoff",provider:"claude",budget:0.5,now:now)
+        let reopenedBatch=try BuddyRoutineStore(directory:batchRoot)
+        require((receipt["routines"] as! [Any]).count==7 && reopenedBatch.routines.count==7 && reopenedBatch.routines.compactMap{$0["hour"] as? Int}.sorted()==hours,"one idempotent batch durably saves all seven teammate checks")
+        require(reopenedBatch.routines.allSatisfy{$0["agentId"] as? String==inbox && $0["browserAgentId"] as? String==a},"teammate schedules retain only the explicitly delegated browser owner")
+        try reopenedBatch.enqueueDue(store:batchQueue,workspace:w,now:wake)
+        require(batchQueue.jobs.count==1,"a batch catches up only once after sleep")
+        require(batchQueue.jobs.allSatisfy{$0["browserOrigin"] as? String=="https://console.agentmail.to" && $0["browserAgentId"] as? String==a},"the exact website scope reaches scheduled task execution")
+        let series=reopenedBatch.routines.first!["routineSeriesID"] as! String
+        require(reopenedBatch.routines.allSatisfy{$0["routineSeriesID"] as? String==series},"all daily checks share the same review memory")
+        try batchQueue.update(batchQueue.jobs[0]["id"] as! String,["status":"completed","result":"Retain a verified unresolved deadline"])
+        try reopenedBatch.enqueueDue(store:batchQueue,workspace:w,now:f.date(from:"2026-10-22T19:01:00Z")!)
+        require(batchQueue.jobs.count==2 && batchQueue.jobs.last?["previousRoutineResult"] as? String=="Retain a verified unresolved deadline" && batchQueue.jobs.last?["routineSeriesID"] as? String==series,"the next time slot retains the shared prior findings")
+        var invalidBatch=plan;invalidBatch["hours"]=[8,8]
+        do{_ = try batch.manage(invalidBatch,workspace:w,agent:inbox,requestID:"bad",provider:"claude",budget:0.5,now:now);require(false,"invalid batch rejected")}catch{}
+        require(try BuddyRoutineStore(directory:batchRoot).routines.count==7,"failed batches preserve existing schedules")
         print("PASS: saved schedule receipt, local timezone/weekdays/DST, deduplication, one wake catch-up, restart idempotency, non-overlap, prior findings, interrupted-run attention and durable pause")
     }
 }

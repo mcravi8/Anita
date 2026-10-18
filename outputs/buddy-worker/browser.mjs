@@ -32,7 +32,7 @@ export async function publicURL(raw, resolver=lookup, testOrigin='') {
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const runFile=promisify(execFile);
 export class PrivateBrowser {
-  constructor(profile,{testOrigin='',testGooglePath='',manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'}={}) {this.profile=resolve(profile);this.testOrigin=testOrigin;this.testGooglePath=testOrigin?testGooglePath:'';this.manualExecutable=manualExecutable;this.context=null;this.page=null;this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.manualProcess=null;this.lastURL=null;this.secrets=new Set();this.secretOrigins=new Map();this.googleFlow=null;}
+  constructor(profile,{testOrigin='',testGooglePath='',sharedOrigin='',manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'}={}) {this.profile=resolve(profile);this.sharedOrigin=sharedOrigin;this.testOrigin=testOrigin;this.testGooglePath=testOrigin?testGooglePath:'';this.manualExecutable=manualExecutable;this.context=null;this.page=null;this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.manualProcess=null;this.lastURL=null;this.secrets=new Set();this.secretOrigins=new Map();this.googleFlow=null;}
   async profileLock(){
     const path=resolve(this.profile,'SingletonLock');let meta;
     try{meta=await lstat(path);}catch(error){if(error.code==='ENOENT')return null;throw error;}
@@ -61,7 +61,7 @@ export class PrivateBrowser {
     await this.closeAutomation(); await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);await this.profileLock();
     // Use Chrome's real encrypted profile, never Playwright's mock Keychain/basic password store.
     this.context=await chromium.launchPersistentContext(this.profile,{channel:'chrome',headless:!headed,chromiumSandbox:true,acceptDownloads:false,permissions:[],serviceWorkers:'block',ignoreDefaultArgs:['--password-store=basic','--use-mock-keychain','--disable-sync'],args:['--disable-extensions','--disable-background-networking']});
-    await this.context.route('**/*',async route=>{try{const r=route.request(),url=new URL(await publicURL(r.url(),lookup,this.testOrigin)),payload=r.url()+' '+(r.postData()||'');for(const [secret,origin] of this.secretOrigins)if(url.origin!==origin&&(payload.includes(secret)||payload.includes(encodeURIComponent(secret))))throw Error('Private sign-in data cannot be sent to another origin.');await route.continue();}catch{await route.abort('blockedbyclient');}});
+    await this.context.route('**/*',async route=>{try{const r=route.request(),url=new URL(await publicURL(r.url(),lookup,this.testOrigin)),payload=r.url()+' '+(r.postData()||'');if(this.sharedOrigin&&r.isNavigationRequest()&&!r.frame().parentFrame()&&!this.googleFlow&&url.origin!==this.sharedOrigin)throw Error('Outside shared website session.');for(const [secret,origin] of this.secretOrigins)if(url.origin!==origin&&(payload.includes(secret)||payload.includes(encodeURIComponent(secret))))throw Error('Private sign-in data cannot be sent to another origin.');if(this.sharedOrigin&&r.isNavigationRequest()&&!r.frame().parentFrame()&&!this.googleFlow){const response=await route.fetch({maxRedirects:0});const location=response.headers().location;if(location&&response.status()>=300&&response.status()<400)this.assertScope(new URL(location,r.url()).href);await route.fulfill({response});}else await route.continue();}catch{await route.abort('blockedbyclient');}});
     if(!headed)this.context.on('page',p=>{if(p===this.page)return;if(this.googleFlow&&!this.googleFlow.popup){this.googleFlow.popup=p;return;}p.close().catch(()=>{});});
     this.page=this.context.pages()[0]||await this.context.newPage();this.page.setDefaultTimeout(12000);
     this.page.on('dialog',dialog=>dialog.dismiss().catch(()=>{}));
@@ -85,8 +85,9 @@ export class PrivateBrowser {
   async signature(){
     return hash(await this.page.evaluate(()=>({url:location.href,title:document.title,text:document.body?.innerText.slice(0,50000),forms:[...document.forms].map(f=>[f.action,f.method,f.target]),fields:[...document.querySelectorAll('input,textarea,select,button,a[href],[role=button]')].slice(0,300).map(e=>[e.tagName,e.getAttribute('type'),e.getAttribute('href'),e.getAttribute('name'),e.getAttribute('aria-label'),e.textContent?.slice(0,120),e.type==='password'?'[hidden]':e.value,e.checked])})));
   }
+  assertScope(url=this.page.url()){if(this.sharedOrigin&&new URL(url).origin!==this.sharedOrigin)throw Error('This shared session is available only for '+this.sharedOrigin+'.');}
   async read(){
-    await this.ready();if(this.page.url()!=='about:blank')await publicURL(this.page.url(),lookup,this.testOrigin);this.refs=[];this.prepared=null;
+    await this.ready();this.assertScope();if(this.page.url()!=='about:blank')await publicURL(this.page.url(),lookup,this.testOrigin);this.refs=[];this.prepared=null;
     this.lastURL=this.page.url();const privacy=await this.privacy();
     if(privacy.private){this.snapshot=null;return {url:new URL(this.page.url()).origin,title:'Private sign-in',text:'Sign-in and verification contents are private. Use buddy_browser_signin; never request passwords in chat.',controls:[],authentication:{kind:privacy.kind,private:true}};}
     const elements=await this.page.$$('a[href],button,input:not([type=hidden]),textarea,select,[role=button]');const controls=[];
@@ -98,9 +99,9 @@ export class PrivateBrowser {
     this.snapshot={id:randomUUID(),signature:await this.signature(),url:this.page.url()};
     return this.scrub({snapshotId:this.snapshot.id,url:this.safeURL(),title:await this.page.title(),text:(await this.page.locator('body').innerText().catch(()=>'' )).slice(0,26000),controls});
   }
-  async navigate(url){await this.ready();await this.page.goto(await publicURL(url,lookup,this.testOrigin),{waitUntil:'domcontentloaded',timeout:30000});return this.read();}
+  async navigate(url){this.assertScope(url);await this.ready();await this.page.goto(await publicURL(url,lookup,this.testOrigin),{waitUntil:'domcontentloaded',timeout:30000});return this.read();}
   async prepare(args){
-    await this.ready();
+    await this.ready();this.assertScope();
     if((await this.privacy()).private)throw Error('This sign-in step is private. Request buddy_browser_signin instead of reading or filling credentials.');
     if(!this.snapshot||args.snapshotId!==this.snapshot.id||await this.signature()!==this.snapshot.signature)throw Error('The page changed. Read it again before proposing an operation.');
     if(!['click','fill','select','upload'].includes(args.action))throw Error('Choose click, fill, select, or upload.');
@@ -125,6 +126,7 @@ export class PrivateBrowser {
     return this.scrub({token,preview:{name:`Browser: ${args.action}`,service:'Buddy private browser',arguments:{page:this.safeURL(),action:args.action,...(formValues?.length?{formValues}:{}),targets:targets.map(t=>({control:t.label||t.tag,...(t.href?{destination:t.href}:{}),...(args.action==='fill'||args.action==='select'?{value:t.value}:{}),...(args.action==='upload'?{file:args.fileName,bytes:args.bytes,version:args.version}: {})}))}}});
   }
   async commit(token,upload){
+    this.assertScope();
     const prepared=this.prepared;this.prepared=null;
     if(!prepared||token!==prepared.token||await this.signature()!==prepared.signature)throw Error('The page changed or this approval was already used. Read the page again. Nothing was sent by this request.');
     this.snapshot=null;
@@ -144,7 +146,7 @@ export class PrivateBrowser {
     }catch(error){throw Error(`The browser operation did not return a confirmed result. Check the page before retrying: ${error.message}`);}
   }
   async prepareSignIn(mode='signin'){
-    await this.ready();const url=new URL(await publicURL(this.page.url(),lookup,this.testOrigin));
+    await this.ready();this.assertScope();const url=new URL(await publicURL(this.page.url(),lookup,this.testOrigin));
     if(url.protocol!=='https:'&&url.origin!==this.testOrigin)throw Error('Sign-in requires HTTPS.');
     if(!['signin','signup','verification'].includes(mode))throw Error('Choose sign-in, account creation, or email verification.');
     const privacy=await this.privacy();if(privacy.kind==='security')throw Error('Account recovery and security changes need you in private Chrome.');
@@ -235,7 +237,7 @@ export class PrivateBrowser {
     }finally{this.googleFlow=null;}
   }
   async verificationPlan(){
-    await this.ready();const p=await this.privacy();if(!p.private||p.kind!=='verification')throw Error('A supported email verification form is not visible.');
+    await this.ready();this.assertScope();const p=await this.privacy();if(!p.private||p.kind!=='verification')throw Error('A supported email verification form is not visible.');
     const url=new URL(this.page.url());if(url.protocol!=='https:'&&url.origin!==this.testOrigin)throw Error('Email verification requires HTTPS.');
     if(/(^|\.)(google|microsoft|apple)\.com$/i.test(url.hostname))throw Error('Identity-provider verification needs you in private Chrome.');
     const candidate=await this.page.evaluate(()=>{
@@ -276,7 +278,7 @@ export class PrivateBrowser {
   async close(){await this.closeAutomation();await this.finishManual();}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(realpathSync(process.argv[1])).href){
-  const browser=new PrivateBrowser(process.argv[2]);
+  const browser=new PrivateBrowser(process.argv[2],{sharedOrigin:process.argv[3]||''});
   for await(const line of createInterface({input:process.stdin})){
     let request;
     try{if(line.length>48*1024*1024)throw Error('Browser message too large.');request=JSON.parse(line);let result;

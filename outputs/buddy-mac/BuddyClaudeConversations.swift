@@ -159,7 +159,7 @@ import Foundation
         }
         if run.options.extraTools.contains(where:{$0["name"] as? String == tool}),let handler=primary.extraToolHandler {
             let result=try await handler(tool,args,["agentId":run.options.actorId,"runId":run.id,"callId":callID,"workspace":run.workspace,"key":run.key,"authorizedUserText":run.options.authorizedUserText])
-            if tool=="buddy_manage_routine",result["saved"] as? Bool==true,(result["routine"] as? [String:Any])?["status"] as? String=="active" { run.routineReceipt=true };if tool=="buddy_team",result["saved"] as? Bool==true,result["agentId"] as? String==run.options.actorId,let enabled=result["proactive"] as? Bool {run.proactiveReceipt=enabled};return result
+            if tool=="buddy_manage_routine",result["saved"] as? Bool==true,((result["routine"] as? [String:Any])?["status"] as? String=="active" || !(result["routines"] as? [[String:Any]] ?? []).isEmpty) { run.routineReceipt=true };if tool=="buddy_team",result["saved"] as? Bool==true,result["agentId"] as? String==run.options.actorId,let enabled=result["proactive"] as? Bool {run.proactiveReceipt=enabled};return result
         }
         guard BuddyProjectFiles.tools.contains(where:{$0["name"] as? String == tool}),let scope=run.options.fileScope,primary.filePermission?(run.workspace,run.options.permissionKeys ?? [run.key]) == true else {throw BuddyFailure(message:"This file tool is unavailable or file access is off.")}
         let result=try primary.projectFiles.call(scope,tool:tool,arguments:args,actor:run.options.actorId,actorName:run.agent["name"] as? String ?? "Agent")

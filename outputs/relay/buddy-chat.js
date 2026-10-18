@@ -31,10 +31,21 @@
     if(!previous)state.drafts[target]='';
     return {run,payload:group?{kind:'group',runId,key:run.key,text,groupId:target}:{runId,key:run.key,text,agentId:target,agent:{name:agent.name,role:agent.role,description:agent.description}}};
   }
+  function presentation(state,message){
+    const run=state.runs?.[message.runId],body=String(message.body||'');
+    if(!body||message.setup||run&&/\b(?:explain|details|detail|why|breakdown|report|full|thorough)\b/i.test(run.text||''))return {body};
+    const operational=message.teamPlanIds?.length||message.proposalIds?.length||message.routines?.length||message.workerTaskID;
+    if(!operational||body.length<=360)return {body};
+    const paragraph=body.trim().split(/\n\s*\n/)[0],sentences=paragraph.match(/[^.!?]+[.!?](?:\s|$)|[^.!?]+$/g)||[paragraph];let short='';
+    for(const sentence of sentences.slice(0,2)){if((short+sentence).trim().length>360)break;short+=sentence;}
+    short=short.trim();if(!short)short=paragraph.slice(0,320).replace(/\s+\S*$/,'')+'…';
+    return {body:short,details:body};
+  }
   function apply(state,event){
     if(event.type==='routine'){
       const run=state.runs?.[event.runId],r=event.routine;
-      if(!run||!r||typeof r.id!=='string'||r.workspace!==state.conversationWorkspace||r.agentId!==run.target||typeof r.nextRun!=='string')return false;
+      const actor=event.delegatedBy,delegated=actor&&(actor===run?.target||run?.memberIds?.includes(actor))&&state.agents.some(a=>a.id===actor);
+      if(!run||!r||typeof r.id!=='string'||r.workspace!==state.conversationWorkspace||!state.agents.some(a=>a.id===r.agentId)||r.agentId!==run.target&&!delegated||typeof r.nextRun!=='string')return false;
       run.routines||=[];const i=run.routines.findIndex(v=>v.id===r.id);if(i<0)run.routines.push(structuredClone(r));else run.routines[i]=structuredClone(r);
       const message=(state.messages[run.target]||[]).find(m=>m.id===run.replyId);if(message)message.routines=structuredClone(run.routines);return true;
     }
@@ -74,6 +85,6 @@
       apply(state,snapshot||{runId:run.runId,status:'failed',error:'This reply was interrupted when Buddy closed. You can retry it.'});
     }
   }
-  const api={busy,migrate,active,begin,apply,recover};
+  const api={busy,migrate,active,begin,apply,recover,presentation};
   if(typeof module!=='undefined')module.exports=api;root.BuddyChat=api;
 })(typeof globalThis!=='undefined'?globalThis:this);

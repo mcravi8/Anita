@@ -236,7 +236,7 @@ import AppKit
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }
     @objc private func about() {
-        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.22.1", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: "Buddy", .applicationVersion: "0.22.2", .credits: NSAttributedString(string: "Your personal team, one conversation away.\n\nConversations powered by ChatGPT or Claude.")])
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {

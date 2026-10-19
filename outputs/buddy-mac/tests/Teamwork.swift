@@ -80,7 +80,7 @@ import Foundation
         await wait { team.snapshots()[0]["status"] as? String == "completed" }
         require(fake.calls.count == 4, "nobody is asked to combine what the agents said: each agent's reply is its own message")
         let said = team.snapshots()[0]["text"] as? String ?? ""
-        require(team.snapshots().count == 1 && said == "**Write Bot**\nACTUAL_FIRST_WORK\n\n**Search Bot**\nACTUAL_SECOND_WORK\n\n**Review Bot**\nACTUAL_REVIEW", "the run keeps what each agent said, in order and under its name, for history and search: \(said)")
+        require(team.snapshots().count == 1 && said == "Write Bot: ACTUAL_FIRST_WORK\n\nSearch Bot: ACTUAL_SECOND_WORK\n\nReview Bot: ACTUAL_REVIEW", "the run keeps what each agent said, in order and under its name, for history and search: \(said)")
         require((team.snapshots()[0]["team"] as? [String: Any])?["direct"] as? Bool == false && (team.snapshots()[0]["files"] as? [[String: Any]])?.first?["path"] as? String == "actual.md", "the run says agents answered for themselves, and the saved-file receipt is kept")
         let recordedEntries=(team.snapshots()[0]["team"] as! [String:Any])["entries"] as! [[String:Any]]
         require(recordedEntries.allSatisfy { ($0["startedAt"] as? String).flatMap { ISO8601DateFormatter().date(from:$0) } != nil && ($0["finishedAt"] as? String).flatMap { ISO8601DateFormatter().date(from:$0) } != nil }, "group contributions retain actual start and finish timestamps for the chat timeline")
@@ -105,7 +105,7 @@ import Foundation
         let writerIndex = partialFake.calls.firstIndex { ($0.payload["agent"] as? [String: String])?["name"] == "Write Bot" }!, searchIndex = partialFake.calls.firstIndex { ($0.payload["agent"] as? [String: String])?["name"] == "Search Bot" }!
         partialFake.complete(writerIndex, text: "WRITER_SAYS"); partialFake.complete(searchIndex, text: "Search is down", status: "failed")
         await wait { partialTeam.snapshots()[0]["status"] as? String == "completed" }
-        require(partialTeam.snapshots()[0]["text"] as? String == "**Write Bot**\nWRITER_SAYS" && (partialTeam.snapshots()[0]["team"] as? [String: Any])?["partial"] as? Bool == true && partialFake.calls.count == 3, "partial failure keeps the agent that finished and stays visible and retryable")
+        require(partialTeam.snapshots()[0]["text"] as? String == "Write Bot: WRITER_SAYS" && (partialTeam.snapshots()[0]["team"] as? [String: Any])?["partial"] as? Bool == true && partialFake.calls.count == 3, "partial failure keeps the agent that finished and stays visible and retryable")
         // Nobody needed: the spokesperson simply answers.
         let (directFake, directTeam) = fixture(), directRequest = request()
         _ = try directTeam.send(directRequest); await wait { directFake.calls.count == 1 }
@@ -114,6 +114,10 @@ import Foundation
         require((directFake.calls[1].payload["agent"] as? [String: String])?["name"] == "Review Bot", "with no assignments the spokesperson answers")
         directFake.complete(1, text: "JUST_ONE_ANSWER"); await wait { directTeam.snapshots()[0]["status"] as? String == "completed" }
         require(directTeam.snapshots()[0]["text"] as? String == "JUST_ONE_ANSWER" && (directTeam.snapshots()[0]["team"] as? [String: Any])?["direct"] as? Bool == true, "a request nobody else needed is one agent's own answer")
+        // The chat already shows who is speaking, so a label the agent put on its own message is taken off.
+        let label = BuddyTeamService.withoutSpeakerLabel
+        require(label("Forge: microstage 1 is not done.", "Forge") == "microstage 1 is not done." && label("**Chief:** Start at the first microstage", "Chief") == "Start at the first microstage" && label("**Lyra: Research-track plan (draft)**\n\nBody", "Lyra") == "**Research-track plan (draft)**\n\nBody" && label("## Vera: Plan\nBody", "Vera") == "## Plan\nBody" && label("  forge : lower case works", "Forge") == "lower case works", "a leading name and colon is removed, keeping a heading's own formatting")
+        require(label("Forgery: not a label", "Forge") == "Forgery: not a label" && label("Forge is blocked: no tool.", "Forge") == "Forge is blocked: no tool." && label("Forge:", "Forge") == "Forge:" && label("I asked Forge: is it done?", "Forge") == "I asked Forge: is it done?" && label("Plain text", "") == "Plain text", "a name that is part of the sentence, or a reply that is only a label, is left alone")
         print("PASS: worker failures block dependent work and stay visible, a finished agent's message survives another's failure, and an unneeded team leaves one agent answering")
 
         let (stopFake, stopTeam) = fixture(), stopRequest = request()

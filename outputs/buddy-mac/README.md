@@ -416,3 +416,7 @@ The run keeps what each agent said, in order and under its name, in its `text` (
 ### The app icon
 
 The icon is the current logo (the dot-matrix head drawn by the figure engine) on a white tile. `icon-logo.png` is that artwork, saved by `make-icon-logo.mjs` (run it only when the logo changes; it needs Chrome and the worker's Playwright, which the build does not), and `render-icon.swift` puts it on the tile and writes every size the build packs into `Buddy.icns`.
+
+**No "Name:" on an agent's message.** The coloured name above each message already says who is speaking, so the contributor is told not to begin with its own name, and a leading "Name:", "**Name:**" or "**Name: Title**" is taken off if one appears anyway (a heading keeps its bold). The run keeps what was said as "Name: text" for history and the sidebar preview.
+
+**Agents in a group can run code and use websites.** An agent asked in a group to re-run a pipeline said it had no tool to run anything: group chats only gave it the team-status tool. They now also get the coding-session, website-task and longer-task tools (`BuddyWorkerClient.groupTools`); settings, rules and schedules stay in direct chats. A task started from a group reports to that agent's direct chat and Background work, and the agent says so in its message; the daily spending limits and reviews apply as always.

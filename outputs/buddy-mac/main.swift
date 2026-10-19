@@ -98,7 +98,7 @@ import AppKit
             if !self.teamwork.consume(event) { self.deliver(event) }
         }
         showWindow()
-        teamwork.extraTools=[BuddyWorkerClient.teamTool]
+        teamwork.extraTools=BuddyWorkerClient.groupTools
         teamwork.agentInstructions={ [weak self] workspace,id in guard let self,let s=try? self.workspaceState(),s["conversationWorkspace"] as? String==workspace,let a=(s["agents"] as? [[String:Any]])?.first(where:{$0["id"] as? String==id}) else{return ""};return BuddyAgentMemory.guidance(a)+"\n"+BuddyRulesReader.guidance(support:self.supportURL,workspace:workspace,agent:id)}
         Task {if let context=try? workspaceContext(){_ = try? await BuddyWorkerClient.start(support:supportURL,workspace:context.workspace)}}
     }

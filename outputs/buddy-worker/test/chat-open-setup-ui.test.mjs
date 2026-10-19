@@ -57,7 +57,7 @@ test('an agent with saved instructions can skip its setup questions in one click
   ({context,page}=await open(directory,()=>{
    const pending=(id,name,extra={})=>({id,name,role:name+' lead',description:'You are '+name+'. Own the work and report plainly.',setupStatus:'pending',setupSeed:'seed',avatarShape:'sphere',avatarColor:'blue',tools:{},...extra});
    state.agents=[{id:'chief',name:'Chief',role:'Chief of staff',description:'Preserve',setupStatus:'ready',avatarShape:'diamond',avatarColor:'lilac',tools:{}},pending('lyra','Lyra'),pending('forge','Forge'),pending('vera','Vera',{description:''}),pending('long','Longwinded',{description:'x'.repeat(1600)})];
-   state.messages={chief:[],lyra:[],forge:[],vera:[],long:[],g1:[]};state.groups=[{id:'g1',name:'Omori Volatility Research',objective:'Research',description:'Research',members:['chief','lyra','forge'],managedBy:'chief'},{id:'g2',name:'Mixed',objective:'Research',description:'Research',members:['chief','vera'],managedBy:'chief'}];state.runs={};ui.lastChat='chief';ui.view={kind:'chat',target:'g1'};
+   state.hiddenAgents=['lyra','forge','vera'];state.messages={chief:[],lyra:[],forge:[],vera:[],long:[],g1:[]};state.groups=[{id:'g1',name:'Omori Volatility Research',objective:'Research',description:'Research',members:['chief','lyra','forge'],managedBy:'chief'},{id:'g2',name:'Mixed',objective:'Research',description:'Research',members:['chief','vera'],managedBy:'chief'}];state.runs={};ui.lastChat='chief';ui.view={kind:'chat',target:'g1'};
    window.calls=[];
    window.BuddyDesktop={saveState:async()=>({saved:true}),worker:async()=>({online:true,paused:false,tasks:[],routines:[]}),agentSetup:async p=>{
     calls.push(p);const base={workspace:state.conversationWorkspace,agentId:p.agentId,messages:[]};
@@ -76,6 +76,8 @@ test('an agent with saved instructions can skip its setup questions in one click
   const edits=await page.evaluate(()=>calls.filter(c=>c.action==='edit').map(c=>[c.agentId,c.role,c.instructions]));
   assert.deepEqual(edits,[['lyra','Lyra lead','You are Lyra. Own the work and report plainly.'],['forge','Forge lead','You are Forge. Own the work and report plainly.']],'each agent is saved exactly as it was written');
   assert.equal(await page.locator('.setup-offer').count(),0,'the offer goes away once everyone is ready');
+  assert.deepEqual(await page.evaluate(()=>state.hiddenAgents),['lyra','forge','vera'],'agents stay hidden from the chat list while the team chat works');
+  assert.equal(await page.locator('.chat-list > .chat-row[data-id="lyra"]').count(),0);
   assert.equal(await page.evaluate(()=>state.agents.find(a=>a.id==='lyra').description),'You are Lyra. Own the work and report plainly.');
   // A team whose member has no instructions cannot use them, and says so rather than offering a button that does nothing.
   await page.evaluate(()=>{ui.view={kind:'chat',target:'g2'};render();});

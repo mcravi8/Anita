@@ -63,6 +63,12 @@ import Foundation
         require(refuses("a made-up quote") { _ = try world.say(sage, said, ["field": "name", "value": "Scout", "quote": "rename sage to scout please now"]) }, "a quote that is not in the message is refused")
         require(refuses("a very short quote") { _ = try world.say(sage, "ok then", ["field": "name", "value": "Scout", "quote": "ok"]) }, "a few letters are not a quote")
         require(try store.changes(workspace: w).isEmpty, "nothing was recorded for refused changes")
+        for (reply, quote) in [("try again", "try again"), ("Yes, go ahead please", "Yes, go ahead please"), ("ok do it", "ok do it"), ("Please try it one more time", "try it one more time"), ("Let's keep going.", "Let's keep going")] {
+            require(refuses("a reply that asks for nothing: \(quote)") { _ = try world.say(sage, reply, ["field": "name", "value": "Scout", "quote": quote]) }, "“\(quote)” does not ask for a change, so it cannot authorize one")
+        }
+        require(refuses("a retry with a rule") { _ = try world.engine.addRule(actor: sage, text: "Try again please", args: ["rule": "Show the CV first", "quote": "Try again please"]) }, "nor a rule")
+        let short = try world.say(sage, "Hide Sage please", ["field": "hidden", "value": "true", "quote": "Hide Sage"])
+        require(short["saved"] as? Bool == true, "a short request that names what to do is fine: \(short)")
         let first = try world.say(sage, said, ["field": "name", "value": "Scout", "quote": "RENAME  Sage to   Scout"])
         require(first["saved"] as? Bool == true && (first["message"] as? String)?.contains("Sage’s name") == true, "a quote differing only in capitals and spacing is accepted: \(first)")
         let curly = try world.say(sage, "Make the role “Hiring helper” please", ["field": "role", "value": "Hiring helper", "quote": "Make the role \"Hiring helper\" please"])

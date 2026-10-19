@@ -6,7 +6,7 @@ import AppKit
         try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: support) }
         let workspace = UUID().uuidString, agent = UUID().uuidString
-        try JSONSerialization.data(withJSONObject: ["conversationWorkspace": workspace, "agents": [["id": agent, "name": "Check", "role": "Fixture", "description": "Inert verification", "tools": [:]]]]).write(to: support.appendingPathComponent("workspace.json"))
+        try JSONSerialization.data(withJSONObject: ["conversationWorkspace": workspace, "hiddenAgents": [agent], "agents": [["id": agent, "name": "Check", "role": "Fixture", "description": "Inert verification", "tools": [:]]]]).write(to: support.appendingPathComponent("workspace.json"))
         let host = BuddyWorkerHost(support: support, executable: URL(fileURLWithPath: CommandLine.arguments[1]),makeBrowser:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[7]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]))},makeCoding:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[2]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]))},makeCodingShell:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[4]),runtime:URL(fileURLWithPath:CommandLine.arguments[5]))},makeClaude:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[6]),runtime:URL(fileURLWithPath:CommandLine.arguments[5]))},keyReader:{_ in "inert-fixture-key"})
         host.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
         defer { host.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification)) }

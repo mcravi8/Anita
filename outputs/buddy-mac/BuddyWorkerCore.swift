@@ -1144,9 +1144,16 @@ enum BuddyAgentChanges {
         for (from, to) in [("’", "'"), ("‘", "'"), ("“", "\""), ("”", "\""), ("–", "-"), ("—", "-"), ("…", "...")] { out = out.replacingOccurrences(of: from, with: to) }
         return out.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
     }
+    /// Words that carry no request on their own. A reply made only of these ("try again", "yes, go ahead", "do it") agrees to something or asks
+    /// for a retry; it never says what to change, so it cannot be the quote that authorizes a change.
+    static let fillerWords: Set<String> = ["try", "again", "retry", "please", "pls", "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "go", "ahead", "do", "it", "that", "this", "continue", "proceed", "thanks", "thank", "you", "fine", "now", "just", "then", "so", "and", "the", "a", "on", "more", "once", "one", "time", "good", "great", "sounds", "like", "let", "s", "lets", "keep", "going", "next", "move", "up", "me", "for"]
+    static func isFiller(_ quote: String) -> Bool {
+        let words = normalized(quote).split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        return words.isEmpty || words.allSatisfy { fillerWords.contains($0) }
+    }
     static func quoteAuthorized(_ quote: String, in text: String) -> Bool {
         let q = normalized(quote)
-        return q.count >= 8 && normalized(text).contains(q)
+        return q.count >= 8 && !isFiller(q) && normalized(text).contains(q)
     }
     private static func boolean(_ value: Any?, _ field: String) throws -> Bool {
         if let flag = value as? Bool { return flag }

@@ -2,6 +2,7 @@ import Foundation
 @main struct TeamMonitorTests {
  @MainActor static func require(_ value:Bool,_ message:String){if !value{fputs("FAILED: \(message)\n",stderr);exit(1)}}
  @MainActor static func main() async throws {
+  require(BuddyAgentMemory.guidance([:]).contains("no spending limit") && BuddyAgentMemory.guidance(["learnedRules":[["instruction":"Be brief."]]]).contains("Be brief."),"every agent is told that runs have no limit, with or without saved preferences")
   do {
     // The same assessment, worded four ways by different summaries over a morning, is told once; a change to it is told.
     let now=Date(),stamp=ISO8601DateFormatter(),names:Set<String>=["lyra","forge","vera","chief","inbox"]

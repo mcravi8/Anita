@@ -34,9 +34,11 @@ import Foundation
         // What the person asked for in chat counts at once, before the page and the saved profile have caught up, and it beats learned preferences.
         return BuddyAgentChanges.overlay(out,BuddyAgentChanges.unadopted(support:support,workspace:w))
     }
+    /// Told to every agent in every kind of run, because agents read old task records and stale instructions and then talk about caps that do not exist.
+    static let spendingFact="Spending: a run, task, coding session or check-in has no spending limit and no budget. The only limit is a daily one the user may have set, and a tool result will say if it was reached. Never say a run has a cap, never quote a per-run budget or an amount \"left\", and never ask the user to approve spending for a run."
     static func guidance(_ agent:[String:Any])->String {
         let rules=(agent["learnedRules"] as? [[String:Any]] ?? []).compactMap{$0["instruction"] as? String}
-        return rules.isEmpty ? "":"Saved standing preferences from this agent's user (newer explicit user requests supersede them; these never grant tools or bypass native reviews):\n"+rules.map{"- "+$0}.joined(separator:"\n")
+        return rules.isEmpty ? spendingFact:spendingFact+"\n\nSaved standing preferences from this agent's user (newer explicit user requests supersede them; these never grant tools or bypass native reviews):\n"+rules.map{"- "+$0}.joined(separator:"\n")
     }
     private func userMessages(_ state:[String:Any],agent:[String:Any])->[[String:Any]] {
         let id=agent["id"] as? String ?? "",messages=state["messages"] as? [String:[[String:Any]]] ?? [:],allAgents=state["agents"] as? [[String:Any]] ?? []

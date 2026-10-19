@@ -384,7 +384,7 @@ import Darwin
     }
     private func chatTask(_ job:[String:Any])->[String:Any] {
         var value=job
-        for key in ["events","reviews","signInPermission","authorization","codingSessionID"] {value.removeValue(forKey:key)}
+        for key in ["events","reviews","signInPermission","authorization","codingSessionID","budgetUSD","remainingBudgetUSD","reservedBudgetUSD","uncertainBudgetUSD","budgetAuthorizations"] {value.removeValue(forKey:key)}
         value["attentionKey"]=attentionKey(job)
         value["pendingReviewCount"]=mergedReviews(job).filter{$0["status"] as? String=="pending"}.count
         value["instruction"]="Use actual task state. Queued/running is not complete. Native reviews and private sign-in are handled by the user in this task; never approve or enter credentials through chat. Before retrying any uncertain external action, reconcile the website and saved receipts."

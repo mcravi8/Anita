@@ -154,7 +154,7 @@ import AppKit
         let checkpoint=try await call(["action":"start","title":"Input fixture","goal":"CHECKPOINT_FIXTURE"],requestID:"input")["task"] as! [String:Any],inputID=checkpoint["id"] as! String
         _ = try await wait(inputID,for:"waiting_user")
         var accounted=false
-        for _ in 0..<50 {let task=try await call(["action":"status","taskId":inputID])["task"] as! [String:Any];if (task["remainingBudgetUSD"] as? Double ?? 0)>0 {accounted=true;break};try await Task.sleep(nanoseconds:100_000_000)}
+        for _ in 0..<50 {let task=try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"detail","taskId":inputID])["task"] as! [String:Any];if (task["remainingBudgetUSD"] as? Double ?? 0)>0 {accounted=true;break};try await Task.sleep(nanoseconds:100_000_000)}
         require(accounted,"input checkpoint lets the SDK finish and confirm remaining budget")
         _ = try await call(["action":"continue","taskId":inputID,"goal":"Implement the explicit follow-up feature."],requestID:"input-follow-up")
         _ = try await wait(inputID,for:"completed")
@@ -206,14 +206,16 @@ import AppKit
             try await Task.sleep(nanoseconds:50_000_000)
         }
         require(browserDone["result"] as? String=="Opened the website and checked the observed session.","real ClaudeSession receives Swift's browser result with the same run ID")
-        require(abs((browserDone["spentUSD"] as? Double ?? 0)-0.02)<0.0001 && (browserDone["remainingBudgetUSD"] as? Double ?? 0)>0,"completed browser attempt confirms usage instead of leaving a silent reservation")
+        let browserFull=try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"detail","taskId":claudeBrowser["id"]!])["task"] as! [String:Any]
+        require(abs((browserFull["spentUSD"] as? Double ?? 0)-0.02)<0.0001 && (browserFull["remainingBudgetUSD"] as? Double ?? 0)>0,"completed browser attempt confirms usage instead of leaving a silent reservation")
         let observed=try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"detail","taskId":claudeBrowser["id"]!])["task"] as! [String:Any]
         let browserEvents=observed["events"] as? [[String:Any]] ?? []
         require(browserEvents.contains{$0["tool"] as? String=="buddy_browser" && $0["status"] as? String=="completed"},"ordinary Claude browser calls have bounded native activity receipts")
+        func fullTask(_ id:String) async throws -> [String:Any] {try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"detail","taskId":id])["task"] as! [String:Any]}
         let checkpointBrowser=try await computer(["action":"start","title":"Inbox checkpoint fixture","goal":"BROWSER_CHECKPOINT_FIXTURE"],requestID:"browser-checkpoint")["task"] as! [String:Any],checkpointID=checkpointBrowser["id"] as! String
         var checkpointAccounted=false
         for _ in 0..<120 {
-            let value=try await computer(["action":"status","taskId":checkpointID])["task"] as! [String:Any]
+            let value=try await fullTask(checkpointID)
             if value["status"] as? String=="waiting_user",value["reservedBudgetUSD"] as? Double==0,(value["spentUSD"] as? Double ?? 0)>0 {
                 require(BuddyRunLimit.isNone(value["remainingBudgetUSD"] as? Double ?? 0),"a task with no limit of its own is still not limited after a checkpoint");checkpointAccounted=true;break
             }
@@ -223,7 +225,7 @@ import AppKit
         _ = try await computer(["action":"continue","taskId":checkpointID,"goal":"CONTINUE_CHECKPOINT with the user's missing detail."],requestID:"checkpoint-continue")
         var checkpointFinished=false
         for _ in 0..<120 {
-            let value=try await computer(["action":"status","taskId":checkpointID])["task"] as! [String:Any]
+            let value=try await fullTask(checkpointID)
             if value["status"] as? String=="completed" {require(abs((value["spentUSD"] as? Double ?? 0)-0.05)<0.0001,"continuation preserves accumulated actual costs");checkpointFinished=true;break}
             try await Task.sleep(nanoseconds:50_000_000)
         }

@@ -28,7 +28,9 @@ import Foundation
             guard r["baseRevision"] as? Int==(agents[i]["profileRevision"] as? Int ?? 0) else{continue}
             if let role=r["role"] as? String,let instructions=r["instructions"] as? String {agents[i]["role"]=role;agents[i]["description"]=instructions};agents[i]["memoryRevision"]=r["revision"];agents[i]["learnedRules"]=r["rules"];agents[i]["learningError"]=r["error"] as? String ?? ""
         }
-        out["agents"]=agents;return out
+        out["agents"]=agents
+        // What the person asked for in chat counts at once, before the page and the saved profile have caught up, and it beats learned preferences.
+        return BuddyAgentChanges.overlay(out,BuddyAgentChanges.unadopted(support:support,workspace:w))
     }
     static func guidance(_ agent:[String:Any])->String {
         let rules=(agent["learnedRules"] as? [[String:Any]] ?? []).compactMap{$0["instruction"] as? String}

@@ -18,6 +18,9 @@ for line in sys.stdin:
  if 'SAVE_PROACTIVE' in prompt:
   out({'type':'call','id':'proactive-1','tool':'buddy_team','arguments':{'action':'set_proactive','enabled':True,'quote':'Keep me updated.'}})
   result=json.loads(sys.stdin.readline());assert result['result'].get('saved'),result
+ if 'SAVE_RULE' in prompt:
+  out({'type':'call','id':'rule-1','tool':'buddy_agent_rules','arguments':{'action':'add','rule':'Show the CV first','then':'proceed','reviewFirst':3,'quote':'send me the CV'}})
+  result=json.loads(sys.stdin.readline());assert result['result'].get('saved'),result
  if 'WRITE_CLAUDE' in prompt:
   out({'type':'call','id':'file-1','tool':'buddy_write_file','arguments':{'path':'claude-note.md','content':'# Created through the selected Claude provider','expectedVersion':''}})
   result=json.loads(sys.stdin.readline());assert result['result'].get('saved'),result

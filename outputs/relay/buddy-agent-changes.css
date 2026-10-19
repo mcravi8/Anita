@@ -1,0 +1,11 @@
+.agent-rules{margin-top:20px;padding-top:16px;border-top:1px solid var(--line, rgba(127,127,127,.25))}
+.agent-rules h3{margin:0 0 8px;font-size:15px}
+.agent-rules h4{margin:14px 0 6px;font-size:13px;font-weight:600;opacity:.8}
+.agent-rules p{margin:0;line-height:1.4}
+.agent-rules .rules-empty{opacity:.7;font-size:13px}
+.agent-rules .rule-row,.agent-rules .change-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;padding:8px 0;border-bottom:1px solid var(--line, rgba(127,127,127,.18))}
+.agent-rules .rule-row p,.agent-rules .change-row p{flex:1 1 100%;font-size:14px}
+.agent-rules small{opacity:.7;font-size:12px}
+.agent-rules .rule-actions{display:inline-flex;gap:12px;margin-left:auto}
+.worker-checkpoint textarea{width:100%}
+.worker-checkpoint-files{margin:6px 0;padding-left:18px;font-size:13px}

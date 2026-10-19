@@ -83,3 +83,16 @@ test('the bell, the chat badge and the Background work badge agree about one blo
  const resolved=A.collect(state,{workspace:'w',tasks:[{...task,status:'running'}],decisions:[]});
  assert.equal(A.unreadCounts(resolved).needs,0);assert.equal(A.workUnread(resolved),0);assert.equal(resolved.filter(i=>i.kind==='needs').length,0,'resolving the blocker removes every representation of it');
 });
+
+test('a change waiting for the person’s OK is a card that asks for it, and a rule that earned its freedom is a notice',()=>{
+ const confirm={id:'change:c1',kind:'confirm',agentId:'inbox',taskId:'',title:'Allow this change?',question:'You asked for this in chat: Inbox’s browser access: off → on. It gives more access or room to spend, so it waits for your OK.',actionLabel:'Allow',payload:{changeId:'c1'},createdAt:'2026-10-18T18:00:00Z'};
+ const notice={id:'graduated:r1:3',kind:'notice',agentId:'inbox',taskId:'',title:'Inbox now works without asking',question:'You approved 3 checks.',actionLabel:'Review rule',payload:{ruleId:'r1'},createdAt:'2026-10-18T19:00:00Z'};
+ const items=A.collect(state,{workspace:'w',tasks:[],decisions:[confirm,notice]});
+ const asks=items.find(i=>i.id==='decision:change:c1'),told=items.find(i=>i.id==='decision:graduated:r1:3');
+ assert.equal(asks.kind,'needs');assert.equal(asks.changeId,'c1');assert.equal(asks.actionLabel,'Review change');assert.equal(asks.unread,true);assert.match(asks.description,/off → on/);
+ assert.equal(told.kind,'finished','it is news, not a request');assert.equal(told.ruleId,'r1');assert.equal(told.agentId,'inbox');
+ assert.equal(A.unreadCounts(items).needs,1);
+ const gone=A.collect(state,{workspace:'w',tasks:[],decisions:[{...confirm,agentId:'removed'}]});assert.equal(gone.length,0,'an agent that is gone has no cards');
+ const dismissed=A.collect(state,{workspace:'w',tasks:[],decisions:[notice],notifications:{'decision:graduated:r1:3':{read:false,dismissed:true}}});assert.equal(dismissed.length,0,'the notice can be dismissed');
+ const answered=A.collect(state,{workspace:'w',tasks:[],decisions:[]});assert.equal(answered.length,0,'once answered, the card is gone');
+});

@@ -67,6 +67,12 @@ def reset(support,stop=stop_worker):
             try:
                 with database:
                     database.execute('DELETE FROM tasks WHERE workspace = ?',(workspace,));database.execute('DELETE FROM routines WHERE workspace = ?',(workspace,))
+                    # What belonged to the removed agents: their open questions, rules (and the approvals counted for them), changes made from chat and
+                    # agent limits. Money already spent stays: it is a record, not a setting. Databases from before these existed simply lack the tables.
+                    for statement in ('DELETE FROM decisions WHERE workspace = ?','DELETE FROM notification_state WHERE workspace = ?','DELETE FROM rule_approvals WHERE rule_id IN (SELECT id FROM rules WHERE workspace = ?)','DELETE FROM rules WHERE workspace = ?','DELETE FROM setting_changes WHERE workspace = ?',"DELETE FROM limits WHERE workspace = ? AND scope = 'agent'"):
+                        try:database.execute(statement,(workspace,))
+                        except sqlite3.OperationalError as error:
+                            if 'no such table' not in str(error):raise
                 database.execute('PRAGMA wal_checkpoint(TRUNCATE)')
             finally:database.close()
         return count,archive

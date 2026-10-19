@@ -334,6 +334,7 @@ struct BuddyFailure: LocalizedError {
         runOrder.append(runID); BuddyRecordLimit.prune(order: &runOrder, records: &runs) { !["starting", "answering", "stopping"].contains($0["status"] as? String ?? "") }
         runs[runID]?["inboxRoutine"] = options.inboxRoutine
         runs[runID]?["requiresRoutine"] = options.requiresRoutine
+        runs[runID]?["requiresRule"] = options.requiresRule
         runs[runID]?["authorizedUserText"] = options.authorizedUserText
         if let expected=options.requiresProactive {runs[runID]?["requiresProactive"]=expected}
         if let scope = options.fileScope { runs[runID]?["fileScope"] = scope }
@@ -791,6 +792,7 @@ struct BuddyFailure: LocalizedError {
                     do {
                         let result=try await handler(tool,arguments,context)
                         if tool=="buddy_manage_routine",result["saved"] as? Bool==true,((result["routine"] as? [String:Any])?["status"] as? String=="active" || !(result["routines"] as? [[String:Any]] ?? []).isEmpty) { self.runs[runID]?["routineReceipt"]=true }
+                        if tool=="buddy_agent_rules",result["saved"] as? Bool==true,result["ruleId"] is String,(arguments["action"] as? String ?? "")=="add" { self.runs[runID]?["ruleReceipt"]=true }
                         if tool=="buddy_team",result["saved"] as? Bool==true,result["agentId"] as? String==self.runs[runID]?["agentId"] as? String,let enabled=result["proactive"] as? Bool {self.runs[runID]?["proactiveReceipt"]=enabled}
                         self.answerFileCall(message,result:result,success:true)
                     }
@@ -972,6 +974,9 @@ struct BuddyFailure: LocalizedError {
         var status=status, error=error
         if status=="completed",runs[id]?["requiresRoutine"] as? Bool==true,runs[id]?["routineReceipt"] as? Bool != true {
             status="failed";error="No active routine was saved. Try again or open Background work → Routines.";runs[id]?["text"]="Your recurring request has not been scheduled."
+        }
+        if status=="completed",runs[id]?["requiresRule"] as? Bool==true,runs[id]?["ruleReceipt"] as? Bool != true {
+            status="failed";error="The rule wasn't saved, so it won't be followed. Say it again in one message, or open this agent's settings → Rules & changes.";runs[id]?["text"]="Your rule has not been saved."
         }
         if status=="completed",let expected=runs[id]?["requiresProactive"] as? Bool,runs[id]?["proactiveReceipt"] as? Bool != expected {status="failed";error="The proactive-update setting wasn't saved. Try again or open this agent's Preferences & updates.";runs[id]?["text"]="Your proactive-update preference has not been changed."}
         if status=="completed" { do { try inboxReviews.commit(runID:id) } catch let failure { status="failed";error=failure.localizedDescription } }

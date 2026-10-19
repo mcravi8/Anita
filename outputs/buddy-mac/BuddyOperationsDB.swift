@@ -13,7 +13,7 @@ struct BuddyOperationsFailure: LocalizedError {
 /// original dictionary as JSON in `body`, so the code above the store sees exactly the shape it always saw.
 final class BuddyOperationsDB {
     static let fileName = "operations.sqlite"
-    static let schemaVersion: Int64 = 5
+    static let schemaVersion: Int64 = 6
     /// Called just before COMMIT and just after it. Only the crash tests set them, to end the process at each commit boundary.
     static var beforeCommit: (() -> Void)?
     static var afterCommit: (() -> Void)?
@@ -70,6 +70,7 @@ final class BuddyOperationsDB {
         if version < 3 { try createVersion3() }
         if version < 4 { try createVersion4() }
         if version < 5 { try createVersion5() }
+        if version < 6 { try createVersion6() }
     }
     private func createVersion1() throws {
         try transaction {
@@ -254,6 +255,54 @@ final class BuddyOperationsDB {
             // Read and dismissed state of any alert, by its id. Reading or dismissing never approves anything.
             try run("CREATE TABLE IF NOT EXISTS notification_state(workspace TEXT NOT NULL, id TEXT NOT NULL, read INTEGER NOT NULL DEFAULT 0, dismissed INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(workspace, id))")
             try run("PRAGMA user_version = 5")
+        }
+    }
+    /// Version 6: changes to settings made on the person's word (with the old value, so each can be undone), and the standing rules they gave.
+    private func createVersion6() throws {
+        try transaction {
+            // `status` is pending (waiting for the person's tap), applied, declined or undone. `adopter` says who has to carry a change into the place that owns the field: 'page' (the page's own state), 'app' (the app's saved agent profile) or '' (applied directly).
+            // `adopted` is that adopter's acknowledgement, given once the change is saved in the place that owns the field.
+            try run("""
+                CREATE TABLE IF NOT EXISTS setting_changes(
+                    id TEXT PRIMARY KEY,
+                    workspace TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    agent_id TEXT NOT NULL DEFAULT '',
+                    field TEXT NOT NULL,
+                    old_value TEXT NOT NULL DEFAULT 'null',
+                    new_value TEXT NOT NULL DEFAULT 'null',
+                    actor TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    quote TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    risk TEXT NOT NULL DEFAULT 'low',
+                    adopter TEXT NOT NULL DEFAULT '',
+                    adopted INTEGER NOT NULL DEFAULT 0,
+                    seq INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL)
+                """)
+            try run("CREATE INDEX IF NOT EXISTS changes_workspace ON setting_changes(workspace, created_at)")
+            // A standing rule for one agent. `params` carries what it needs (how many reviews come first, what it applies to, what it covers).
+            try run("""
+                CREATE TABLE IF NOT EXISTS rules(
+                    id TEXT PRIMARY KEY,
+                    workspace TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'review_gate',
+                    text TEXT NOT NULL,
+                    quote TEXT NOT NULL DEFAULT '',
+                    params TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL,
+                    graduated INTEGER NOT NULL DEFAULT 0,
+                    actor TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL)
+                """)
+            try run("CREATE INDEX IF NOT EXISTS rules_agent ON rules(workspace, agent_id, status)")
+            // Each review the person approved under a rule, counted once.
+            try run("CREATE TABLE IF NOT EXISTS rule_approvals(rule_id TEXT NOT NULL, review_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(rule_id, review_id))")
+            try run("PRAGMA user_version = 6")
         }
     }
     /// The row number SQLite gave the most recent INSERT on this connection.

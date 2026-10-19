@@ -16,6 +16,53 @@ import AppKit
         let savedPreference = try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "team", "arguments": ["action": "set_proactive", "agentId": agent, "enabled": true]])
         require(savedPreference["saved"] as? Bool == true && savedPreference["proactive"] as? Bool == true, "saved team settings return a usable receipt through IPC")
         print("PASS: team preferences and saved proactive setting receipts through actual worker IPC")
+        // Settings and rules on the person's word, over the same connection: the app fills in the actor and the person's message.
+        func send(_ operation: String, _ arguments: [String: Any], actor: String?, text: String) async throws -> [String: Any] {
+            var payload: [String: Any] = ["workspace": workspace, "operation": operation, "arguments": arguments]
+            if let actor { payload["actorId"] = actor; payload["authorizedText"] = text }
+            return try await BuddyWorkerClient.call(support: support, payload: payload)
+        }
+        func settings(_ arguments: [String: Any], actor: String? = nil, text: String = "") async throws -> [String: Any] { try await send("settings", arguments, actor: actor, text: text) }
+        func rules(_ arguments: [String: Any], actor: String? = nil, text: String = "") async throws -> [String: Any] { try await send("rules", arguments, actor: actor, text: text) }
+        func refused(_ arguments: [String: Any], actor: String? = nil, text: String = "", operation: String = "settings") async -> Bool {
+            do { _ = try await send(operation, arguments, actor: actor, text: text); return false } catch { return true }
+        }
+        let ask = "Please call me Scout from now on, and keep me posted proactively"
+        require(await refused(["action": "change", "field": "name", "value": "Scout"], actor: agent, text: ask), "a change with no quote is refused over IPC")
+        require(await refused(["action": "change", "field": "name", "value": "Scout", "quote": "call me Captain please"], actor: agent, text: ask), "a quote that is not in the person’s message is refused over IPC")
+        require(await refused(["action": "change", "field": "name", "value": "Scout", "quote": "call me Scout from now on"], actor: UUID().uuidString, text: ask), "an actor that is not an agent here is refused")
+        let renamed = try await settings(["action": "change", "field": "name", "value": "Scout", "quote": "call me Scout from now on"], actor: agent, text: ask)
+        require(renamed["saved"] as? Bool == true && renamed["canUndo"] as? Bool == true, "a quoted rename is saved with a receipt: \(renamed)")
+        require(await refused(["action": "pending", "adopter": "page"], actor: agent, text: ask), "an agent cannot read or acknowledge what the page has to carry")
+        let owed = try await settings(["action": "pending", "adopter": "page"])["changes"] as? [[String: Any]] ?? []
+        require(owed.count == 1 && owed[0]["field"] as? String == "name" && owed[0]["new"] as? String == "Scout" && owed[0]["old"] as? String == "Check", "the page is owed exactly the rename, with old and new")
+        let named = (try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "team", "arguments": ["action": "status"]]))["profiles"] as? [[String: Any]]
+        require(named?.first?["name"] as? String == "Scout", "everything else in the worker already sees the new name before the page has carried it: \(String(describing: named))")
+        _ = try await settings(["action": "adopt", "adopter": "page", "ids": owed.compactMap { $0["id"] as? String }])
+        require((try await settings(["action": "pending", "adopter": "page"])["changes"] as? [[String: Any]])?.isEmpty == true, "an acknowledged change is no longer owed")
+        let switchedOff = try await settings(["action": "change", "field": "tools.web", "value": "false", "quote": "turn off the web"], actor: agent, text: "Please turn off the web for me")
+        require(switchedOff["saved"] as? Bool == true, "turning access off applies at once")
+        let switchedOn = try await settings(["action": "change", "field": "tools.web", "value": "true", "quote": "turn the web back on"], actor: agent, text: "Now turn the web back on")
+        require(switchedOn["saved"] as? Bool == false && switchedOn["needsConfirmation"] as? Bool == true, "turning access on waits: \(switchedOn)")
+        let waitingStatus = try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "status"])
+        let cards = (waitingStatus["decisions"] as? [[String: Any]] ?? []).filter { $0["kind"] as? String == "confirm" }
+        require(cards.count == 1 && (cards[0]["payload"] as? [String: Any])?["changeId"] as? String == switchedOn["changeId"] as? String, "the waiting change is one card in the worker’s list of what needs the person")
+        require(await refused(["action": "answer", "changeId": switchedOn["changeId"]!, "allow": true], actor: agent, text: "Yes allow it"), "the agent cannot answer its own request")
+        let answered = try await settings(["action": "answer", "changeId": switchedOn["changeId"]!, "allow": true])
+        require(answered["saved"] as? Bool == true, "the person allows it from the screen")
+        let after = try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "status"])
+        require((after["decisions"] as? [[String: Any]] ?? []).filter { $0["kind"] as? String == "confirm" }.isEmpty, "answering removes the card")
+        let ruleText = "For the first three applications, send me the CV so I can check your work; then go ahead on your own"
+        require(await refused(["action": "add", "rule": "Show the CV first", "then": "proceed", "reviewFirst": 3, "quote": "show me the cv"], actor: agent, text: ruleText, operation: "rules"), "a rule needs the person’s own words over IPC")
+        let rule = try await rules(["action": "add", "rule": "Send the CV for checking before applying; after three approved, apply without asking.", "then": "proceed", "reviewFirst": 3, "quote": "send me the CV so I can check your work"], actor: agent, text: ruleText)
+        require(rule["saved"] as? Bool == true && (rule["ruleId"] as? String)?.isEmpty == false, "a quoted rule is saved: \(rule)")
+        let listedRules = try await rules(["action": "list"])["rules"] as? [[String: Any]] ?? []
+        require(listedRules.count == 1 && listedRules[0]["needed"] as? Int == 3 && listedRules[0]["approved"] as? Int == 0 && listedRules[0]["earned"] as? Bool == false, "the screen lists the rule and its progress")
+        let paused = try await rules(["action": "pause", "ruleId": rule["ruleId"]!])
+        require(paused["saved"] as? Bool == true, "the person can pause it from the screen")
+        let undoneName = try await settings(["action": "undo", "changeId": renamed["changeId"]!])
+        require(undoneName["saved"] as? Bool == true, "the person can undo the rename from the screen")
+        print("PASS: settings and rules on the person’s word over actual worker IPC: quotes checked, access increases wait for the person, the page is owed exactly what changed, everything else sees it at once")
         var request: [String: Any] = ["workspace": workspace, "operation": "create", "agentId": agent, "requestId": "once", "title": "Fixture report", "goal": "Create a private report", "kind": "research", "provider": "chatgpt", "budgetUSD": 0]
         let result = try await BuddyWorkerClient.call(support: support, payload: request), job = result["task"] as! [String: Any], id = job["id"] as! String
         let duplicate = try await BuddyWorkerClient.call(support: support, payload: request)
@@ -153,6 +200,53 @@ import AppKit
             try await Task.sleep(nanoseconds:50_000_000)
         }
         require(checkpointFinished,"ordinary browser task resumes from its confirmed unused allowance without another budget request")
+        // A standing rule, end to end: the agent shows its work, the person's approvals are counted, and only then do browser steps go ahead unreviewed.
+        let twoChecks = "For the first two applications, send me the CV so I can check your work; then apply on your own"
+        let standing = try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "rules", "arguments": ["action": "add", "rule": "Send the CV for checking before applying; after two approved, apply without asking.", "then": "proceed", "reviewFirst": 2, "quote": "send me the CV"], "actorId": agent, "authorizedText": twoChecks])
+        let standingID = standing["ruleId"] as! String
+        func ruleTask(_ goal: String, _ request: String) async throws -> String {
+            (try await computer(["action": "start", "title": "Apply to Acme", "goal": goal], requestID: request)["task"] as! [String: Any])["id"] as! String
+        }
+        func detail(_ id: String) async throws -> [String: Any] { try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "detail", "taskId": id])["task"] as! [String: Any] }
+        func reach(_ id: String, _ status: String) async throws -> [String: Any] {
+            for _ in 0..<200 {
+                let value = try await detail(id)
+                if value["status"] as? String == status { return value }
+                if value["status"] as? String == "failed" { throw BuddyFailure(message: "Rule fixture failed: \(value["progress"] ?? "")") }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            require(false, "task reaches \(status)"); return [:]
+        }
+        func reviews(_ job: [String: Any], _ kind: String) -> [[String: Any]] { (job["reviews"] as? [[String: Any]] ?? []).filter { $0["kind"] as? String == kind } }
+        for number in 1...2 {
+            let id = try await ruleTask("RULES_FIXTURE apply \(number)", "rule-task-\(number)")
+            let waiting = try await reach(id, "waiting_review")
+            let check = reviews(waiting, "checkpoint")
+            require(check.count == 1 && check[0]["status"] as? String == "pending" && reviews(waiting, "browser").isEmpty, "the agent shows its work before touching the form (task \(number))")
+            let arguments = (check[0]["tool"] as? [String: Any])?["arguments"] as? [String: Any] ?? [:]
+            require(arguments["summary"] as? String == "Here is the CV for Acme." && arguments["check"] as? Int == number && arguments["of"] as? Int == 2, "the card says what it is and which check it is: \(arguments)")
+            let waitingStatus = try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "status"])
+            require((waitingStatus["decisions"] as? [[String: Any]] ?? []).contains { $0["kind"] as? String == "review" && ($0["title"] as? String)?.hasPrefix("Check the work") == true }, "a check is one entry in what needs the person")
+            _ = try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "review", "taskId": id, "id": check[0]["id"]!, "accept": true, "feedback": ""])
+            let done = try await reach(id, "completed")
+            require((done["result"] as? String)?.contains("check approved, performed 1") == true || (done["result"] as? String)?.contains("check approved, performed true") == true, "the form was filled after approval: \(done["result"] ?? "")")
+            let acts = reviews(done, "browser")
+            require(acts.count == 1 && acts[0]["autoApproved"] as? Bool == true && acts[0]["rule"] as? String == standingID && acts[0]["status"] as? String == "completed", "the step went ahead under the rule and is recorded as such, with its receipt: \(acts)")
+            let counted = reviews(done, "checkpoint")[0]
+            require(counted["status"] as? String == "answered" && counted["counted"] as? Int == number && counted["earned"] as? Bool == (number == 2), "the person’s approval was counted (\(number) of 2)")
+        }
+        let earnedNotice = (try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "status"])["decisions"] as? [[String: Any]] ?? []).filter { $0["kind"] as? String == "notice" }
+        require(earnedNotice.count == 1 && (earnedNotice[0]["payload"] as? [String: Any])?["ruleId"] as? String == standingID, "the person is told once that the agent has earned it")
+        let free = try await ruleTask("RULES_FIXTURE RULES_SKIP_CHECK apply three", "rule-task-3")
+        let freeDone = try await reach(free, "completed")
+        require(reviews(freeDone, "checkpoint").isEmpty && reviews(freeDone, "browser").count == 1 && reviews(freeDone, "browser")[0]["autoApproved"] as? Bool == true, "once earned, the next application needs no check and no per-step review")
+        _ = try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "rules", "arguments": ["action": "pause", "ruleId": standingID]])
+        let held = try await ruleTask("RULES_FIXTURE RULES_SKIP_CHECK apply four", "rule-task-4")
+        let heldWaiting = try await reach(held, "waiting_review")
+        require(reviews(heldWaiting, "browser").count == 1 && reviews(heldWaiting, "browser")[0]["status"] as? String == "pending" && reviews(heldWaiting, "browser")[0]["autoApproved"] == nil, "with the rule paused the same step waits for the person again")
+        _ = try await computer(["action": "cancel", "taskId": held])
+        print("PASS: a standing rule end to end through the real worker: the agent shows its work, each approval is counted once, the third-time freedom is announced once, an earned rule lets browser steps through with a recorded receipt, and pausing it brings reviews back")
+
         let rpc=BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[8]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]));try rpc.launch("fixture")
         defer{rpc.close()};let began=Date()
         do {_ = try await rpc.request(["command":"silent"],timeout:0.05);require(false,"silent RPC must time out")}catch{}

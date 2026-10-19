@@ -69,7 +69,13 @@
     const data=Object.entries(args).filter(([k])=>!['payload'].includes(k));
     return `<section class="worker-review worker-unconfirmed" data-worker-unconfirmed="${esc(r.id)}"><strong>Check whether this went through</strong><small>${esc(auth?authTitle(r.mode):r.tool?.name||'An action')} · ${esc(auth?r.origin||'':r.tool?.service||'Buddy private browser')}</small><p class="worker-caption">Buddy stopped before it could confirm this. Look at the site or service, then tell Buddy what you found. Buddy will not send an identical action until you do.</p>${data.length?`<dl>${data.map(([k,v])=>`<div><dt>${esc(k.replace(/_/g,' '))}</dt><dd>${esc(typeof v==='string'?v:JSON.stringify(v,null,2))}</dd></div>`).join('')}</dl>`:''}<div class="worker-toolbar">${button('resolve-no','It did not go through',`data-review-id="${esc(r.id)}"`)}${button('resolve-yes','It went through',`data-review-id="${esc(r.id)}"`,true)}</div></section>`;
   }
+  // The person is asked to look at prepared work (a CV, a drafted application) because one of their own rules asked for it.
+  function checkpointCard(r){
+    const a=r.tool?.arguments||{},files=(a.files||[]).filter(Boolean);
+    return `<section class="worker-review worker-checkpoint" data-worker-review="${esc(r.id)}"><strong>Check the work</strong><small>${a.of?`Check ${esc(a.check)} of ${esc(a.of)} · `:''}${esc(a.rule||'Your rule')}</small><p>${esc(a.summary||'')}</p>${files.length?`<ul class="worker-checkpoint-files">${files.map(f=>`<li><button type="button" class="small-link" data-worker-file="${esc(f)}">${esc(f)}</button></li>`).join('')}</ul>`:''}${a.effect?`<p class="worker-caption">${esc(a.effect)}</p>`:''}<fieldset><legend>If something needs changing, say what</legend><textarea data-worker-question="feedback" rows="3" maxlength="2000">${esc(drafts.get(r.id)?.feedback||'')}</textarea></fieldset><div class="worker-toolbar">${button('checkpoint-no','Needs changes',`data-review-id="${esc(r.id)}"`)}${button('checkpoint-yes','Looks good, continue',`data-review-id="${esc(r.id)}"`,true)}</div></section>`;
+  }
   function review(r){
+    if(r.kind==='checkpoint')return checkpointCard(r);
     if(r.kind==='authentication')return `<section class="worker-review worker-auth"><strong>${esc(authTitle(r.mode))}</strong><small>${esc(r.origin)}${r.accountEmail?` · ${esc(r.accountEmail)}`:''}</small><p>${esc(r.reason||'Continue your requested task.')}</p><p class="worker-caption">${r.mode==='signup'?'Choose or generate the new credential in private Chrome. Chrome can save it to Google Password Manager.':'Chrome keeps passwords private. Buddy receives the sign-in result.'} Allow email verification for this website during this sign-in.</p><div class="worker-toolbar">${button('auth-decline','Not now',`data-review-id="${esc(r.id)}"`)}${r.mode==='signin'?button('auth-saved','Use saved login',`data-review-id="${esc(r.id)}"`):''}${r.mode==='verification'?button('auth-verify','Verify email',`data-review-id="${esc(r.id)}"`,true):''}${button('auth-private',r.mode==='signup'?'Create privately':'Open privately',`data-review-id="${esc(r.id)}"`,r.mode!=='verification')}</div></section>`;
     const args={...r.tool?.arguments};const body=BuddyActions.messagePreview(args.payload);if(body)args.message=body;
     const data=Object.entries(args).filter(([k])=>!['payload'].includes(k));
@@ -140,6 +146,12 @@
         else if(operation==='start'){snapshot=await request({operation:'start'});list();}
         else if(operation==='pauseAll'){await request({operation,paused:!snapshot.paused});await refresh();}
         else if(operation==='resolve-yes'||operation==='resolve-no'){const r=unconfirmed(detail).find(r=>r.id===op.dataset.reviewId);if(!r)throw Error('This was already checked. Refresh the task.');detail=(await request({operation:'resolve',taskId:detail.id,id:r.id,confirmed:operation==='resolve-yes'})).task;drawDetail();await refresh(false);}
+        else if(operation==='checkpoint-yes'||operation==='checkpoint-no'){
+          const r=pending(detail).find(r=>r.id===op.dataset.reviewId&&r.kind==='checkpoint');if(!r)throw Error('This check ended. Refresh the task.');
+          const feedback=String(document.querySelector(`[data-worker-review="${CSS.escape(r.id)}"] [data-worker-question="feedback"]`)?.value??drafts.get(r.id)?.feedback??'').slice(0,2000);
+          if(operation==='checkpoint-no'&&!feedback.trim())throw Error('Say what needs changing so the agent can fix it.');
+          await request({operation:'review',taskId:detail.id,id:r.id,accept:operation==='checkpoint-yes',feedback});drafts.delete(r.id);await refresh();
+        }
         else if(operation==='approve'||operation==='decline'){
           const r=pending(detail).find(r=>r.id===op.dataset.reviewId);if(!r)throw Error('This review ended. Refresh the task.');
           const answers=Object.fromEntries(Object.entries(drafts.get(r.id)||{}).map(([k,v])=>[k,[v]]));

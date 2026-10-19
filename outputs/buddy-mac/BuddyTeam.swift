@@ -20,6 +20,7 @@ struct BuddyTurnOptions {
     var extraTools: [[String: Any]] = []
     var proposalsEnabled = true
     var requiresRoutine = false
+    var requiresRule = false
     var authorizedUserText = ""
     var requiresProactive:Bool? = nil
     var inboxQuery: String? = nil

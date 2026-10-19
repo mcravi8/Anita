@@ -641,8 +641,9 @@ struct BuddyAttempt {
             let tool = (review["tool"] as? [String: Any])?["name"] as? String ?? "an action", auth = review["kind"] as? String == "authentication"
             switch review["status"] as? String ?? "" {
             case "pending":
-                out.append(DecisionSpec(id: "review:" + reviewID, kind: auth ? "signin" : "review", title: auth ? "Sign-in needs your choice" : "Review: \(tool)",
-                                        question: auth ? "Choose how to sign in to \(review["origin"] as? String ?? "this site")." : "Allow this exact operation?", label: "Review", payload: ["taskId": id, "reviewId": reviewID]))
+                let check = review["kind"] as? String == "checkpoint", ask = ((review["questions"] as? [[String: Any]])?.first?["question"] as? String) ?? ""
+                out.append(DecisionSpec(id: "review:" + reviewID, kind: auth ? "signin" : "review", title: auth ? "Sign-in needs your choice" : check ? "Check the work: \(title)" : "Review: \(tool)",
+                                        question: auth ? "Choose how to sign in to \(review["origin"] as? String ?? "this site")." : check ? (ask.isEmpty ? "Look at the work and say whether to continue." : ask) : "Allow this exact operation?", label: check ? "Check work" : "Review", payload: ["taskId": id, "reviewId": reviewID]))
             case "uncertain":
                 out.append(DecisionSpec(id: "action:" + reviewID + ":unconfirmed", kind: "unconfirmed", title: "Check whether “\(tool)” went through",
                                         question: "Buddy stopped before it could confirm this. Look at the site or service, then say whether it went through.", label: "Check action", payload: ["taskId": id, "reviewId": reviewID]))
@@ -1098,6 +1099,497 @@ struct BuddyAttempt {
             var target = directory.appendingPathComponent(name + ".migrated")
             if fm.fileExists(atPath: target.path) { target = directory.appendingPathComponent(name + "." + UUID().uuidString.prefix(8) + ".migrated") }
             try? fm.moveItem(at: url, to: target)
+        }
+    }
+}
+
+// MARK: - Settings changed on the person's word, and standing rules
+
+struct BuddySettingChange {
+    let id: String, workspace: String, scope: String, agentID: String, field: String
+    let old: Any?, new: Any?
+    let actor: String, source: String, quote: String, status: String, risk: String, adopter: String, adopted: Bool, seq: Int, createdAt: String
+}
+
+struct BuddyRule {
+    let id: String, workspace: String, agentID: String, kind: String, text: String, quote: String, params: [String: Any], status: String, graduated: Bool, actor: String, createdAt: String
+    var reviewFirst: Int { params["reviewFirst"] as? Int ?? 0 }
+    var appliesTo: [String] { params["appliesTo"] as? [String] ?? ["browser"] }
+    var taskKinds: [String] { params["taskKinds"] as? [String] ?? [] }
+    /// Whether it lets the agent go ahead without asking (once it has earned that). A rule that only asks more often is always safe.
+    var relaxes: Bool { params["then"] as? String == "proceed" }
+}
+
+/// What may be changed on someone's word, what each value may be, and what needs one tap first. A change that raises spending or access is the only
+/// kind that waits for the person; everything else applies at once, and each change keeps its old value so it can be undone.
+enum BuddyAgentChanges {
+    static let agentFields: Set<String> = ["name", "role", "instructions", "avatarShape", "avatarColor", "hidden", "model", "dailyLimitUSD", "proactive", "tools.web", "tools.projectFiles", "tools.desktop"]
+    static let workspaceFields: Set<String> = ["dailyLimitUSD", "teamCheckInsEnabled", "teamCheckInIntervalMinutes", "teamCheckInModel", "teamDailyLimitUSD"]
+    /// Fields the page keeps in its own state, so the page has to adopt a change to them.
+    static let pageFields: Set<String> = ["name", "avatarShape", "avatarColor", "hidden", "tools.web", "tools.projectFiles", "tools.desktop"]
+    /// Fields the app keeps in the agent’s saved profile (where the person’s own edits and the setup interview write them), so the app adopts them.
+    static let appFields: Set<String> = ["role", "instructions"]
+    static func adopter(scope: String, field: String) -> String { scope == "agent" ? (pageFields.contains(field) ? "page" : appFields.contains(field) ? "app" : "") : "" }
+    /// Must match BuddyAvatar (tests that compile both check it); repeated here so the worker core stands alone.
+    static let avatarShapes = ["diamond", "sphere", "hex", "pill"]
+    static let avatarColors = ["lilac", "blue", "peach", "mint", "red", "gold", "cobalt"]
+    static let legacyShapes = ["star": "diamond", "pebble": "sphere", "cube": "hex", "clover": "pill"]
+    static func shape(_ value: String) -> String? { let id = legacyShapes[value] ?? value; return avatarShapes.contains(id) ? id : nil }
+    static func fields(_ scope: String) -> Set<String> { scope == "workspace" ? workspaceFields : agentFields }
+    static func fail(_ message: String) -> BuddyWorkerFailure { BuddyWorkerFailure(message: message) }
+
+    /// Quotes may differ from the message in capitals, spacing and punctuation style, and that is not a reason to refuse a genuine request.
+    static func normalized(_ text: String) -> String {
+        var out = text.lowercased()
+        for (from, to) in [("’", "'"), ("‘", "'"), ("“", "\""), ("”", "\""), ("–", "-"), ("—", "-"), ("…", "...")] { out = out.replacingOccurrences(of: from, with: to) }
+        return out.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+    static func quoteAuthorized(_ quote: String, in text: String) -> Bool {
+        let q = normalized(quote)
+        return q.count >= 8 && normalized(text).contains(q)
+    }
+    private static func boolean(_ value: Any?, _ field: String) throws -> Bool {
+        if let flag = value as? Bool { return flag }
+        if let text = value as? String, ["true", "on", "yes"].contains(text.lowercased()) { return true }
+        if let text = value as? String, ["false", "off", "no"].contains(text.lowercased()) { return false }
+        throw fail("Choose true or false for \(field).")
+    }
+    private static func text(_ value: Any?, _ field: String, _ limit: Int) throws -> String {
+        guard let raw = value as? String else { throw fail("Give \(field) as text.") }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= limit, !trimmed.contains("\0") else { throw fail("\(field.prefix(1).uppercased() + field.dropFirst()) must be 1 to \(limit) characters.") }
+        return trimmed
+    }
+    private static func money(_ value: Any?, _ field: String, allowNone: Bool, minimum: Double = 0) throws -> Double? {
+        if value == nil || value is NSNull || (value as? String)?.lowercased() == "none" { guard allowNone else { throw fail("Choose an amount in dollars for \(field).") }; return nil }
+        let amount = (value as? Double) ?? (value as? Int).map(Double.init) ?? (value as? String).flatMap(Double.init)
+        guard let amount, amount.isFinite, amount >= minimum, amount <= 100000 else { throw fail("Choose \(field) between $\(minimum == 0 ? "0" : String(format: "%.2f", minimum)) and $100,000, or \"none\" for no limit.") }
+        return amount
+    }
+    /// The value as it will be stored, or a plain message about what is allowed.
+    static func normalize(scope: String, field: String, value: Any?) throws -> Any? {
+        guard fields(scope).contains(field) else { throw fail("\(scope == "workspace" ? "Workspace" : "Agent") settings you can change: " + fields(scope).sorted().joined(separator: ", ") + ".") }
+        switch field {
+        case "name": return try text(value, "name", 40)
+        case "role": return try text(value, "role", 55)
+        case "instructions": return try text(value, "instructions", 1500)
+        case "avatarShape":
+            guard let raw = value as? String, let shape = shape(raw) else { throw fail("Choose a figure from: " + avatarShapes.joined(separator: ", ") + ".") }
+            return shape
+        case "avatarColor":
+            guard let raw = value as? String, avatarColors.contains(raw.lowercased()) else { throw fail("Choose a colour from: " + avatarColors.joined(separator: ", ") + ".") }
+            return raw.lowercased()
+        case "hidden", "proactive", "tools.web", "tools.projectFiles", "tools.desktop", "teamCheckInsEnabled": return try boolean(value, field)
+        case "model":
+            let parsed = (value as? String).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+            guard let model = (value as? [String: Any]) ?? parsed, let provider = model["provider"] as? String, ["chatgpt", "claude"].contains(provider), let name = model["model"] as? String, name.isEmpty || name.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"#, options: .regularExpression) != nil else {
+                throw fail("Give the model as {\"provider\": \"claude\" or \"chatgpt\", \"model\": the model name}.")
+            }
+            return ["provider": provider, "model": name]
+        case "dailyLimitUSD": return try money(value, field, allowNone: true)
+        case "teamDailyLimitUSD": return try money(value, field, allowNone: false, minimum: 0.1)
+        case "teamCheckInIntervalMinutes":
+            let minutes = (value as? Int) ?? (value as? Double).map { Int($0) } ?? (value as? String).flatMap(Int.init)
+            guard let minutes, [5, 15, 30, 60].contains(minutes) else { throw fail("Choose 5, 15, 30 or 60 minutes.") }
+            return minutes
+        case "teamCheckInModel":
+            if value == nil || value is NSNull || (value as? String)?.isEmpty == true { return nil }
+            guard let name = value as? String, name.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"#, options: .regularExpression) != nil else { throw fail("Give a valid model name, or leave it empty for the default.") }
+            return name
+        default: throw fail("That setting cannot be changed.")
+        }
+    }
+    private static func number(_ value: Any?) -> Double? { (value as? Double) ?? (value as? Int).map(Double.init) ?? (value as? NSNumber)?.doubleValue }
+    /// "confirm" for a change that raises what an agent may spend or reach, "low" for everything else.
+    static func risk(field: String, old: Any?, new: Any?) -> String {
+        switch field {
+        case "tools.web", "tools.projectFiles", "tools.desktop", "teamCheckInsEnabled": return (new as? Bool) == true && (old as? Bool) != true ? "confirm" : "low"
+        case "dailyLimitUSD", "teamDailyLimitUSD":
+            guard let old = number(old) else { return "low" }              // adding a cap lowers what can be spent
+            guard let new = number(new) else { return "confirm" }          // removing a cap raises it
+            return new > old ? "confirm" : "low"
+        case "teamCheckInIntervalMinutes": return (number(new) ?? 60) < (number(old) ?? 0) ? "confirm" : "low"
+        default: return "low"
+        }
+    }
+    static func encode(_ value: Any?) -> String { guard let value, !(value is NSNull) else { return "null" }; return (try? BuddyOperationsDB.encode(["v": value]))?.replacingOccurrences(of: "{\"v\":", with: "").dropLast().description ?? "null" }
+    static func decode(_ text: String) -> Any? {
+        guard let value = (try? BuddyOperationsDB.decode("{\"v\":" + text + "}"))?["v"], !(value is NSNull) else { return nil }
+        return value
+    }
+
+    /// Puts changes nobody has carried into their home yet onto a copy of the state, so everything that reads the state sees them at once. Applying
+    /// the same changes again gives the same result.
+    static func overlay(_ state: [String: Any], _ changes: [BuddySettingChange]) -> [String: Any] {
+        guard !changes.isEmpty else { return state }
+        var out = state, agents = out["agents"] as? [[String: Any]] ?? [], hidden = out["hiddenAgents"] as? [String] ?? []
+        for change in changes.sorted(by: { $0.seq < $1.seq }) where !change.adopter.isEmpty && change.scope == "agent" {
+            // An undo is recorded as a change of its own (restoring the old value), so only changes that took effect are carried.
+            guard change.status == "applied", let i = agents.firstIndex(where: { $0["id"] as? String == change.agentID }) else { continue }
+            let value: Any? = change.new
+            switch change.field {
+            case "name", "role", "avatarShape", "avatarColor": if let value { agents[i][change.field] = value }
+            case "instructions": if let value { agents[i]["description"] = value }
+            case "hidden": hidden.removeAll { $0 == change.agentID }; if (value as? Bool) == true { hidden.append(change.agentID) }
+            default:
+                if change.field.hasPrefix("tools."), let flag = value as? Bool { var tools = agents[i]["tools"] as? [String: Bool] ?? [:]; tools[String(change.field.dropFirst(6))] = flag; agents[i]["tools"] = tools }
+            }
+        }
+        out["agents"] = agents; out["hiddenAgents"] = hidden
+        return out
+    }
+    static func change(_ row: [BuddyOperationsDB.Column]) -> BuddySettingChange? {
+        guard row.count >= 16, let id = row[0].string else { return nil }
+        return BuddySettingChange(id: id, workspace: row[1].string ?? "", scope: row[2].string ?? "", agentID: row[3].string ?? "", field: row[4].string ?? "", old: BuddyAgentChanges.decode(row[5].string ?? "null"), new: BuddyAgentChanges.decode(row[6].string ?? "null"),
+                                  actor: row[7].string ?? "", source: row[8].string ?? "", quote: row[9].string ?? "", status: row[10].string ?? "", risk: row[11].string ?? "low", adopter: row[12].string ?? "", adopted: row[13].int == 1, seq: Int(row[14].int ?? 0), createdAt: row[15].string ?? "")
+    }
+    /// Read-only: the changes nobody has carried home yet (for one adopter, or for all). Any process that reads the workspace uses this.
+    static func unadopted(support: URL, workspace: String, adopter: String? = nil) -> [BuddySettingChange] {
+        let directory = support.appendingPathComponent("Worker")
+        guard FileManager.default.fileExists(atPath: directory.appendingPathComponent(BuddyOperationsDB.fileName).path), let db = try? BuddyOperationsDB(directory: directory, existing: true),
+              let rows = try? db.rows("SELECT \(columns) FROM setting_changes WHERE workspace = ? AND adopter <> '' AND adopted = 0 AND status = 'applied' ORDER BY seq", [.text(workspace)]) else { return [] }
+        return rows.compactMap(change).filter { adopter == nil || $0.adopter == adopter }
+    }
+    static let columns = "id, workspace, scope, agent_id, field, old_value, new_value, actor, source, quote, status, risk, adopter, adopted, seq, created_at"
+}
+
+extension BuddyWorkerStore {
+    private static let changeColumns = BuddyAgentChanges.columns
+    private static func stamp() -> String { ISO8601DateFormatter().string(from: Date()) }
+
+    func recordChange(workspace: String, scope: String, agent: String, field: String, old: Any?, new: Any?, actor: String, source: String, quote: String, status: String, risk: String) throws -> String {
+        let id = UUID().uuidString, now = Self.stamp()
+        try db.transaction {
+            let seq = Int(try db.rows("SELECT COALESCE(MAX(seq), 0) + 1 FROM setting_changes WHERE workspace = ?", [.text(workspace)]).first?.first?.int ?? 1)
+            try db.run("INSERT INTO setting_changes(id, workspace, scope, agent_id, field, old_value, new_value, actor, source, quote, status, risk, adopter, adopted, seq, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                       [.text(id), .text(workspace), .text(scope), .text(agent), .text(field), .text(BuddyAgentChanges.encode(old)), .text(BuddyAgentChanges.encode(new)), .text(actor), .text(source), .text(String(quote.prefix(500))), .text(status), .text(risk),
+                        .text(BuddyAgentChanges.adopter(scope: scope, field: field)), .int(Int64(seq)), .text(now), .text(now)])
+        }
+        return id
+    }
+    func change(_ id: String) throws -> BuddySettingChange? {
+        try db.rows("SELECT \(Self.changeColumns) FROM setting_changes WHERE id = ?", [.text(id)]).first.flatMap(BuddyAgentChanges.change)
+    }
+    func changes(workspace: String, agent: String? = nil, limit: Int = 50) throws -> [BuddySettingChange] {
+        let rows = agent == nil ? try db.rows("SELECT \(Self.changeColumns) FROM setting_changes WHERE workspace = ? ORDER BY seq DESC LIMIT ?", [.text(workspace), .int(Int64(limit))])
+            : try db.rows("SELECT \(Self.changeColumns) FROM setting_changes WHERE workspace = ? AND agent_id = ? ORDER BY seq DESC LIMIT ?", [.text(workspace), .text(agent ?? ""), .int(Int64(limit))])
+        return rows.compactMap(BuddyAgentChanges.change)
+    }
+    /// Changes an adopter ("page" or "app") has to carry into its own state, and has not yet.
+    func unadoptedChanges(workspace: String, adopter: String) throws -> [BuddySettingChange] {
+        try db.rows("SELECT \(Self.changeColumns) FROM setting_changes WHERE workspace = ? AND adopter = ? AND adopted = 0 AND status = 'applied' ORDER BY seq", [.text(workspace), .text(adopter)]).compactMap(BuddyAgentChanges.change)
+    }
+    func adoptChanges(workspace: String, adopter: String, ids: [String]) throws {
+        guard ids.count <= 500 else { throw BuddyWorkerFailure(message: "Too many changes at once.") }
+        try db.transaction { for id in ids { try db.run("UPDATE setting_changes SET adopted = 1 WHERE id = ? AND workspace = ? AND adopter = ?", [.text(id), .text(workspace), .text(adopter)]) } }
+    }
+    func setChange(_ id: String, status: String, old: Any?? = nil) throws {
+        try db.transaction {
+            if let old { try db.run("UPDATE setting_changes SET old_value = ? WHERE id = ?", [.text(BuddyAgentChanges.encode(old)), .text(id)]) }
+            try db.run("UPDATE setting_changes SET status = ?, updated_at = ? WHERE id = ?", [.text(status), .text(Self.stamp()), .text(id)])
+        }
+    }
+    /// A question or notice that is not about a task (a change waiting for the person's OK, a rule that has earned its freedom).
+    func openDecision(workspace: String, id: String, agent: String, kind: String, title: String, question: String, label: String, payload: [String: Any]) throws {
+        guard ["confirm", "notice"].contains(kind) else { throw BuddyWorkerFailure(message: "Unknown kind of notice.") }
+        try db.run("INSERT OR IGNORE INTO decisions(id, workspace, agent_id, task_id, kind, title, question, label, payload, created_at) VALUES(?, ?, ?, '', ?, ?, ?, ?, ?, ?)",
+                   [.text(id), .text(workspace), .text(agent), .text(kind), .text(String(title.prefix(300))), .text(String(question.prefix(1200))), .text(label), .text((try? BuddyOperationsDB.encode(payload)) ?? "{}"), .text(Self.stamp())])
+    }
+    func closeDecision(id: String, resolution: String) throws {
+        try db.run("UPDATE decisions SET status = 'resolved', resolution = ?, resolved_at = ? WHERE id = ? AND status = 'open'", [.text(resolution), .text(Self.stamp()), .text(id)])
+    }
+
+    // MARK: rules
+
+    private static let ruleColumns = "id, workspace, agent_id, kind, text, quote, params, status, graduated, actor, created_at"
+    private static func rule(_ row: [BuddyOperationsDB.Column]) -> BuddyRule? {
+        guard row.count >= 11, let id = row[0].string else { return nil }
+        return BuddyRule(id: id, workspace: row[1].string ?? "", agentID: row[2].string ?? "", kind: row[3].string ?? "", text: row[4].string ?? "", quote: row[5].string ?? "", params: (try? BuddyOperationsDB.decode(row[6].string ?? "{}")) ?? [:],
+                         status: row[7].string ?? "", graduated: row[8].int == 1, actor: row[9].string ?? "", createdAt: row[10].string ?? "")
+    }
+    func addRule(workspace: String, agent: String, text: String, quote: String, params: [String: Any], status: String, actor: String) throws -> String {
+        guard UUID(uuidString: workspace) != nil, UUID(uuidString: agent) != nil, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 600 else { throw BuddyWorkerFailure(message: "Give the rule in plain words, up to 600 characters.") }
+        guard try db.rows("SELECT COUNT(*) FROM rules WHERE workspace = ? AND agent_id = ? AND status <> 'revoked'", [.text(workspace), .text(agent)]).first?.first?.int ?? 0 < 30 else { throw BuddyWorkerFailure(message: "This agent already has 30 rules. Remove one first.") }
+        let id = UUID().uuidString, now = Self.stamp()
+        try db.run("INSERT INTO rules(id, workspace, agent_id, kind, text, quote, params, status, graduated, actor, created_at, updated_at) VALUES(?, ?, ?, 'review_gate', ?, ?, ?, ?, 0, ?, ?, ?)",
+                   [.text(id), .text(workspace), .text(agent), .text(text), .text(String(quote.prefix(500))), .text((try? BuddyOperationsDB.encode(params)) ?? "{}"), .text(status), .text(actor), .text(now), .text(now)])
+        return id
+    }
+    func rule(_ id: String) throws -> BuddyRule? { try db.rows("SELECT \(Self.ruleColumns) FROM rules WHERE id = ?", [.text(id)]).first.flatMap(Self.rule) }
+    func rules(workspace: String, agent: String? = nil, includeRevoked: Bool = false) throws -> [BuddyRule] {
+        let all = try db.rows("SELECT \(Self.ruleColumns) FROM rules WHERE workspace = ? ORDER BY created_at", [.text(workspace)]).compactMap(Self.rule)
+        return all.filter { (agent == nil || $0.agentID == agent) && (includeRevoked || $0.status != "revoked") }
+    }
+    func setRule(_ id: String, status: String) throws {
+        guard ["pending", "active", "paused", "revoked"].contains(status) else { throw BuddyWorkerFailure(message: "Unknown rule state.") }
+        try db.run("UPDATE rules SET status = ?, updated_at = ? WHERE id = ?", [.text(status), .text(Self.stamp()), .text(id)])
+    }
+    func approvals(rule id: String) throws -> Int { Int(try db.rows("SELECT COUNT(*) FROM rule_approvals WHERE rule_id = ?", [.text(id)]).first?.first?.int ?? 0) }
+    /// Counts a review the person approved under a rule, once. Reaching the number the rule asked for is what earns the agent its freedom; it
+    /// is recorded with the approval, so it cannot happen without the count or the count without it.
+    @discardableResult func countApproval(rule id: String, review: String, agentName: String = "The agent") throws -> (count: Int, graduated: Bool) {
+        guard let rule = try rule(id), rule.status == "active" else { throw BuddyWorkerFailure(message: "This rule is not active.") }
+        return try db.transaction {
+            try db.run("INSERT OR IGNORE INTO rule_approvals(rule_id, review_id, at) VALUES(?, ?, ?)", [.text(id), .text(review), .text(Self.stamp())])
+            let count = try approvals(rule: id)
+            let earned = rule.relaxes && rule.reviewFirst > 0 && count >= rule.reviewFirst
+            if earned && !rule.graduated {
+                try db.run("UPDATE rules SET graduated = 1, updated_at = ? WHERE id = ?", [.text(Self.stamp()), .text(id)])
+                try openDecision(workspace: rule.workspace, id: "graduated:" + id + ":" + String(count), agent: rule.agentID, kind: "notice", title: "\(agentName) now works without asking",
+                                 question: "You approved \(count) checks of “\(rule.text.prefix(160))”, so \(agentName) now continues at this step without asking you each time. Pause or remove the rule from the agent’s settings whenever you like.", label: "Review rule", payload: ["ruleId": id])
+            }
+            return (count, earned || rule.graduated)
+        }
+    }
+    /// Takes away what a rule earned (the person said to stop): the approvals stay on record, but the agent has to be reviewed again from the start.
+    func resetRule(_ id: String) throws {
+        try db.transaction { try db.run("DELETE FROM rule_approvals WHERE rule_id = ?", [.text(id)]); try db.run("UPDATE rules SET graduated = 0, updated_at = ? WHERE id = ?", [.text(Self.stamp()), .text(id)]) }
+    }
+    /// The rule, if any, that lets this task's browser operations go ahead without asking: active, relaxing, covering the browser and this kind of
+    /// task, and either earned (enough reviews approved) or already checked by the person in this very task.
+    func autoApprovingRule(for job: [String: Any], tool: String = "browser") throws -> BuddyRule? {
+        guard let workspace = job["workspace"] as? String, let agent = job["agentId"] as? String else { return nil }
+        let checked = Set(job["checkpoints"] as? [String] ?? []), kind = job["kind"] as? String ?? ""
+        return try rules(workspace: workspace, agent: agent).first { rule in
+            rule.status == "active" && rule.relaxes && rule.appliesTo.contains(tool) && (rule.taskKinds.isEmpty || rule.taskKinds.contains(kind)) && (rule.graduated || checked.contains(rule.id))
+        }
+    }
+    /// The active rules that ask for a review before the agent goes ahead, for the agent that is about to do the work.
+    func reviewRules(workspace: String, agent: String, kind: String) throws -> [BuddyRule] {
+        try rules(workspace: workspace, agent: agent).filter { $0.status == "active" && $0.relaxes && $0.reviewFirst > 0 && ($0.taskKinds.isEmpty || $0.taskKinds.contains(kind)) }
+    }
+    /// Standing rules as the agent is told them. They are also enforced natively; the telling only lets the agent do its part (showing the work).
+    func rulesGuidance(workspace: String, agent: String) -> String {
+        guard let all = try? rules(workspace: workspace, agent: agent).filter({ $0.status == "active" }), !all.isEmpty else { return "" }
+        let lines = all.map { rule -> String in
+            var line = "- [\(rule.id.prefix(8))] \(rule.text)"
+            if rule.relaxes && rule.reviewFirst > 0 {
+                let done = (try? approvals(rule: rule.id)) ?? 0
+                line += rule.graduated ? " Status: the user has approved this \(done) times, so you may now go ahead without asking for it."
+                    : " Status: \(done) of \(rule.reviewFirst) reviewed by the user so far. Until then, before you finish the work that this covers, call buddy_review_checkpoint with rule \"\(rule.id)\" and show them what you prepared; wait for their answer."
+            }
+            return line
+        }
+        return "Standing rules from the user for you (they are enforced natively; follow them exactly):\n" + lines.joined(separator: "\n")
+    }
+}
+
+/// The standing rules a reader outside the worker needs: the guidance an agent is told. Read-only.
+enum BuddyRulesReader {
+    @MainActor static func guidance(support: URL, workspace: String, agent: String) -> String {
+        let directory = support.appendingPathComponent("Worker")
+        guard FileManager.default.fileExists(atPath: directory.appendingPathComponent(BuddyOperationsDB.fileName).path), let db = try? BuddyOperationsDB(directory: directory, existing: true),
+              let rows = try? db.rows("SELECT id, text, params, graduated FROM rules WHERE workspace = ? AND agent_id = ? AND status = 'active' ORDER BY created_at", [.text(workspace), .text(agent)]), !rows.isEmpty else { return "" }
+        let lines = rows.map { row -> String in
+            let id = row[0].string ?? "", params = (try? BuddyOperationsDB.decode(row[2].string ?? "{}")) ?? [:], first = params["reviewFirst"] as? Int ?? 0, graduated = row[3].int == 1
+            var line = "- [\(id.prefix(8))] \(row[1].string ?? "")"
+            if params["then"] as? String == "proceed", first > 0 {
+                let done = Int((try? db.rows("SELECT COUNT(*) FROM rule_approvals WHERE rule_id = ?", [.text(id)]).first?.first?.int) ?? 0)
+                line += graduated ? " Status: the user has approved this \(done) times, so the agent now goes ahead without asking for it." : " Status: \(done) of \(first) reviewed by the user so far. Background tasks show their work to the user for these checks on their own; never skip a check or tell the user it can be skipped."
+            }
+            return line
+        }
+        return "Standing rules from the user for you (they are enforced natively; follow them exactly):\n" + lines.joined(separator: "\n")
+    }
+}
+
+// MARK: - The engine: change a setting, keep a rule, on the person's word
+
+/// Applies what the person asked for in their own words. The model names the change and quotes the sentence it came from; the quote is checked
+/// against what the person really wrote, so a web page, an email or another agent can never cause one. Everything is journaled with its old value.
+@MainActor final class BuddyAgentSettings {
+    let store: BuddyWorkerStore, workspace: String
+    var agents: () throws -> [[String: Any]] = { [] }
+    var supervisor: () -> String? = { nil }
+    /// The setting's value now (agent or workspace scope), from wherever it truly lives.
+    var read: (_ scope: String, _ agent: String, _ field: String) throws -> Any? = { _, _, _ in nil }
+    /// Puts a value where it truly lives. Only for settings the app itself owns; the page's own fields are carried by the journal until it adopts them.
+    var write: (_ scope: String, _ agent: String, _ field: String, _ value: Any?) throws -> Void = { _, _, _, _ in }
+    var announce: () -> Void = {}
+    init(store: BuddyWorkerStore, workspace: String) { self.store = store; self.workspace = workspace }
+
+    private func fail(_ message: String) -> BuddyWorkerFailure { BuddyWorkerFailure(message: message) }
+    static let labels: [String: String] = ["name": "name", "role": "role", "instructions": "instructions", "avatarShape": "figure", "avatarColor": "colour", "hidden": "visibility", "model": "model", "dailyLimitUSD": "daily spending limit",
+        "proactive": "proactive updates", "tools.web": "web access", "tools.projectFiles": "file access", "tools.desktop": "browser access", "teamCheckInsEnabled": "team check-ins", "teamCheckInIntervalMinutes": "team check-in interval",
+        "teamCheckInModel": "team check-in model", "teamDailyLimitUSD": "team check-in limit"]
+    private func name(of agent: String) -> String { ((try? agents())?.first { $0["id"] as? String == agent }?["name"] as? String) ?? "this agent" }
+    func describe(_ field: String, _ value: Any?) -> String {
+        guard let value, !(value is NSNull) else { return field.hasSuffix("LimitUSD") ? "no limit" : "the default" }
+        switch field {
+        case "hidden": return (value as? Bool) == true ? "hidden" : "shown"
+        case "model": let m = value as? [String: Any]; return [m?["provider"] as? String, (m?["model"] as? String).flatMap { $0.isEmpty ? nil : $0 }].compactMap { $0 }.joined(separator: " · ")
+        case "dailyLimitUSD", "teamDailyLimitUSD": let n = (value as? Double) ?? (value as? Int).map(Double.init) ?? 0; return String(format: "$%.2f a day", n)
+        case "teamCheckInIntervalMinutes": return "every \(value) minutes"
+        case "instructions": return "“" + String((value as? String ?? "").prefix(140)) + ((value as? String ?? "").count > 140 ? "…" : "") + "”"
+        default: if let flag = value as? Bool { return flag ? "on" : "off" }; return "“\(value)”"
+        }
+    }
+    private func line(_ scope: String, _ agent: String, _ field: String, from old: Any?, to new: Any?) -> String {
+        let label = Self.labels[field] ?? field, who = scope == "workspace" ? "the workspace’s" : name(of: agent) + "’s"
+        return "\(who) \(label): \(describe(field, old)) → \(describe(field, new))"
+    }
+    private func same(_ a: Any?, _ b: Any?) -> Bool { BuddyAgentChanges.encode(a) == BuddyAgentChanges.encode(b) }
+    private func current(_ scope: String, _ agent: String, _ field: String) throws -> Any? {
+        if field == "dailyLimitUSD" {
+            return try store.limits(workspace: workspace).first { $0["scope"] as? String == scope && ($0["id"] as? String ?? "") == (scope == "agent" ? agent : "") }?["amountUSD"]
+        }
+        return try read(scope, agent, field)
+    }
+    private func put(_ scope: String, _ agent: String, _ field: String, _ value: Any?, by: String, quote: String) throws {
+        if field == "dailyLimitUSD" { try store.setLimit(workspace: workspace, scope: scope, id: agent, amount: (value as? Double) ?? (value as? Int).map(Double.init), setBy: by, quote: quote); return }
+        if !BuddyAgentChanges.adopter(scope: scope, field: field).isEmpty { return }
+        try write(scope, agent, field, value)
+    }
+    /// The person acting on screen may always. An agent needs the person's own words for it, and may act for itself, for a teammate it manages,
+    /// or (as the supervisor, Chief) for anyone or the whole workspace.
+    private func authorize(actor: String?, text: String, quote: String, scope: String, target: String) throws {
+        guard let actor else { return }
+        guard BuddyAgentChanges.quoteAuthorized(quote, in: text) else { throw fail("I can only do this when you ask for it. Quote the exact words from your message that ask for it, at least a few words.") }
+        let boss = supervisor() == actor
+        if scope == "workspace" { guard boss else { throw fail("Only the team’s supervisor can change workspace-wide settings.") }; return }
+        let managed = (try agents()).first { $0["id"] as? String == target }?["managedBy"] as? String == actor
+        guard actor == target || boss || managed else { throw fail("You can change your own settings. Changing another agent’s needs the supervisor, or the agent that manages it.") }
+    }
+    private func targetAgent(_ args: [String: Any], actor: String?, scope: String) throws -> String {
+        guard scope == "agent" else { return "" }
+        let target = args["agentId"] as? String ?? actor ?? ""
+        guard UUID(uuidString: target) != nil, (try agents()).contains(where: { $0["id"] as? String == target }) else { throw fail("This agent is no longer in your workspace.") }
+        return target
+    }
+
+    func change(actor: String?, text: String, args: [String: Any], source: String? = nil) throws -> [String: Any] {
+        let scope = args["scope"] as? String ?? "agent"
+        guard ["agent", "workspace"].contains(scope) else { throw fail("Choose agent or workspace.") }
+        let target = try targetAgent(args, actor: actor, scope: scope), quote = args["quote"] as? String ?? ""
+        try authorize(actor: actor, text: text, quote: quote, scope: scope, target: target)
+        let field = args["field"] as? String ?? ""
+        let new = try BuddyAgentChanges.normalize(scope: scope, field: field, value: args["value"])
+        if field == "name", let wanted = new as? String, try agents().contains(where: { $0["id"] as? String != target && ($0["name"] as? String)?.lowercased() == wanted.lowercased() }) { throw fail("Another agent already has that name. Choose a different one.") }
+        let old = try current(scope, target, field)
+        if same(old, new) { return ["saved": true, "unchanged": true, "message": "That is already the setting: " + line(scope, target, field, from: old, to: new)] }
+        let by = actor == nil ? "user" : "chat", risk = actor == nil ? "low" : BuddyAgentChanges.risk(field: field, old: old, new: new), origin = source ?? (actor == nil ? "screen" : "chat")
+        if risk == "confirm" {
+            let id = try store.recordChange(workspace: workspace, scope: scope, agent: target, field: field, old: old, new: new, actor: by, source: origin, quote: quote, status: "pending", risk: risk)
+            try store.openDecision(workspace: workspace, id: "change:" + id, agent: target, kind: "confirm", title: "Allow this change?", question: "You asked for this in chat: " + line(scope, target, field, from: old, to: new) + ". It gives more access or room to spend, so it waits for your OK.", label: "Allow", payload: ["changeId": id])
+            announce()
+            return ["saved": false, "needsConfirmation": true, "changeId": id, "message": "This gives more access or room to spend, so nothing has changed yet. A card in Notifications is waiting for the user’s OK. Do not say it is done."]
+        }
+        // A setting the app itself holds is written after the journal entry says "applying" and confirmed after, so being stopped half way is
+        // sorted out by reconcile(). A field someone else carries home is applied by the entry itself.
+        let direct = BuddyAgentChanges.adopter(scope: scope, field: field).isEmpty
+        let id = try store.recordChange(workspace: workspace, scope: scope, agent: target, field: field, old: old, new: new, actor: by, source: origin, quote: quote, status: direct ? "applying" : "applied", risk: risk)
+        if direct { do { try put(scope, target, field, new, by: by, quote: quote); try store.setChange(id, status: "applied") } catch { try? store.setChange(id, status: "failed"); throw error } }
+        announce()
+        return ["saved": true, "changeId": id, "canUndo": true, "message": "Done. " + line(scope, target, field, from: old, to: new) + ". It can be undone from the agent’s settings or by asking."]
+    }
+
+    /// The person answers a change that was waiting for their OK. Only the person, on screen.
+    func answer(changeID: String, allow: Bool) throws -> [String: Any] {
+        guard let change = try store.change(changeID), change.workspace == workspace, change.status == "pending" else { throw fail("This request was already answered.") }
+        guard allow else {
+            try store.setChange(changeID, status: "declined"); try store.closeDecision(id: "change:" + changeID, resolution: "declined"); announce()
+            return ["saved": false, "declined": true, "message": "Left as it was."]
+        }
+        let now = try current(change.scope, change.agentID, change.field), direct = BuddyAgentChanges.adopter(scope: change.scope, field: change.field).isEmpty
+        try store.setChange(changeID, status: direct ? "applying" : "applied", old: .some(now))
+        if direct { do { try put(change.scope, change.agentID, change.field, change.new, by: "user", quote: change.quote); try store.setChange(changeID, status: "applied") } catch { try? store.setChange(changeID, status: "failed"); throw error } }
+        try store.closeDecision(id: "change:" + changeID, resolution: "allowed"); announce()
+        return ["saved": true, "changeId": changeID, "message": "Done. " + line(change.scope, change.agentID, change.field, from: now, to: change.new)]
+    }
+
+    /// After the worker was stopped half way through a change: if the setting now holds the new value the change took effect, otherwise it did not.
+    func reconcile() throws {
+        for change in try store.changes(workspace: workspace, limit: 200) where change.status == "applying" {
+            let value: Any?
+            do { value = try current(change.scope, change.agentID, change.field) } catch { continue }
+            try store.setChange(change.id, status: same(value, change.new) ? "applied" : "failed")
+            try store.closeDecision(id: "change:" + change.id, resolution: "reconciled")
+        }
+    }
+    /// Puts a setting back to what it was before a change. Only the newest change to a setting can be undone, so nothing newer is wiped by accident.
+    func undo(actor: String?, text: String, args: [String: Any]) throws -> [String: Any] {
+        guard let id = args["changeId"] as? String, let original = try store.change(id), original.workspace == workspace else { throw fail("Choose a change from the list.") }
+        guard original.status == "applied" else { throw fail("Only a change that took effect can be undone.") }
+        let newer = try store.changes(workspace: workspace, agent: original.scope == "agent" ? original.agentID : nil, limit: 200).first { $0.seq > original.seq && $0.field == original.field && $0.scope == original.scope && $0.agentID == original.agentID && ["applied", "pending"].contains($0.status) }
+        guard newer == nil else { throw fail("This setting was changed again afterwards. Undo the newer change first.") }
+        var next: [String: Any] = ["scope": original.scope, "field": original.field, "value": original.old as Any? ?? NSNull(), "quote": args["quote"] as? String ?? ""]
+        if original.scope == "agent" { next["agentId"] = original.agentID }
+        let result = try change(actor: actor, text: text, args: next, source: "undo:" + id)
+        if result["saved"] as? Bool == true { try store.setChange(id, status: "undone") }
+        var out = result; out["undid"] = id
+        return out
+    }
+    /// Every setting the person (or the supervisor) can change now, as it stands, so the agent can answer "what is X set to".
+    func snapshot(agent: String?, workspaceFields: Bool) throws -> [String: Any] {
+        var out: [String: Any] = [:]
+        if let agent, UUID(uuidString: agent) != nil, (try agents()).contains(where: { $0["id"] as? String == agent }) {
+            var values: [String: Any] = [:]
+            for field in BuddyAgentChanges.agentFields.sorted() { values[field] = describe(field, try current("agent", agent, field)) }
+            out["agent"] = ["id": agent, "name": name(of: agent), "settings": values]
+        }
+        if workspaceFields {
+            var values: [String: Any] = [:]
+            for field in BuddyAgentChanges.workspaceFields.sorted() { values[field] = describe(field, try current("workspace", "", field)) }
+            out["workspace"] = values
+        }
+        return out
+    }
+    func list(agent: String?, limit: Int = 30) throws -> [[String: Any]] {
+        let all = try store.changes(workspace: workspace, agent: agent, limit: limit)
+        return all.map { c in
+            let latest = !all.contains { $0.seq > c.seq && $0.field == c.field && $0.scope == c.scope && $0.agentID == c.agentID && ["applied", "pending"].contains($0.status) }
+            return ["id": c.id, "agentId": c.agentID, "scope": c.scope, "field": c.field, "label": Self.labels[c.field] ?? c.field, "status": c.status, "summary": line(c.scope, c.agentID, c.field, from: c.old, to: c.new), "by": c.actor, "at": c.createdAt, "canUndo": c.status == "applied" && latest && !c.source.hasPrefix("undo:")]
+        }
+    }
+
+    // MARK: rules
+
+    private func ruleDescription(_ rule: BuddyRule) -> String {
+        var out = rule.text
+        if rule.relaxes && rule.reviewFirst > 0 { out += rule.graduated ? " (earned: continues without asking)" : " (\((try? store.approvals(rule: rule.id)) ?? 0) of \(rule.reviewFirst) checks approved)" }
+        return out
+    }
+    func addRule(actor: String?, text: String, args: [String: Any]) throws -> [String: Any] {
+        let target = try targetAgent(args, actor: actor, scope: "agent"), quote = args["quote"] as? String ?? ""
+        try authorize(actor: actor, text: text, quote: quote, scope: "agent", target: target)
+        guard let rule = (args["rule"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), rule.count >= 8, rule.count <= 600 else { throw fail("Write the rule in plain words, 8 to 600 characters.") }
+        let proceed = (args["then"] as? String ?? "ask") == "proceed"
+        var params: [String: Any] = ["then": proceed ? "proceed" : "ask"]
+        if proceed {
+            let first = (args["reviewFirst"] as? Int) ?? (args["reviewFirst"] as? Double).map { Int($0) } ?? 0
+            guard (1...20).contains(first) else { throw fail("Say how many checks the person wants first, from 1 to 20.") }
+            params["reviewFirst"] = first
+        }
+        let covered = (args["appliesTo"] as? [String]) ?? ["browser"]
+        guard !covered.isEmpty, covered.allSatisfy({ $0 == "browser" }) else { throw fail("Rules can cover the agent’s browser steps. Emails and other connected-service actions always ask.") }
+        params["appliesTo"] = covered
+        let kinds = (args["taskKinds"] as? [String]) ?? []
+        guard kinds.allSatisfy({ ["research", "applications", "email", "general"].contains($0) }) else { throw fail("Task kinds can be research, applications, email or general.") }
+        params["taskKinds"] = kinds
+        let id = try store.addRule(workspace: workspace, agent: target, text: rule, quote: quote, params: params, status: "active", actor: actor == nil ? "user" : "chat")
+        announce()
+        let first = params["reviewFirst"] as? Int ?? 0
+        let detail = proceed ? "The first \(first) time\(first == 1 ? "" : "s"), \(name(of: target)) will show you the work first and wait for your OK (a card appears in Notifications). Once you have approved \(first), \(name(of: target)) continues at that step without asking. Sign-ins, passwords, payments and emails still always ask."
+                                : "\(name(of: target)) will show you the work first every time."
+        return ["saved": true, "ruleId": id, "message": "Saved for \(name(of: target)): “\(rule)”. " + detail, "checkpointInstruction": "Before you begin the covered work, call buddy_review_checkpoint with rule \"\(id)\"."]
+    }
+    func manageRule(actor: String?, text: String, args: [String: Any]) throws -> [String: Any] {
+        guard let id = args["ruleId"] as? String, let rule = try store.rule(id), rule.workspace == workspace, rule.status != "revoked" else { throw fail("Choose a rule from the list.") }
+        try authorize(actor: actor, text: text, quote: args["quote"] as? String ?? "", scope: "agent", target: rule.agentID)
+        switch args["action"] as? String ?? "" {
+        case "pause": try store.setRule(id, status: "paused")
+        case "resume": try store.setRule(id, status: "active")
+        case "remove": try store.setRule(id, status: "revoked")
+        case "reset": try store.resetRule(id)
+        default: throw fail("Choose pause, resume, remove or reset.")
+        }
+        announce()
+        let verb = ["pause": "Paused", "resume": "Back on", "remove": "Removed", "reset": "Starting over (checks come back until it earns it again)"][args["action"] as? String ?? ""] ?? "Done"
+        return ["saved": true, "ruleId": id, "message": "\(verb): “\(rule.text.prefix(160))”."]
+    }
+    func listRules(agent: String?) throws -> [[String: Any]] {
+        try store.rules(workspace: workspace, agent: agent, includeRevoked: false).map { r in
+            ["id": r.id, "agentId": r.agentID, "text": r.text, "status": r.status, "summary": ruleDescription(r), "approved": (try? store.approvals(rule: r.id)) ?? 0, "needed": r.relaxes ? r.reviewFirst : 0, "earned": r.graduated, "relaxes": r.relaxes, "createdAt": r.createdAt]
         }
     }
 }

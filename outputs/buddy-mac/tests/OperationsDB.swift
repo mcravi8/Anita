@@ -105,7 +105,7 @@ import CryptoKit
         require(mode == 0o600, "the database is private to the user")
         let probe = try BuddyOperationsDB(directory: fresh, existing: true)
         require(try probe.rows("PRAGMA journal_mode").first?.first?.string == "wal", "changes are journaled so a crash cannot leave half of one")
-        require(try probe.rows("PRAGMA user_version").first?.first?.int == 5, "the schema carries a version")
+        require(try probe.rows("PRAGMA user_version").first?.first?.int == 6, "the schema carries a version")
         require(!names(fresh).contains { $0.hasSuffix(".migrated") } && !names(fresh).contains("Backups"), "nothing is backed up or renamed when there was nothing to migrate")
 
         // 2. A full old history: live tasks, two archive files, routines and a paused queue.
@@ -306,7 +306,7 @@ import CryptoKit
             try raw.run("PRAGMA user_version = 1")
         }
         let moved = try BuddyWorkerStore(directory: upgraded)
-        require(try BuddyOperationsDB(directory: upgraded, existing: true).rows("PRAGMA user_version").first?.first?.int == 5, "a database from slice 1 is brought up to the current version")
+        require(try BuddyOperationsDB(directory: upgraded, existing: true).rows("PRAGMA user_version").first?.first?.int == 6, "a database from slice 1 is brought up to the current version")
         let movedTypes = try moved.history(of: moved.jobs[0]["id"] as! String).map(\.type)
         require(moved.jobs.count == 2 && moved.eventCount == 2 && movedTypes == ["task.imported"], "each task it already held gets a starting entry")
 

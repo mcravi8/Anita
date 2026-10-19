@@ -149,6 +149,11 @@ with tempfile.TemporaryDirectory(prefix='buddy-action-records-') as temp:
  subprocess.run(['xcrun','swiftc',str(source/'BuddyWorkerCore.swift'),str(source/'BuddyOperationsDB.swift'),str(source/'tests/ActionRecords.swift'),'-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)
 
+with tempfile.TemporaryDirectory(prefix='buddy-settings-rules-') as temp:
+ binary=Path(temp)/'settings-rules-tests'
+ subprocess.run(['xcrun','swiftc',str(source/'BuddyWorkerCore.swift'),str(source/'BuddyOperationsDB.swift'),str(source/'BuddyAgentProposals.swift'),str(source/'tests/SettingsRules.swift'),'-o',str(binary)],check=True)
+ subprocess.run([str(binary)],check=True)
+
 with tempfile.TemporaryDirectory(prefix='buddy-operations-db-') as temp:
  binary=Path(temp)/'operations-db-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyWorkerCore.swift'),str(source/'BuddyOperationsDB.swift'),str(source/'tests/OperationsDB.swift'),'-o',str(binary)],check=True)

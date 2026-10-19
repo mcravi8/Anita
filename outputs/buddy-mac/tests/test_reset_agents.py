@@ -35,4 +35,28 @@ class ResetTests(unittest.TestCase):
             with zipfile.ZipFile(archive) as z:
                 saved=json.loads(z.read('Worker/operations-export.json'))
                 self.assertEqual(sorted(t['task']['title'] for t in saved['tasks']),['mine','mine archived','theirs']);self.assertTrue(saved['paused']);self.assertEqual(len(saved['routines']),2)
+
+    def test_removes_what_belonged_to_the_removed_agents_but_keeps_the_money_record(self):
+        with tempfile.TemporaryDirectory(suffix='.noindex') as tmp:
+            root=Path(tmp);w=str(uuid.uuid4());other=str(uuid.uuid4());a=str(uuid.uuid4());(root/'Worker').mkdir()
+            (root/'workspace.json').write_text(json.dumps({'version':1,'conversationWorkspace':w,'agents':[{'id':a,'name':'Old Buddy'}],'groups':[],'messages':{}}))
+            connection=sqlite3.connect(root/'Worker/operations.sqlite')
+            connection.executescript("""CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);CREATE TABLE tasks(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, workspace TEXT, archived INTEGER DEFAULT 0, body TEXT);CREATE TABLE routines(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, workspace TEXT, body TEXT);
+              CREATE TABLE decisions(id TEXT PRIMARY KEY, workspace TEXT);CREATE TABLE notification_state(workspace TEXT, id TEXT);CREATE TABLE rules(id TEXT PRIMARY KEY, workspace TEXT);CREATE TABLE rule_approvals(rule_id TEXT, review_id TEXT);CREATE TABLE setting_changes(id TEXT PRIMARY KEY, workspace TEXT);
+              CREATE TABLE limits(workspace TEXT, scope TEXT, scope_id TEXT);CREATE TABLE budget_entries(workspace TEXT, amount_usd TEXT)""")
+            connection.execute("INSERT INTO meta VALUES('migration','{}')")
+            for workspace in (w,other):
+                rule=str(uuid.uuid4())
+                connection.execute('INSERT INTO rules VALUES(?,?)',(rule,workspace));connection.execute('INSERT INTO rule_approvals VALUES(?,?)',(rule,'review'))
+                connection.execute('INSERT INTO decisions VALUES(?,?)',(str(uuid.uuid4()),workspace));connection.execute('INSERT INTO notification_state VALUES(?,?)',(workspace,'x'));connection.execute('INSERT INTO setting_changes VALUES(?,?)',(str(uuid.uuid4()),workspace))
+                connection.execute("INSERT INTO limits VALUES(?, 'agent', ?)",(workspace,a));connection.execute("INSERT INTO limits VALUES(?, 'workspace', '')",(workspace,));connection.execute("INSERT INTO budget_entries VALUES(?, '1.5')",(workspace,))
+            connection.commit();connection.close()
+            reset.reset(root,stop=lambda:None)
+            connection=sqlite3.connect(root/'Worker/operations.sqlite')
+            count=lambda table,where='':connection.execute(f'SELECT COUNT(*) FROM {table} '+where).fetchone()[0]
+            for table in ('rules','decisions','notification_state','setting_changes'):self.assertEqual(count(table),1,table+' keeps only the other workspace')
+            self.assertEqual(count('rule_approvals'),1,'approvals counted for removed rules go with them')
+            self.assertEqual(connection.execute("SELECT workspace,scope FROM limits ORDER BY workspace,scope").fetchall().__len__(),3,'agent limits go; workspace limits stay')
+            self.assertEqual(count('limits',f"WHERE workspace='{w}' AND scope='agent'"),0)
+            self.assertEqual(count('budget_entries'),2,'money already spent is a record, not a setting');connection.close()
 if __name__=='__main__':unittest.main()

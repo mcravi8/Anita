@@ -61,10 +61,15 @@ import AppKit
             }
         }
         conversations.extraToolHandler = { [weak self] tool, args, context in
-            guard let self, ["buddy_start_background_task","buddy_computer_task","buddy_manage_routine","buddy_coding_session","buddy_team"].contains(tool), let id = context["agentId"] as? String else { throw BuddyWorkerFailure(message: "Background work is unavailable for this turn.") }
+            guard let self, ["buddy_start_background_task","buddy_computer_task","buddy_manage_routine","buddy_coding_session","buddy_team","buddy_agent_settings","buddy_agent_rules"].contains(tool), let id = context["agentId"] as? String else { throw BuddyWorkerFailure(message: "Background work is unavailable for this turn.") }
             let workspace = try self.workspaceContext()
             guard workspace.agents.contains(id) else { throw BuddyWorkerFailure(message: "This agent is no longer available.") }
             _ = try await BuddyWorkerClient.start(support: self.supportURL, workspace: workspace.workspace)
+            if tool=="buddy_agent_settings" || tool=="buddy_agent_rules" {
+                let result=try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":tool=="buddy_agent_settings" ? "settings":"rules","workspace":workspace.workspace,"actorId":id,"authorizedText":context["authorizedUserText"] ?? "","arguments":args])
+                self.settingsChanged()
+                return result
+            }
             if tool=="buddy_team" {return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"team","workspace":workspace.workspace,"actorId":id,"authorizedText":context["authorizedUserText"] ?? "","arguments":args])}
             if tool=="buddy_computer_task" {
                 return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"computer","workspace":workspace.workspace,"agentId":id,"requestId":(context["runId"] as? String ?? "")+":computer","arguments":args])
@@ -82,6 +87,7 @@ import AppKit
             return try await BuddyWorkerClient.call(support: self.supportURL, payload: ["operation": "create", "workspace": workspace.workspace, "agentId": id, "requestId": (context["runId"] as? String ?? "") + ":" + (context["callId"] as? String ?? ""), "title": args["title"] ?? "", "goal": args["goal"] ?? "", "kind": args["kind"] ?? "general", "budgetUSD": choice.claudeBudgetUSD])
         }
         teamwork.onEvent = { [weak self] event in self?.deliver(event) }
+        Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in Task { @MainActor in await self?.adoptProfileChanges() } }
         ai.onEvent = { [weak self] event in
             guard let self else { return }
             if event["type"] as? String == "connection" {
@@ -93,7 +99,7 @@ import AppKit
         }
         showWindow()
         teamwork.extraTools=[BuddyWorkerClient.teamTool]
-        teamwork.agentInstructions={ [weak self] workspace,id in guard let self,let s=try? self.workspaceState(),s["conversationWorkspace"] as? String==workspace,let a=(s["agents"] as? [[String:Any]])?.first(where:{$0["id"] as? String==id}) else{return ""};return BuddyAgentMemory.guidance(a)}
+        teamwork.agentInstructions={ [weak self] workspace,id in guard let self,let s=try? self.workspaceState(),s["conversationWorkspace"] as? String==workspace,let a=(s["agents"] as? [[String:Any]])?.first(where:{$0["id"] as? String==id}) else{return ""};return BuddyAgentMemory.guidance(a)+"\n"+BuddyRulesReader.guidance(support:self.supportURL,workspace:workspace,agent:id)}
         Task {if let context=try? workspaceContext(){_ = try? await BuddyWorkerClient.start(support:supportURL,workspace:context.workspace)}}
     }
 
@@ -189,6 +195,28 @@ import AppKit
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationWillTerminate(_ notification: Notification) { agentSetup.shutdown(); teamwork.shutdown(); ai.shutdown() }
+    /// After any change made on someone’s word: tell the page, and carry role and instructions into the agent’s saved profile (where they live).
+    private func settingsChanged() {
+        deliver(["type": "agent-settings-changed"])
+        Task { await adoptProfileChanges() }
+    }
+    private var adopting = false
+    /// Role and instructions are kept in the agent’s saved profile, so the app itself carries a change to them there, then confirms it to the worker.
+    private func adoptProfileChanges() async {
+        guard !adopting, let context = try? workspaceContext() else { return }
+        adopting = true; defer { adopting = false }
+        let pending = BuddyAgentChanges.unadopted(support: supportURL, workspace: context.workspace, adopter: "app")
+        guard !pending.isEmpty, let state = try? workspaceState(), let agents = state["agents"] as? [[String: Any]] else { return }
+        var done: [String] = []
+        for id in Set(pending.map(\.agentID)) {
+            guard let agent = agents.first(where: { $0["id"] as? String == id }), let role = agent["role"] as? String, let instructions = agent["description"] as? String else { continue }
+            do { _ = try agentSetup.request(workspace: context.workspace, payload: ["action": "edit", "agentId": id, "role": role, "instructions": instructions]); done += pending.filter { $0.agentID == id }.map(\.id) }
+            catch { continue }
+        }
+        guard !done.isEmpty else { return }
+        _ = try? await BuddyWorkerClient.call(support: supportURL, payload: ["operation": "settings", "workspace": context.workspace, "arguments": ["action": "adopt", "adopter": "app", "ids": done]])
+        deliver(["type": "agent-settings-changed"])
+    }
     private func deliver(_ event: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: event), let json = String(data: data, encoding: .utf8) else { return }
         webView?.evaluateJavaScript("window.dispatchEvent(new CustomEvent('buddy-conversation', {detail: \(json)}))", completionHandler: nil)
@@ -279,12 +307,18 @@ import AppKit
         case "worker":
             do {
                 let context = try workspaceContext(); var payload = body["payload"] as? [String: Any] ?? [:]; payload["workspace"] = context.workspace
+                // The page is the person: it never acts as an agent, so it cannot lend an agent’s identity (or the words a quote is checked against) to a request.
+                payload.removeValue(forKey: "actorId"); payload.removeValue(forKey: "authorizedText")
                 if ["connectClaude", "disconnectClaude"].contains(payload["operation"] as? String ?? "") {
                     Task { do { let result = try await providerRequest(["operation": payload["operation"] as? String == "connectClaude" ? "connect" : "disconnect", "provider": "claude"], workspace: context.workspace); replyHandler(["connected": (result["claude"] as? [String: Any])?["connected"] ?? false], nil) } catch { replyHandler(nil, error.localizedDescription) } }; return
                 }
                 Task { do {
                     if payload["operation"] as? String == "start" { replyHandler(try await BuddyWorkerClient.start(support: supportURL, workspace: context.workspace), nil) }
-                    else { replyHandler(try await BuddyWorkerClient.call(support: supportURL, payload: payload), nil) }
+                    else {
+                        let result = try await BuddyWorkerClient.call(support: supportURL, payload: payload)
+                        if ["settings", "rules"].contains(payload["operation"] as? String ?? "") { self.settingsChanged() }
+                        replyHandler(result, nil)
+                    }
                 } catch { replyHandler(nil, error.localizedDescription) } }
             } catch { replyHandler(nil, error.localizedDescription) }
         case "connectionStatus":
@@ -319,8 +353,9 @@ import AppKit
                 options.actorId = agent
                 options.extraTools = BuddyWorkerClient.tools
                 options.requiresRoutine = BuddyWorkerClient.recurringRequest(payload["text"] as? String ?? "")
+                options.requiresRule = BuddyWorkerClient.stagedRuleRequest(payload["text"] as? String ?? "")
                 options.instructions = "For explicit coding/build/test requests or requests to use Claude Code, call buddy_coding_session directly with a complete task brief; it is a native worker tool, not a connected service. Check status for real results. For an explicit recurring request (run this every morning/daily/weekly), call buddy_manage_routine now. Carry the relevant user brief from history into the goal. For email, choose a targeted search with follow-ups and an explicit lookback window. Default to 09:00 local for an unspecified morning, state that assumption and the saved next run. Do not create a one-off task instead. Never claim scheduled without saved=true and a routine ID. Do not schedule hypothetical examples or questions. Use list/update/pause/resume/delete for existing routines. Results and controls are in Background work. This Mac must be awake and online; a missed run catches up once. "
-                options.instructions += "\n"+BuddyWorkerClient.taskGuidance+"\n"+BuddyWorkerClient.teamGuidance+"\n"+BuddyAgentMemory.guidance(currentAgent ?? [:])
+                options.instructions += "\n"+BuddyWorkerClient.taskGuidance+"\n"+BuddyWorkerClient.teamGuidance+"\n"+BuddyWorkerClient.settingsGuidance+"\n"+BuddyAgentMemory.guidance(currentAgent ?? [:])+"\n"+BuddyRulesReader.guidance(support:supportURL,workspace:context.workspace,agent:agent)
                 options.proposalScope = BuddyProposalScope(workspace: context.workspace, chat: agent, actorId: agent, replyRunId: payload["runId"] as? String ?? "")
                 try ai.ensureAgentDefaults(workspace:context.workspace,agents:context.agents)
                 options.historyScope=BuddyHistoryScope(workspace:context.workspace,agent:agent)

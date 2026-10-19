@@ -47,6 +47,19 @@ import Foundation
         proactiveOptions.authorizedUserText="Keep me updated.";proactiveOptions.extraTools=[["type":"function","name":"buddy_team","description":"Fixture saved setting","inputSchema":["type":"object","properties":["action":["type":"string"]]]]]
         let savedProactive=try send("SAVE_PROACTIVE",proactiveOptions);await wait{terminal(savedProactive)}
         require(events.contains{$0["runId"] as? String==savedProactive && $0["status"] as? String=="completed"},"Claude's real native saved-setting receipt satisfies the proactive acknowledgement guard")
+        var ruleOptions=options;ruleOptions.requiresRule=true
+        let unsavedRule=try send("Keep it in mind.",ruleOptions);await wait{terminal(unsavedRule)}
+        require(events.contains{$0["runId"] as? String==unsavedRule && $0["status"] as? String=="failed" && ($0["error"] as? String)?.contains("rule wasn’t saved")==true},"Claude cannot finish a stated rule without a native saved-rule receipt")
+        primary.extraToolHandler={tool,args,context in require(tool=="buddy_agent_rules" && args["action"] as? String=="add" && args["quote"] as? String=="send me the CV" && context["authorizedUserText"] as? String=="Please send me the CV first.","the rule tool receives the person’s actual message");return ["saved":true,"ruleId":UUID().uuidString]}
+        ruleOptions.authorizedUserText="Please send me the CV first.";ruleOptions.extraTools=[["type":"function","name":"buddy_agent_rules","description":"Fixture saved rule","inputSchema":["type":"object","properties":["action":["type":"string"]]]]]
+        let savedRule=try send("SAVE_RULE",ruleOptions);await wait{terminal(savedRule)}
+        require(events.contains{$0["runId"] as? String==savedRule && $0["status"] as? String=="completed"},"a saved rule receipt satisfies the guard")
+        for stated in ["For the first three applications, send me the CV so I can check your work. If I'm fine with those three, from then on, you can apply without me having to check on the CV each time.","For the first 5 emails you draft, show me so I can review them. Once I've approved those, send the rest on your own.","For the first two reports let me look them over; after that you can go ahead without asking me."] {
+            require(BuddyWorkerClient.stagedRuleRequest(stated),"a staged rule is recognised: \(stated.prefix(40))")
+        }
+        for ordinary in ["Apply to the first three jobs on the list, then email me the results.","Apply to the first three jobs, check each one is still open, and then you can summarize them.","From now on keep your emails short.","For the first three weeks check in daily.","If I told you to check the first three, from then on without me checking, would that be okay?","What does it mean to review the first three applications on your own?"] {
+            require(!BuddyWorkerClient.stagedRuleRequest(ordinary),"an ordinary request is not mistaken for a rule: \(ordinary.prefix(40))")
+        }
         let file=try send("WRITE_CLAUDE",options);await wait{terminal(file)}
         let saved=try primary.projectFiles.read(options.fileScope!,path:"claude-note.md")
         require((saved["content"] as? String)?.contains("selected Claude") == true,"Claude uses the existing scoped file engine and real saved bytes")

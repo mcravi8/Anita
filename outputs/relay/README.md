@@ -59,7 +59,7 @@ The native Mac integration exposes only pending suggestion creation to model tur
 - `buddy-onboarding.js` / `.css` / `.test.js`: empty initial workspace, migration, resumable setup, and atomic first-agent registration.
 - `buddy-agent-setup.js` / `.test.js`: immediate first question, native interview snapshots, retry/stop, profile updates and manual edits.
 - `buddy-figures.js` / `.test.js`: the halftone figure engine (shape distance fields, springs, blinking, eyes, progress rings) and the runtime that paints every `canvas[data-fig]` and the sidebar dot field.
-- `buddy-figure-modes.js` / `.test.js`: turns real workspace state into figure modes and hand-offs.
+- `buddy-figure-modes.js` / `.test.js`: turns real workspace state into figure modes (nothing animates between members).
 - `buddy-theme.js` / `.css` / `.test.js`: Light, Dark and Match system, the design tokens, and the restyled surfaces. Loaded last.
 - `assets/buddy-logo.svg`: the Buddy mark, used as the browser icon. The in-app logo is a live figure.
 
@@ -75,7 +75,7 @@ The seven colour IDs are unchanged (`lilac`, `blue`, `peach`, `mint`, `red`, `go
 
 `BuddyFigures.avatarHTML(agentOrGroup, size)` returns a `canvas[data-fig]`; one `requestAnimationFrame` loop paints every visible one (alternating halves of the list, about 30 fps each) and skips canvases that are off screen. CSS decides how large a figure is drawn. The whole chat-list sidebar is one dot field: rows hold empty slots and the field draws each head at the slot's measured position, so hand-offs, needs pulses and the selected and hover bands can travel between rows. Eyes follow the cursor while it is over the sidebar.
 
-Figure motion comes from real state (`buddy-figure-modes.js`, synced after every render and save): a reply that is starting is *planning*, streaming is *working* (progress ring), an action review waiting on you is *needs* (pulse, looks at you), a finished reply is *done* (spin, sparkles, back to ready after 1.7 s) and a failed one is *stuck* (tilt, back to ready after 8 s). In a group run the lead plans while members watch the lead, the member whose step is running works while the others watch them, work moving between members is a hand-off, and a completed run is *done* for everyone, 160 ms apart. Opening the app never replays old runs.
+Figure motion comes from real state (`buddy-figure-modes.js`, synced after every render and save): a reply that is starting is *planning*, streaming is *working* (progress ring), an action review waiting on you is *needs* (pulse, looks at you), a finished reply is *done* (spin, sparkles, back to ready after 1.7 s) and a failed one is *stuck* (tilt, back to ready after 8 s). In a group run the lead plans while members watch the lead, the member whose step is running works while the others watch them, no stream of dots joins members or the group row (the member working is simply shown working), and a completed run is *done* for everyone, 160 ms apart. Opening the app never replays old runs.
 
 Appearance is saved in the workspace as `theme` (`light`, `dark` or `system`; missing means light). `buddy-theme.js` writes the resolved theme to `<html data-theme>` and every stylesheet reads the tokens in `buddy-theme.css`. The Mac app is told the choice (`BuddyDesktop.setAppearance`) so the window, title bar and system controls match. The fonts are Geist and Geist Mono, bundled in `assets/fonts/` (SIL Open Font License, see `OFL.txt`), with the system fonts as the fallback.
 

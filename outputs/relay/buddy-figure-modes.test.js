@@ -69,14 +69,15 @@ test('a completed team run is done for everyone, staggered 160 ms, lead first',(
   queue.forEach(([,fn])=>fn());
   assert.deepEqual(sink.log.filter(e=>e[0]==='mode'&&e[2]==='done').map(e=>e[1]),['lead','one','two','three']);
 });
-test('work moving between members is a hand-off and the group row follows the worker',()=>{
+test('work moving between members shows the member working, with no animation joining members or the group row',()=>{
   const sink=fakeSink(),t=tracker(sink);
   t.update(base(group('working',[{agentId:'one',status:'working'},{agentId:'two',status:'queued'}])));
+  assert.equal(sink.modes.one,'working');
   t.update(base(group('working',[{agentId:'one',status:'completed'},{agentId:'two',status:'working'}])));
-  assert.deepEqual(sink.log.filter(e=>e[0]==='handoff'),[['handoff','one','two']]);
-  assert.deepEqual(sink.log.filter(e=>e[0]==='work').slice(-1),[['work','team','two']]);
+  assert.equal(sink.modes.two,'working','the one working is shown working');
+  assert.deepEqual(sink.log.filter(e=>e[0]==='handoff'||e[0]==='work'),[],'but nothing streams from one member to another or to the group row');
   t.update(base({}));
-  assert.deepEqual(sink.log.filter(e=>e[0]==='work').slice(-1),[['work','team',null]]);
+  assert.deepEqual(sink.log.filter(e=>e[0]==='handoff'||e[0]==='work'),[]);
 });
 test('a mode set by something else is not overwritten when the run ends',()=>{
   const sink=fakeSink(),t=tracker(sink);

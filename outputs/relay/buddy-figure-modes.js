@@ -1,6 +1,6 @@
 /* Turns real workspace state into figure modes: a reply starting is "planning", streaming is "working", an action
    waiting on the user is "needs", a finished reply is "done" (then "ready"), a failed one is "stuck". Group runs add
-   gaze toward the lead or the working member and a hand-off whenever the work moves between members. */
+   gaze toward the lead or the working member. (No stream of dots joins members or the group row.) */
 (function(root){
   'use strict';
   const busy=status=>['starting','answering','stopping'].includes(status);
@@ -47,7 +47,7 @@
 
   // Remembers the previous snapshot so it can see a run finishing (done / stuck) and the work moving (hand-off).
   function tracker(sink,{later=(ms,fn)=>setTimeout(fn,ms)}={}){
-    let prevRuns=null,prevModes={},prevWork={};
+    let prevRuns=null,prevModes={};
     function update(state,helpers){
       const snap=snapshot(state,helpers),runs={},outcome={};
       for(const run of Object.values(state.runs||{}))runs[run.runId]=run;
@@ -74,12 +74,10 @@
         const f=snap.focus[a.id];
         sink.setFocus(a.id,f?.to||null,f?.group);
       }
-      for(const gid of new Set([...Object.keys(snap.work),...Object.keys(prevWork)])){
-        sink.setGroupWork(gid,snap.work[gid]||null);
-        if(snap.work[gid]&&prevWork[gid]&&snap.work[gid]!==prevWork[gid])sink.handoff(prevWork[gid],snap.work[gid]);
-      }
+      // No animation joins agents to each other or to the group row (the streams of dots that followed the working member): an agent that is
+      // working is simply shown working. (`snapshot().work` still says who is working in each group, for anything that wants it.)
       prevRuns=Object.fromEntries(Object.entries(runs).map(([id,r])=>[id,{status:r.status}]));
-      prevModes=snap.modes;prevWork=snap.work;
+      prevModes=snap.modes;
     }
     return {update};
   }

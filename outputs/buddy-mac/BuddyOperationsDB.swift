@@ -404,6 +404,19 @@ final class BuddyOperationsDB {
 
 /// What an agent has spent, set aside or cannot account for today, and what it may spend. Read by every process that starts paid work: the
 /// worker (background tasks) and the app (chat turns). Only the worker writes the ledger and the limits.
+/// Runs have no limit of their own. Accounting still wants a number for what a run may spend, so "no limit" is this one: it is never reserved against a daily
+/// limit, never shown, and never sent to the model as a ceiling. A daily limit, if the person set one, is the only thing that stops a run.
+enum BuddyRunLimit {
+    static let none = 1_000_000.0
+    static func isNone(_ value: Double) -> Bool { value >= none / 2 }
+    /// What to hand the model bridge as the ceiling for one run: nothing, unless a daily limit leaves only so much room for it.
+    static func bridge(_ allowance: Double, room: Double?) -> Any {
+        let cap = isNone(allowance) ? room : min(allowance, room ?? allowance)
+        guard let cap else { return NSNull() }
+        return max(0.01, cap)
+    }
+}
+
 enum BuddyBudget {
     struct Exposure: Equatable {
         var spent = 0.0, uncertain = 0.0, reserved = 0.0
@@ -464,7 +477,7 @@ enum BuddyBudget {
         }
         // What running tasks have set aside right now.
         for row in try db.rows("SELECT body FROM tasks WHERE archived = 0 AND workspace = ? AND agent_id = ?", [.text(workspace), .text(agent)]) {
-            guard let body = try? BuddyOperationsDB.decode(row[0].string ?? "{}"), let reservedNow = body["reservedBudgetUSD"] as? Double, reservedNow > 0 else { continue }
+            guard let body = try? BuddyOperationsDB.decode(row[0].string ?? "{}"), let reservedNow = body["reservedBudgetUSD"] as? Double, reservedNow > 0, !BuddyRunLimit.isNone(reservedNow) else { continue }
             if ["running", "waiting_review", "queued", "starting"].contains(body["status"] as? String ?? "") { out.reserved += reservedNow }
             // A paused, cancelled or failed task that never reported its cost is uncertain money for the day it stopped; it does not weigh on every day after.
             else if let stopped = (body["updatedAt"] as? String).flatMap({ ISO8601DateFormatter().date(from: $0) }), day(stopped) == today { out.uncertain += reservedNow }

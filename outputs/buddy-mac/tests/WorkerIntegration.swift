@@ -215,7 +215,7 @@ import AppKit
         for _ in 0..<120 {
             let value=try await computer(["action":"status","taskId":checkpointID])["task"] as! [String:Any]
             if value["status"] as? String=="waiting_user",value["reservedBudgetUSD"] as? Double==0,(value["spentUSD"] as? Double ?? 0)>0 {
-                require(abs((value["remainingBudgetUSD"] as? Double ?? 0)-0.47)<0.0001,"normal checkpoint returns unused Claude allowance");checkpointAccounted=true;break
+                require(BuddyRunLimit.isNone(value["remainingBudgetUSD"] as? Double ?? 0),"a task with no limit of its own is still not limited after a checkpoint");checkpointAccounted=true;break
             }
             try await Task.sleep(nanoseconds:50_000_000)
         }

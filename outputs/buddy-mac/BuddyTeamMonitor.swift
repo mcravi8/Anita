@@ -195,7 +195,8 @@ import Foundation
     private func start(_ original:[String:Any],state:[String:Any],policy:[String:Any],now:Date)throws {
         let w=original["workspace"] as! String,id=original["agentId"] as! String,provider=original["provider"] as! String,settings=try BuddyAISettings(support:support).current(w)
         guard settings.enabled(provider),provider != "claude" || keyReader(w) != nil else{try store.update(original["id"] as! String,["status":"failed","error":"Reconnect this agent's selected AI provider to complete its check-in."]);return}
-        let limit=min(0.20,settings.claudeBudgetUSD,policy["dailyLimitUSD"] as? Double ?? 2)
+        // What a check-in is expected to cost, for the daily count; it is not a ceiling on the run.
+        let limit=min(0.20,policy["dailyLimitUSD"] as? Double ?? 2)
         guard try store.reserve(original,policy:policy,limit:limit,now:now),let job=store.checks.first(where:{$0["id"] as? String==original["id"] as? String}) else{return}
         active=job;runID=UUID().uuidString;started=now;providerRevision=settings.revision(provider)
         let input=job["input"] as? [String:Any] ?? [:],kind=job["kind"] as! String,agent=(state["agents"] as! [[String:Any]]).first{$0["id"] as? String==id}!
@@ -206,7 +207,7 @@ import Foundation
             let root=support.appendingPathComponent("TeamMonitor/"+runID!,isDirectory:true);try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
             let p=makeClaude();process=p;try p.launch("claude.mjs");let captured=runID!
             p.onEvent={ [weak self] event in guard let self,self.runID==captured else{return};if event["type"] as? String=="result" {self.complete(text:event["text"] as? String ?? "",error:event["error"] as? String,cost:event["cost"] as? Double)}else if ["closed","error"].contains(event["type"] as? String ?? "") {self.complete(text:"",error:event["error"] as? String ?? "The check-in stopped without a confirmed result.",cost:nil)}}
-            try p.send(["command":"start","runId":runID!,"apiKey":keyReader(w)!,"model":job["model"] ?? "claude-sonnet-4-6","budget":limit,"home":root.appendingPathComponent("Config").path,"cwd":root.path,"tools":[],"outputSchema":kind=="memory" ? BuddyAgentMemory.schema:Self.schema,"instructions":instructions,"prompt":prompt])
+            try p.send(["command":"start","runId":runID!,"apiKey":keyReader(w)!,"model":job["model"] ?? "claude-sonnet-4-6","budget":NSNull() as Any,"home":root.appendingPathComponent("Config").path,"cwd":root.path,"tools":[],"outputSchema":kind=="memory" ? BuddyAgentMemory.schema:Self.schema,"instructions":instructions,"prompt":prompt])
         } else {
             let service=makeGPT();gpt=service;let captured=runID!
             service.onEvent={ [weak self] event in guard let self,self.runID==captured,event["runId"] as? String==captured,event["type"] as? String=="run",["completed","failed","stopped"].contains(event["status"] as? String ?? "") else{return};self.complete(text:event["text"] as? String ?? "",error:event["status"] as? String=="completed" ? nil:event["error"] as? String ?? "The check-in stopped.",cost:0)}

@@ -20,7 +20,7 @@ async function open(directory,setup){
  return {context,page};
 }
 
-test('a new task for a Claude agent starts without the person touching Options, and a coding task that needs an allowance can be continued with one',{skip,timeout:60000},async()=>{
+test('a new task for a Claude agent starts without the person touching Options, and a stopped coding task simply continues',{skip,timeout:60000},async()=>{
  const directory=await mkdtemp(path.join(tmpdir(),'buddy-task-form-.'));let context,page;
  try{
   ({context,page}=await open(directory,()=>{
@@ -41,16 +41,15 @@ test('a new task for a Claude agent starts without the person touching Options, 
   await page.waitForFunction(()=>calls.some(c=>c.operation==='create'),null,{timeout:8000});
   const created=await page.evaluate(()=>calls.find(c=>c.operation==='create'));
   assert.equal('budgetUSD' in created,false,'the agent’s own model is used with the settings limit; the form sends no zero that would be refused: '+JSON.stringify(created));
-  // Now the coding task that has no allowance left.
+  // A stopped coding task is never held up for an allowance: it just continues.
   await page.locator('[data-worker-op="back"]').first().click({timeout:10000});
   await page.locator('[data-worker-task="code1"]').first().waitFor({state:'attached',timeout:10000});
   await page.evaluate(()=>document.querySelector('[data-worker-task="code1"]').click());
-  const allowance=page.locator('[data-worker-allowance], input[name="allowance"], [data-worker-update-allowance]').first();
-  await allowance.waitFor({timeout:8000});await allowance.fill('1');
+  await page.locator('[data-worker-allowance]').first().waitFor({state:'detached',timeout:3000}).catch(()=>{});
+  assert.equal(await page.locator('[data-worker-allowance]').count(),0,'no allowance field is shown');
   await page.getByRole('button',{name:/Resume|Continue/}).first().click();
   await page.waitForFunction(()=>calls.some(c=>c.operation==='resume'||c.operation==='coding'),null,{timeout:8000});
   const resumed=await page.evaluate(()=>calls.filter(c=>c.operation==='resume'||c.operation==='coding').at(-1));
-  assert.equal(resumed.operation,'resume','an allowance is applied by the generic resume, which the coding call ignores: '+JSON.stringify(resumed));
-  assert.equal(resumed.additionalBudgetUSD,1);assert.match(resumed.message||'',/Continue the original task/);
+  assert.ok(!resumed.additionalBudgetUSD&&!resumed.arguments?.additionalBudgetUSD,'nothing about an allowance is sent: '+JSON.stringify(resumed));
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
 });

@@ -28,6 +28,15 @@ enum BuddyRoutineAuthorization {
     }
 }
 
+/// Which model a scheduled run uses. A routine pins its provider when it is saved, so it never switches provider on its own; the model is the agent's. An
+/// inbox agent switched to a small model kept running its scheduled scans on the larger one it had when they were saved, at many times the cost.
+enum BuddyRoutineModel {
+    static func resolve(pinned:String?,provider:String,current:(provider:String,model:String)?)->String? {
+        guard let current,current.provider==provider,!current.model.isEmpty else {return pinned}
+        return current.model
+    }
+}
+
 /// Which scheduled email checks have nothing to tell the person. A check that found nothing new, while the open items were already brought up today, is silent: it
 /// is still saved in Background work, but it sends no message, no notification and is not news to the team's oversight. A check that fails the same way it just
 /// did (the same wall every time) is said once, then again only after the reminder interval.
@@ -293,7 +302,7 @@ struct BuddyAttempt {
         guard UUID(uuidString: workspace) != nil, UUID(uuidString: agent) != nil, !requestId.isEmpty, requestId.count <= 200,
               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, title.count <= 150,
               !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, goal.count <= 30000,
-              ["research", "applications", "email", "general", "coding"].contains(kind), ["chatgpt", "claude"].contains(provider), (kind != "coding" || provider=="claude"), budget.isFinite, budget >= 0, budget <= 10 else { throw BuddyWorkerFailure(message: "Add a short task title, a clear brief, and a supported provider.") }
+              ["research", "applications", "email", "general", "coding"].contains(kind), ["chatgpt", "claude"].contains(provider), (kind != "coding" || provider=="claude"), budget.isFinite, budget >= 0, budget <= BuddyRunLimit.none else { throw BuddyWorkerFailure(message: "Add a short task title, a clear brief, and a supported provider.") }
         if let old = jobs.first(where: { $0["workspace"] as? String == workspace && $0["agentId"] as? String == agent && $0["requestId"] as? String == requestId }) { return old }
         let heavy = liveBytes > Self.archiveSizeTrigger
         if jobs.count >= Self.archiveTrigger || heavy { try? archiveFinished(keeping: heavy ? 200 : Self.archiveKeep) }
@@ -676,7 +685,8 @@ struct BuddyAttempt {
             default: break
             }
         }
-        let needsAllowance = job["provider"] as? String == "claude" && ["paused", "failed", "interrupted", "waiting_user"].contains(status) && number(job["remainingBudgetUSD"] ?? job["budgetUSD"]) <= 0
+        // Runs have no limit of their own any more, so a task is never waiting for an allowance.
+        let needsAllowance = false
         if status == "waiting_user" {
             out.append(DecisionSpec(id: "waiting:\(id):\(attempt)", kind: "waiting", title: title, question: progress.isEmpty ? "This task is waiting for you." : progress, label: "Open task", payload: ["taskId": id]))
         }
@@ -845,7 +855,10 @@ struct BuddyAttempt {
             fields["budgetAuthorizations"]=authorizations+[["id":authorizationID,"amountUSD":amount,"at":ISO8601DateFormatter().string(from:Date())]]
             fields["uncertainBudgetUSD"]=(job["uncertainBudgetUSD"] as? Double ?? 0)+(job["reservedBudgetUSD"] as? Double ?? 0)
             fields["reservedBudgetUSD"]=0.0;fields["remainingBudgetUSD"]=amount
-        } else if job["provider"] as? String=="claude",(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0 {throw BuddyWorkerFailure(message:"Choose an additional Claude allowance in this task before resuming. Previous unconfirmed usage stays recorded.")}
+        } else if job["provider"] as? String=="claude",(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0 {
+            // A task from the time runs had an allowance, stopped with none left: it simply carries on, with no limit.
+            fields["remainingBudgetUSD"]=BuddyRunLimit.none;fields["reservedBudgetUSD"]=0.0
+        }
         return try update(id,fields,cause:"resume")
     }
 }
@@ -894,7 +907,7 @@ struct BuddyAttempt {
               let days=r["weekdays"] as? [Int],!days.isEmpty,Set(days).count==days.count,days.allSatisfy({(1...7).contains($0)}),
               let zone=r["timeZone"] as? String,TimeZone(identifier:zone) != nil,
               let kind=r["kind"] as? String,["email","research","applications","general"].contains(kind),
-              ["chatgpt","claude"].contains(r["provider"] as? String ?? ""),let budget=r["budgetUSD"] as? Double,budget.isFinite,(0...10).contains(budget),
+              ["chatgpt","claude"].contains(r["provider"] as? String ?? ""),let budget=r["budgetUSD"] as? Double,budget.isFinite,(0...BuddyRunLimit.none).contains(budget),
               let query=r["query"] as? String,query.count<=2000,(kind != "email" || !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty) else { throw BuddyWorkerFailure(message:"Choose a clear brief, valid local time and days. Email routines also need a relevant Gmail search.") }
     }
     static func next(after date:Date,rule:[String:Any]) throws -> Date {
@@ -954,7 +967,7 @@ struct BuddyAttempt {
         let series=rule["routineSeriesID"] as? String
         let prior=store.jobs.last{$0["workspace"] as? String==workspace && $0["agentId"] as? String==agent && ($0["routineID"] as? String==id || series != nil && $0["routineSeriesID"] as? String==series)}
         guard prior==nil || BuddyWorkerStore.terminal.contains(prior?["status"] as? String ?? "") else{throw BuddyWorkerFailure(message:"This routine already has unfinished work. Open its current task instead of starting another scan.")}
-        let job=try store.create(workspace:workspace,agent:agent,requestId:request,title:rule["title"] as! String,goal:rule["goal"] as! String,kind:rule["kind"] as! String,provider:rule["provider"] as! String,budget:rule["budgetUSD"] as! Double,model:rule["model"] as? String)
+        let job=try store.create(workspace:workspace,agent:agent,requestId:request,title:rule["title"] as! String,goal:rule["goal"] as! String,kind:rule["kind"] as! String,provider:rule["provider"] as! String,budget:rule["provider"] as? String=="claude" ? BuddyRunLimit.none:(rule["budgetUSD"] as? Double ?? 0),model:rule["model"] as? String)
         var fields:[String:Any]=["routineID":id,"inboxQuery":rule["query"] ?? "","previousRoutineResult":prior?["result"] ?? "","manualRun":true]
         for key in ["routineSeriesID","browserAgentId","browserOrigin"] {if let value=rule[key]{fields[key]=value}}
         let saved=try store.update(job["id"] as! String,fields)
@@ -976,17 +989,31 @@ struct BuddyAttempt {
     func enqueueDue(store:BuddyWorkerStore,workspace:String,now:Date=Date()) throws {
         let original=routines
         do {
+            /// A scheduled email check is read-only. If its last run simply failed and left no action uncertain (it ran out of something, or lost its connection), the
+            /// next one should still happen: waiting for the person to review a failed read would silently end the monitoring.
+            func failedHarmlessly(_ prior:[String:Any]?,_ r:[String:Any])->Bool {
+                guard let prior,r["kind"] as? String=="email",prior["status"] as? String=="failed" else {return false}
+                return !(prior["reviews"] as? [[String:Any]] ?? []).contains{["uncertain","dispatched"].contains($0["status"] as? String ?? "")}
+            }
+            func lastRun(_ r:[String:Any])->[String:Any]? {
+                let id=r["id"] as? String ?? "",series=r["routineSeriesID"] as? String
+                return store.jobs.last{$0["workspace"] as? String==workspace && $0["agentId"] as? String==r["agentId"] as? String && ($0["routineID"] as? String==id || series != nil && $0["routineSeriesID"] as? String==series)}
+            }
+            // Routines that were stopped for exactly that reason are set going again.
+            for i in routines.indices where routines[i]["workspace"] as? String==workspace && routines[i]["status"] as? String=="needs_attention" && routines[i]["lastError"] as? String=="The previous run needs attention. Review it before resuming this routine." && failedHarmlessly(lastRun(routines[i]),routines[i]) {
+                routines[i]["status"]="active";routines[i]["lastError"]="";routines[i]["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:routines[i]))
+            }
             for i in routines.indices where routines[i]["workspace"] as? String==workspace && routines[i]["status"] as? String=="active" {
                 let r=routines[i],id=r["id"] as! String
                 let series=r["routineSeriesID"] as? String
-                let prior=store.jobs.last{$0["workspace"] as? String==workspace && $0["agentId"] as? String==r["agentId"] as? String && ($0["routineID"] as? String==id || series != nil && $0["routineSeriesID"] as? String==series)}
-                if let prior {
+                let prior=lastRun(r)
+                if let prior,!failedHarmlessly(prior,r) {
                     let status=prior["status"] as? String ?? ""
                     if ["failed","interrupted","waiting_user","paused"].contains(status) { routines[i]["status"]="needs_attention";routines[i]["lastError"]="The previous run needs attention. Review it before resuming this routine.";continue }
                     if !BuddyWorkerStore.terminal.contains(status) { continue }
                 }
                 guard let due=r["nextRun"] as? String,let date=ISO8601DateFormatter().date(from:due),date<=now else { continue }
-                let job=try store.create(workspace:workspace,agent:r["agentId"] as! String,requestId:"routine:"+id+":"+due,title:r["title"] as! String,goal:r["goal"] as! String,kind:r["kind"] as! String,provider:r["provider"] as! String,budget:r["budgetUSD"] as! Double,model:r["model"] as? String)
+                let job=try store.create(workspace:workspace,agent:r["agentId"] as! String,requestId:"routine:"+id+":"+due,title:r["title"] as! String,goal:r["goal"] as! String,kind:r["kind"] as! String,provider:r["provider"] as! String,budget:r["provider"] as? String=="claude" ? BuddyRunLimit.none:(r["budgetUSD"] as? Double ?? 0),model:r["model"] as? String)
                 // Queue creation is idempotent if the process dies before saving nextRun.
                 try store.update(job["id"] as! String,["routineID":id,"inboxQuery":r["query"] as! String,"previousRoutineResult":prior?["result"] ?? "","scheduledFor":due])
                 if let series {try store.update(job["id"] as! String,["routineSeriesID":series])}

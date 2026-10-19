@@ -459,3 +459,16 @@ Every scheduled inbox scan (each two hours on weekdays, four at weekends) delive
 - **The same failure is said once.** A scheduled check that fails the way the one before it did (the same wall every time, such as the per-task allowance) is said once and again only after 20 hours.
 - **Oversight does not repeat itself.** The team summary no longer says again what a check-in it covers has just told the person, and it is told what finished in the last day (`recentOutcomes`) so that "blocked" about work that was since done by someone else is not repeated. That is how a note saying Forge's re-run was blocked outlived the successful re-run, which Chief had run for him.
 - **Old group messages** that start with the speaker's name twice ("**Chief** **Chief:** …") show it once in the sidebar preview.
+
+### No limit per run (supersedes every earlier mention of a per-turn or per-task limit)
+
+Claude runs used to carry a ceiling of $0.50 (a setting, "Claude limit per task", that nobody had asked for and that a scan over forty emails on a larger model passed). Runs now have no limit of their own: chat turns, background tasks, coding sessions, scheduled routines, the agent setup interview and team check-ins are sent to the model with no `maxBudgetUsd`.
+
+- **What still limits spending is only what the person set:** a daily limit per agent or for the whole workspace. A run is then held to what that limit has left (`BuddyRunLimit.bridge`), and a workspace-wide limit now counts everyone's spending. A run with no limit of its own sets nothing aside against a daily limit; what it spends is counted when it ends.
+- **Internally** "no limit" is one number, `BuddyRunLimit.none`, so the ledger keeps working. Routines saved with a $0.50 figure, and tasks that stopped with nothing left, ignore it: they carry on, and no task waits for an allowance any more. The setting, the New task field and the "Additional Claude allowance" box are gone.
+- **Unchanged:** the step limits (60 steps for a turn, 100 for a coding session), the daily limits, the team check-ins' own daily limit.
+
+### Scheduled scans: why the 08:00 scan failed and why nothing followed
+
+- The seven weekday scans were saved while the inbox agent used Sonnet 4.6 and kept running on it after the agent was switched to Haiku 5.5, because a routine pinned its model. A scan on Sonnet cost $0.55 against about $0.01 on Haiku. A scheduled run now uses its agent's current model; the routine pins only the provider, so it still never switches provider on its own.
+- A failed run stopped the whole series: all seven weekday routines went to "needs attention" and none ran again until someone reviewed it. A scheduled email check that failed and left no action uncertain no longer stops the next one, and routines stopped only for that reason are set going again. A failure that left an action uncertain, or an interruption, still waits for the person.

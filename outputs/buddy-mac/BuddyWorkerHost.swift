@@ -136,9 +136,6 @@ import Darwin
             if action=="cancel" {await stop(id,status:"cancelled");return ["task":chatTask(try store.job(id))]}
             guard permitted(job,tool:"desktop"),permitted(job,tool:"web") else {throw BuddyWorkerFailure(message:"Reconnect this task's provider and enable browser access before continuing.")}
             guard ["paused","failed","interrupted","waiting_user"].contains(job["status"] as? String ?? ""),let goal=args["goal"] as? String,!goal.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else {throw BuddyWorkerFailure(message:"This task is not paused, or needs the user's missing details. Check its current state instead of starting it again.")}
-            if job["provider"] as? String=="claude",(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0 {
-                return ["needsNewAttempt":true,"task":chatTask(job),"instruction":"This attempt's usage is unconfirmed or its limit is used, so it has not resumed. Preserve the old reservation. If the current user explicitly asked to try again, start a new task within the configured task limit and first reconcile the actual website and prior receipts. Otherwise ask briefly whether to try again. Never reset unconfirmed usage or repeat an uncertain external change."]
-            }
             return try await handle(["operation":"resume","workspace":current,"taskId":id,"message":goal])
         }
         if operation=="coding" {
@@ -157,7 +154,7 @@ import Darwin
             guard (a["tools"] as? [String:Bool])?["projectFiles"] != false,try providerSettings.current(current).claudeEnabled,keyReader(current) != nil else {throw BuddyWorkerFailure(message:"Reconnect Claude and enable this agent's file access before continuing coding work.")}
             guard privateAgent==nil,active != id,let goal=args["goal"] as? String,!goal.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,goal.count<=10000 else {throw BuddyWorkerFailure(message:"Finish or pause the active session and give a short follow-up brief.")}
             let updates=(job["updates"] as? [String] ?? [])+[goal];guard updates.joined().count<=30000 else {throw BuddyWorkerFailure(message:"Start a new coding task with a fresh brief.")}
-            guard (job["remainingBudgetUSD"] as? Double ?? 0)>0 else {throw BuddyWorkerFailure(message:"This coding task has no Claude allowance left, or its last cost could not be confirmed. Give it more under “Additional Claude allowance” on the task, or start a new task (the limit for a new task is in Settings).")}
+            // (A coding task that stopped with nothing left carries on; runs have no limit of their own.)
             // Validate state before saving the follow-up, then persist it with the queue receipt.
             guard ["completed","paused","failed","interrupted","waiting_user"].contains(job["status"] as? String ?? "") else {throw BuddyWorkerFailure(message:"This coding task cannot be continued while it is queued or running.")}
             _ = try store.update(id,["updates":updates]);let result=try store.resume(id,continuingCoding:true);return ["task":result]
@@ -283,7 +280,7 @@ import Darwin
             let selected=try agentModels.selection(workspace:current,agent:id) ?? .initial(choice.provider)
             let provider = coding ? "claude" : ((request["provider"] as? String).flatMap{$0.isEmpty ? nil:$0} ?? selected.provider), budget = request["budgetUSD"] as? Double ?? (provider == "claude" ? choice.claudeBudgetUSD : 0)
             guard choice.enabled(provider) else { throw BuddyWorkerFailure(message: "Connect this provider in Settings → AI provider before starting a task.") }
-            if provider == "claude" { guard keyReader(current) != nil, budget > 0 else { throw BuddyWorkerFailure(message: "Connect your Claude API key and choose a task spending limit first.") } }
+            if provider == "claude" { guard keyReader(current) != nil, budget > 0 else { throw BuddyWorkerFailure(message: "Connect your Claude API key first.") } }
             let job = try store.create(workspace: current, agent: id, requestId: request["requestId"] as? String ?? "", title: request["title"] as? String ?? "", goal: request["goal"] as? String ?? "", kind: request["kind"] as? String ?? "general", provider: provider, budget: budget,model:provider==selected.provider ? selected.model:BuddyAgentModelSelection.initial(provider).model)
             return ["task": job]
         }
@@ -527,10 +524,10 @@ import Darwin
         let a = try agent(agentID, workspace: workspace)
         guard a["setupStatus"] as? String != "pending" else {throw BuddyWorkerFailure(message:"Finish this agent's setup in their chat before running this task.")}
         guard try providerSettings.current(workspace).enabled(job["provider"] as? String ?? "") else { _ = try store.update(id, ["status": "paused", "progress": "This provider is disconnected. Reconnect it in Settings → AI provider, then resume."]); return }
-        if job["provider"] as? String=="claude",(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0 {throw BuddyWorkerFailure(message:"Choose an additional Claude allowance in this task before resuming. Previous unconfirmed usage stays recorded.")}
         // Today's limit for this agent is checked before anything is set aside. A task that would pass it waits, resumable, with the reason.
         if job["provider"] as? String=="claude" {
-            let wanted=job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0
+            var wanted=job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0
+            if BuddyRunLimit.isNone(wanted) {wanted=0.01}   // no limit of its own: it only needs today's limit, if there is one, to have some room left
             if let room=BuddyBudget.headroom(support:support,workspace:workspace,agent:agentID),room.room+1e-9<wanted {try store.refuseForLimit(id,limit:room.limit,scope:room.scope,exposure:room.exposure,wanted:wanted);return}
         }
         browser?.close(); browser = nil
@@ -579,8 +576,8 @@ import Darwin
         if !earlier.isEmpty { prompt += "\n\n" + earlier }
         if job["provider"] as? String == "claude" {
             guard let key = keyReader(workspace) else { throw BuddyWorkerFailure(message: "Reconnect Claude API credits.") }
-            let budget = job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0
-            guard budget > 0 else { throw BuddyWorkerFailure(message: "This task has no Claude allowance left, or its last cost could not be confirmed. Give it more under “Additional Claude allowance” on the task, or start a new task (the limit for a new task is in Settings).") }
+            var budget = job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0
+            if budget <= 0 { budget = BuddyRunLimit.none }   // a task from when runs had an allowance carries on without one
             try store.update(id, ["remainingBudgetUSD": 0, "reservedBudgetUSD": budget]); attemptHeard = false
             let p = makeClaude(); claude = p
             p.onEvent = { [weak self] event in self?.claudeEvent(event, job: job) }
@@ -588,7 +585,7 @@ import Darwin
             let home = folder.appendingPathComponent("Claude", isDirectory: true); try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             var tools = Self.tools + [BuddyInboxReview.tool,BuddyInboxReview.finishTool] + ConversationService.directServiceTools
             if permitted(job, tool: "projectFiles") { tools += BuddyProjectFiles.tools }
-            try p.send(["command": "start", "runId":runID!, "model":job["model"] as? String ?? "claude-sonnet-4-6", "apiKey": key, "budget": budget, "cwd": folder.appendingPathComponent("Files").path, "home": home.path, "prompt": prompt, "instructions": instructions, "tools": tools])
+            try p.send(["command": "start", "runId":runID!, "model":modelForRun(job,agentID:agentID,workspace:workspace), "apiKey": key, "budget": BuddyRunLimit.bridge(budget, room: BuddyBudget.headroom(support: support, workspace: workspace, agent: agentID)?.room), "cwd": folder.appendingPathComponent("Files").path, "home": home.path, "prompt": prompt, "instructions": instructions, "tools": tools])
         } else {
             var options = BuddyTurnOptions();options.selectedModel=job["model"] as? String; options.proposalsEnabled = false; options.fileScope = scope; options.actorId = agentID; options.instructions = instructions; options.extraTools = Self.tools.filter { $0["name"] as? String != "buddy_connected_services" };options.inboxEvidence=inboxEvidence;options.inboxRoutine=((job["routineSeriesID"] ?? job["routineID"]) as? String).map{$0+":"+(job["inboxQuery"] as? String ?? "")+":"+(job["goal"] as? String ?? "")}
             options.proposalScope = BuddyProposalScope(workspace: workspace, chat: id, actorId: agentID, replyRunId: runID!)
@@ -598,8 +595,8 @@ import Darwin
     private func executeCoding(_ job:[String:Any],agent a:[String:Any]) throws {
         let workspace=job["workspace"] as! String,id=job["id"] as! String,folder=directory(job)
         guard permitted(job,tool:"projectFiles"),let key=keyReader(workspace),let runID else {throw BuddyWorkerFailure(message:"Reconnect Claude and enable file access for this coding session.")}
-        let budget=job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0
-        guard budget>0 else {throw BuddyWorkerFailure(message:"This coding task's budget is exhausted or its previous cost is uncertain. Start a new task to continue.")}
+        var budget=job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0
+        if budget<=0 {budget=BuddyRunLimit.none}
         let home=folder.appendingPathComponent("Claude",isDirectory:true),project=folder.appendingPathComponent("Files",isDirectory:true)
         try FileManager.default.createDirectory(at:home,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         codingNeedsInput=false
@@ -616,7 +613,7 @@ import Darwin
         let p=makeCoding();claude=p
         p.onEvent = { [weak self] event in guard let self,self.runID==runID else{return};self.claudeEvent(event,job:job) }
         try p.launch("coding.mjs")
-        var configuration:[String:Any] = ["command":"start","runId":runID,"model":job["model"] as? String ?? "claude-sonnet-4-6","apiKey":key,"budget":budget,"cwd":project.path,"home":home.path,"prompt":prompt,"instructions":instructions,"tools":BuddyProjectFiles.tools+[Self.codingCopyTool,Self.codingCopyOutTool,Self.codingCommandTool,Self.tools.first{$0["name"] as? String=="buddy_checkpoint"}!]]
+        var configuration:[String:Any] = ["command":"start","runId":runID,"model":job["model"] as? String ?? "claude-sonnet-4-6","apiKey":key,"budget":BuddyRunLimit.bridge(budget,room:BuddyBudget.headroom(support:support,workspace:workspace,agent:a["id"] as? String ?? "")?.room),"cwd":project.path,"home":home.path,"prompt":prompt,"instructions":instructions,"tools":BuddyProjectFiles.tools+[Self.codingCopyTool,Self.codingCopyOutTool,Self.codingCommandTool,Self.tools.first{$0["name"] as? String=="buddy_checkpoint"}!]]
         if let resume=job["codingSessionID"] as? String {guard UUID(uuidString:resume) != nil else {throw BuddyWorkerFailure(message:"The saved coding session is invalid.")};configuration["resume"]=resume}
         try p.send(configuration)
     }
@@ -696,6 +693,15 @@ import Darwin
                 try? store.update(id, values); cleanup()
             } else if Date().timeIntervalSince(lastProgressSave) > 0.5 { lastProgressSave = Date(); _ = try? store.update(id, values) }
         }
+    }
+    /// The model a run uses: a scheduled run uses its agent's current model (its routine only pins the provider), anything else the model it was started with.
+    private func modelForRun(_ job:[String:Any],agentID:String,workspace:String)->String {
+        let pinned=job["model"] as? String ?? "claude-sonnet-4-6"
+        guard job["routineID"] != nil || job["routineSeriesID"] != nil else {return pinned}
+        let current=(try? agentModels.selection(workspace:workspace,agent:agentID)).flatMap{$0}.map{(provider:$0.provider,model:$0.model)}
+        let model=BuddyRoutineModel.resolve(pinned:pinned,provider:job["provider"] as? String ?? "",current:current) ?? pinned
+        if model != pinned,let id=job["id"] as? String {_ = try? store.update(id,["model":model])}
+        return model
     }
     /// Whether the model side has said anything yet in this attempt. An allowance is set aside before the bridge starts; if the attempt ends
     /// before the model ever spoke, nothing was spent, so it is given back and the task can simply be tried again.

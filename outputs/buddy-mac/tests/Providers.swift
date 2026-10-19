@@ -12,7 +12,7 @@ import Foundation
         require(try BuddyAISettings(support:root).current(workspace).provider == "claude","selection persists across restart/processes")
         require(try settings.current(UUID().uuidString).provider == "chatgpt","workspace provider settings are isolated")
         var invalid=false;do{_ = try settings.update(workspace,provider:"unknown")}catch{invalid=true};require(invalid,"unknown provider rejected")
-        invalid=false;do{_ = try settings.update(workspace,budget:Double.nan)}catch{invalid=true};require(invalid,"invalid spending limit rejected")
+        require(BuddyRunLimit.isNone(try settings.current(workspace).claudeBudgetUSD),"a run has no limit of its own, whatever an older settings file or a caller says about one")
         let primary=ConversationService(support:root,executable:URL(fileURLWithPath:CommandLine.arguments[1]))
         primary.agentPermission={w,keys in w==workspace && keys == [key]};primary.filePermission={w,keys in w==workspace && keys == [key]};primary.computerPermission={_,_ in false}
         var processes=0

@@ -5,7 +5,7 @@ import json,sys
 def out(x):print(json.dumps({**x,"runId":config.get("runId")}),flush=True)
 for line in sys.stdin:
  config=json.loads(line);assert config['command']=='start' and config['apiKey']=='fixture-key'
- assert 0.1<=config['budget']<=10 and all(t['name'].startswith('buddy_') for t in config['tools'])
+ assert config['budget'] is None and all(t['name'].startswith('buddy_') for t in config['tools'])
  prompt=config['prompt']
  if 'COMPUTER_TASK' in prompt:
   assert 'buddy_computer_task' in [t['name'] for t in config['tools']]

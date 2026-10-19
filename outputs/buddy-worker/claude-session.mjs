@@ -17,7 +17,7 @@ export class ClaudeSession {
       const id=String(++this.next);this.pending.set(id,resolve);this.emit({type:'call',id,tool:def.name,arguments:args});
     })));
     const names=config.tools.map(t=>'mcp__buddy__'+t.name);
-    return {cwd:config.cwd,env:{PATH:process.env.PATH,HOME:config.home,TMPDIR:process.env.TMPDIR,ANTHROPIC_API_KEY:config.apiKey,CLAUDE_CONFIG_DIR:config.home,CLAUDE_AGENT_SDK_CLIENT_APP:'Buddy/0.16.0',DISABLE_AUTOUPDATER:'1',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1'},settingSources:[],strictMcpConfig:true,plugins:[],tools:[],allowedTools:names,permissionMode:'dontAsk',persistSession:false,includePartialMessages:true,maxTurns:60,maxBudgetUsd:config.budget,...(config.outputSchema?{outputFormat:{type:'json_schema',schema:config.outputSchema}}:{}),model:config.model||'claude-sonnet-4-6',systemPrompt:config.instructions,mcpServers:{buddy:this.createSdkMcpServer({name:'buddy',version:'1.0.0',tools})},canUseTool:async name=>!this.closed&&this.busy&&names.includes(name)?{behavior:'allow'}:{behavior:'deny',message:'Only current Buddy tools are available.'}};
+    return {cwd:config.cwd,env:{PATH:process.env.PATH,HOME:config.home,TMPDIR:process.env.TMPDIR,ANTHROPIC_API_KEY:config.apiKey,CLAUDE_CONFIG_DIR:config.home,CLAUDE_AGENT_SDK_CLIENT_APP:'Buddy/0.16.0',DISABLE_AUTOUPDATER:'1',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1'},settingSources:[],strictMcpConfig:true,plugins:[],tools:[],allowedTools:names,permissionMode:'dontAsk',persistSession:false,includePartialMessages:true,maxTurns:60,...(config.budget!=null?{maxBudgetUsd:config.budget}:{}),...(config.outputSchema?{outputFormat:{type:'json_schema',schema:config.outputSchema}}:{}),model:config.model||'claude-sonnet-4-6',systemPrompt:config.instructions,mcpServers:{buddy:this.createSdkMcpServer({name:'buddy',version:'1.0.0',tools})},canUseTool:async name=>!this.closed&&this.busy&&names.includes(name)?{behavior:'allow'}:{behavior:'deny',message:'Only current Buddy tools are available.'}};
   }
   emit(event){this.write({...event,runId:this.runId});}
   async prepare(config) {
@@ -34,7 +34,8 @@ export class ClaudeSession {
   async start(config) {
     if(this.closed||this.busy)throw Error('The Claude connection is already in use or closed.');
     if(typeof config.runId!=='string'||!config.runId.trim())throw Error('This Claude task is missing its run ID. No work was started.');
-    if(!config.apiKey||!Number.isFinite(config.budget)||config.budget<=0||config.budget>10)throw Error('Connect Claude API credits and set a task budget first.');
+    // A run has no ceiling of its own (budget is null); a number here is only what a daily limit leaves room for.
+    if(!config.apiKey||(config.budget!=null&&(!Number.isFinite(config.budget)||config.budget<=0)))throw Error('Connect Claude API credits first.');
     this.busy=true;this.runId=config.runId;let result,lastActivity=0;
     try {
       await this.prepare(config);

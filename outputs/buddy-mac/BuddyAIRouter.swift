@@ -71,7 +71,7 @@ import Foundation
         if !choice.chatgptEnabled { gpt=["connected":false,"enabled":false] }
         let claudeConnected=choice.claudeEnabled && keyReader(workspace) != nil
         let connected=choice.provider == "claude" ? claudeConnected:gpt["connected"] as? Bool == true
-        return ["provider":choice.provider,"connected":connected,"chatgpt":gpt,"claude":["connected":claudeConnected,"enabled":choice.claudeEnabled],"claudeBudgetUSD":choice.claudeBudgetUSD,"plan":gpt["plan"] ?? NSNull(),"error":connected ? "":"Connect \(choice.provider == "claude" ? "Claude":"ChatGPT") in Settings → AI provider."]
+        return ["provider":choice.provider,"connected":connected,"chatgpt":gpt,"claude":["connected":claudeConnected,"enabled":choice.claudeEnabled],"plan":gpt["plan"] ?? NSNull(),"error":connected ? "":"Connect \(choice.provider == "claude" ? "Claude":"ChatGPT") in Settings → AI provider."]
     }
     func select(workspace:String,provider:String,budget:Double?) async throws->[String:Any] {try ensureAgentDefaults(workspace:workspace);_ = try settings.update(workspace,provider:provider,budget:budget);return try await status(workspace:workspace)}
     func disconnect(workspace:String,provider:String) async throws->[String:Any] {

@@ -115,14 +115,14 @@ import Foundation
         _ = try store.resume(t1)
         require(try open(store, w).isEmpty, "resuming ends it")
 
-        // 3. An allowance beats a plain "stopped": choosing it is what ends the blocker.
+        // 3. A task from when runs had an allowance is just a stopped task now.
         let paid = try start(store, w, a, provider: "claude", request: "paid")
         try store.update(paid, ["remainingBudgetUSD": 0, "reservedBudgetUSD": 0.5])
         try store.update(paid, ["status": "interrupted", "progress": "Stopped."])
         now = try open(store, w).filter { $0["taskId"] as? String == paid }
-        require(kinds(now) == ["allowance"], "a Claude task with no allowance left asks for one, not twice")
-        _ = try store.resume(paid, additionalBudgetUSD: 0.3, authorizationID: UUID().uuidString)
-        require(try open(store, w).filter { $0["taskId"] as? String == paid }.isEmpty, "choosing an allowance ends it")
+        require(kinds(now) == ["stopped"], "runs have no limit of their own, so a Claude task that stopped with nothing left is an ordinary stopped task and never asks for an allowance")
+        _ = try store.resume(paid)
+        require(try open(store, w).filter { $0["taskId"] as? String == paid }.isEmpty, "resuming it ends the blocker")
 
         // 4. A restart that leaves an action unconfirmed opens one blocker for it, and checking it off ends it.
         let crashDirectory = root.appendingPathComponent("restart/Worker")

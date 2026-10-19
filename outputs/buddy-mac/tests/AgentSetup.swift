@@ -45,7 +45,7 @@ import Foundation
         require(((shortened["instructions"] as? String)?.count ?? 1600)<=1500,"overlong generated instructions are rewritten, never silently truncated")
         let calls=try String(contentsOf:root.appendingPathComponent("AgentSetup/fixture-calls.jsonl"),encoding:.utf8).split(separator:"\n").suffix(3).map{try JSONSerialization.jsonObject(with:Data($0.utf8)) as! [String:Any]}
         require(calls.map{$0["phase"] as! String}==["questions","instructions","instructions"] && calls.last?["repair"] as? Bool==true,"overlong profile gets one separate, tool-free shortening call")
-        require((calls.last?["budget"] as? Double ?? 1)<(calls.first?["budget"] as? Double ?? 0),"shortening shares the original turn budget")
+        require(calls.count>=2 && calls.allSatisfy{$0["budget"] is NSNull},"neither the questions nor shortening the instructions run against a ceiling of their own")
         let restored=BuddyAgentSetup(support:root,makeProcess:make,keyReader:{_ in "fixture-key"})
         require((try restored.request(workspace:workspace,payload:["action":"status","agentId":a])["interview"] as? [String:Any])?["status"] as? String=="ready","completed setup survives app restart")
         do{_ = try restored.request(workspace:UUID().uuidString,payload:["action":"begin","agentId":a]);require(false,"cross-workspace setup rejected")}catch{}

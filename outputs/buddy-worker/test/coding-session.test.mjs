@@ -35,3 +35,11 @@ test('a coding run streams activity so a long single turn is not mistaken for a 
   assert.equal(calls[0].options.includePartialMessages,true,'partial messages are requested');
   assert.ok(events.some(e=>e.type==='activity'),'activity is reported while the model is writing');
 });
+
+test('a coding run with no budget is given no ceiling',async()=>{
+  const calls=[],events=[];
+  const host=new CodingSession({query:input=>{calls.push(input);return {async *[Symbol.asyncIterator](){yield {type:'system',subtype:'init',session_id:id};yield {type:'result',result:'Done.',total_cost_usd:0.01,is_error:false,session_id:id};},close(){}};},tool:(n,d,s,call)=>({name:n,call}),createSdkMcpServer:x=>x,fromJSONSchema:()=>({shape:{}}),write:x=>events.push(x)});
+  await host.start({...config,budget:null});
+  assert.equal('maxBudgetUsd' in calls[0].options,false);
+  assert.ok(events.some(e=>e.type==='result'&&!e.error));
+});

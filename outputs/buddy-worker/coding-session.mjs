@@ -5,7 +5,8 @@ export class CodingSession {
   emit(event){this.write({...event,runId:this.runId});}
   async start(config){
     if(this.closed||this.busy)throw Error('This coding session is busy or stopped.');
-    if(!config.apiKey||!Number.isFinite(config.budget)||config.budget<=0||config.budget>10)throw Error('Connect Claude API credits and set a task budget first.');
+    // A run has no ceiling of its own (budget is null); a number here is only what a daily limit leaves room for.
+    if(!config.apiKey||(config.budget!=null&&(!Number.isFinite(config.budget)||config.budget<=0)))throw Error('Connect Claude API credits first.');
     if(config.resume&&!/^[0-9a-f-]{36}$/i.test(config.resume))throw Error('Invalid saved coding session.');
     this.busy=true;this.runId=config.runId;
     const names=config.tools.map(t=>'mcp__buddy__'+t.name);
@@ -15,7 +16,7 @@ export class CodingSession {
     let result,lastActivity=0;
     try{
       this.session=this.query({prompt:config.prompt,options:{cwd:config.cwd,env:{PATH:process.env.PATH,HOME:config.home,TMPDIR:process.env.TMPDIR,ANTHROPIC_API_KEY:config.apiKey,CLAUDE_CONFIG_DIR:config.home,CLAUDE_AGENT_SDK_CLIENT_APP:'Buddy/0.18.0',DISABLE_AUTOUPDATER:'1',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1'},
-        settingSources:[],plugins:[],strictMcpConfig:true,tools:[],allowedTools:names,permissionMode:'dontAsk',persistSession:true,includePartialMessages:true,...(config.resume?{resume:config.resume}:{}),model:config.model||'claude-sonnet-4-6',maxTurns:100,maxBudgetUsd:config.budget,
+        settingSources:[],plugins:[],strictMcpConfig:true,tools:[],allowedTools:names,permissionMode:'dontAsk',persistSession:true,includePartialMessages:true,...(config.resume?{resume:config.resume}:{}),model:config.model||'claude-sonnet-4-6',maxTurns:100,...(config.budget!=null?{maxBudgetUsd:config.budget}:{}),
         systemPrompt:{type:'preset',preset:'claude_code',append:config.instructions},mcpServers:{buddy:this.createSdkMcpServer({name:'buddy',version:'1.0.0',tools})}}});
       for await(const message of this.session){
         if(message.type==='stream_event'&&Date.now()-lastActivity>2000){lastActivity=Date.now();this.emit({type:'activity'});}

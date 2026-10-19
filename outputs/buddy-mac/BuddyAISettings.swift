@@ -4,7 +4,8 @@ struct BuddyAIChoice: Codable, Equatable {
     var provider = "chatgpt"
     var chatgptEnabled = true
     var claudeEnabled = true
-    var claudeBudgetUSD = 0.5
+    /// Kept so older settings files still load. Runs have no limit of their own (`BuddyRunLimit.none`); whatever an old file says is ignored.
+    var claudeBudgetUSD = BuddyRunLimit.none
     var chatgptRevision = "initial"
     var claudeRevision = "initial"
     func enabled(_ provider: String) -> Bool { provider == "chatgpt" ? chatgptEnabled : provider == "claude" && claudeEnabled }
@@ -22,18 +23,20 @@ struct BuddyAIChoice: Codable, Equatable {
             let data = try Data(contentsOf: url)
             guard data.count <= 1024*1024 else { throw BuddyFailure(message: "Provider settings are too large.") }
             let saved = try JSONDecoder().decode(Saved.self, from: data)
-            guard saved.version == 1, saved.workspaces.allSatisfy({ UUID(uuidString: $0.key) != nil && ["chatgpt", "claude"].contains($0.value.provider) && $0.value.claudeBudgetUSD.isFinite && (0.1...10).contains($0.value.claudeBudgetUSD) }) else { throw BuddyFailure(message: "Invalid provider settings.") }
+            guard saved.version == 1, saved.workspaces.allSatisfy({ UUID(uuidString: $0.key) != nil && ["chatgpt", "claude"].contains($0.value.provider) }) else { throw BuddyFailure(message: "Invalid provider settings.") }
             return saved
         } catch { throw BuddyFailure(message: "Buddy couldn’t verify your AI settings. Restore ai-providers.json before reconnecting or starting work.") }
     }
     func current(_ workspace: String) throws -> BuddyAIChoice {
         guard UUID(uuidString: workspace) != nil else { throw BuddyFailure(message: "This workspace is unavailable.") }
-        return try saved().workspaces[workspace] ?? BuddyAIChoice()
+        var choice = try saved().workspaces[workspace] ?? BuddyAIChoice()
+        choice.claudeBudgetUSD = BuddyRunLimit.none
+        return choice
     }
     @discardableResult func update(_ workspace: String, provider: String? = nil, enabled: (String, Bool)? = nil, budget: Double? = nil) throws -> BuddyAIChoice {
         var saved = try self.saved(); var choice = try current(workspace)
         if let provider { guard ["chatgpt", "claude"].contains(provider) else { throw BuddyFailure(message: "Choose ChatGPT or Claude.") }; choice.provider = provider }
-        if let budget { guard budget.isFinite, (0.1...10).contains(budget) else { throw BuddyFailure(message: "Choose a Claude limit between $0.10 and $10.") }; choice.claudeBudgetUSD = budget }
+        _ = budget   // there is no per-run limit to set any more
         if let (provider, value) = enabled {
             guard ["chatgpt", "claude"].contains(provider) else { throw BuddyFailure(message: "Unsupported provider.") }
             if provider == "chatgpt" { choice.chatgptEnabled = value; choice.chatgptRevision = UUID().uuidString }

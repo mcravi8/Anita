@@ -71,10 +71,16 @@ import Foundation
         require(reviews[0]["status"] as? String == "expired" && reviews[1]["status"] as? String == "uncertain", "old approvals expire and accepted actions become uncertain")
         _ = try recovered.resume(id); require(try recovered.job(id)["status"] as? String == "queued", "explicit resume queues saved work")
         try recovered.setPaused(true); require(try BuddyWorkerStore(directory: root.appendingPathComponent("Worker")).paused, "queue pause survives restart")
-        var invalid = false; do { _ = try store.create(workspace: workspace, agent: agent, requestId: "invalid", title: "x", goal: "x", kind: "email", provider: "claude", budget: 1000) } catch { invalid = true }; require(invalid,"invalid budget cannot enter queue")
+        var invalid = false; do { _ = try store.create(workspace: workspace, agent: agent, requestId: "invalid", title: "x", goal: "x", kind: "email", provider: "claude", budget: 2_000_000) } catch { invalid = true }; require(invalid,"an absurd budget cannot enter the queue")
+        let unlimited = try store.create(workspace: workspace, agent: agent, requestId: "no-limit", title: "x", goal: "x", kind: "email", provider: "claude", budget: BuddyRunLimit.none)
+        require(BuddyRunLimit.isNone(unlimited["budgetUSD"] as? Double ?? 0),"a run with no limit of its own is a normal task")
         let budgetStore=try BuddyWorkerStore(directory:root.appendingPathComponent("Budget")),budgetJob=try budgetStore.create(workspace:workspace,agent:agent,requestId:"budget",title:"Inbox scan",goal:"Read mail",kind:"email",provider:"claude",budget:0.5),bid=budgetJob["id"] as! String
         try budgetStore.update(bid,["status":"failed","remainingBudgetUSD":0.0,"reservedBudgetUSD":0.5,"spentUSD":0.1])
-        do{_ = try budgetStore.resume(bid);require(false,"an exhausted attempt cannot queue another doomed retry without an allowance")}catch{}
+        // Runs have no limit of their own, so a task that stopped with nothing left from the time they did simply carries on.
+        let oldScan=try budgetStore.create(workspace:workspace,agent:agent,requestId:"legacy",title:"Old scan",goal:"Read mail",kind:"email",provider:"claude",budget:0.5)
+        try budgetStore.update(oldScan["id"] as! String,["status":"failed","remainingBudgetUSD":0.0,"reservedBudgetUSD":0.5,"spentUSD":0.1])
+        let carried=try budgetStore.resume(oldScan["id"] as! String)
+        require(carried["status"] as? String=="queued" && BuddyRunLimit.isNone(carried["remainingBudgetUSD"] as? Double ?? 0),"a task from when runs had an allowance carries on without one")
         let authorization=UUID().uuidString
         let funded=try budgetStore.resume(bid,additionalBudgetUSD:0.3,authorizationID:authorization)
         require(funded["remainingBudgetUSD"] as? Double==0.3 && funded["uncertainBudgetUSD"] as? Double==0.5 && funded["reservedBudgetUSD"] as? Double==0 && funded["spentUSD"] as? Double==0.1,"an explicit extra allowance preserves prior uncertain and confirmed usage")

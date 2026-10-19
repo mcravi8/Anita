@@ -196,10 +196,8 @@ import CryptoKit
         let metered = try direct.create(workspace: w, agent: a, requestId: "metered", title: "Metered", goal: "Do it", kind: "coding", provider: "claude", budget: 0.5), meteredID = metered["id"] as! String
         try direct.update(meteredID, ["status": "paused", "remainingBudgetUSD": 0, "reservedBudgetUSD": 0.5])
         require(try direct.job(meteredID)["remainingBudgetUSD"] as? Double == 0, "a whole-number zero allowance reads back as zero")
-        var needsMore = false; do { _ = try direct.resume(meteredID) } catch { needsMore = true }
-        require(needsMore, "a stopped Claude task cannot restart on its old budget without a new allowance")
-        let funded = try direct.resume(meteredID, additionalBudgetUSD: 0.4, authorizationID: UUID().uuidString)
-        require(funded["status"] as? String == "queued" && funded["remainingBudgetUSD"] as? Double == 0.4 && funded["uncertainBudgetUSD"] as? Double == 0.5, "a chosen allowance restarts it, and the earlier unconfirmed spend stays on record")
+        let carriedOn = try direct.resume(meteredID)
+        require(carriedOn["status"] as? String == "queued" && BuddyRunLimit.isNone(carriedOn["remainingBudgetUSD"] as? Double ?? 0) && carriedOn["uncertainBudgetUSD"] as? Double == nil, "a stopped Claude task from when runs had an allowance carries on without one")
         // A database from a newer Buddy is refused rather than misread.
         let newer = root.appendingPathComponent("newer"); _ = try BuddyWorkerStore(directory: newer)
         try BuddyOperationsDB(directory: newer, existing: true).run("PRAGMA user_version = 9")
@@ -262,13 +260,14 @@ import CryptoKit
         let firstTask = tale.jobs[0], firstID = firstTask["id"] as! String
         let aside = try tale.archivedJobs()[0]["id"] as! String
         let firstHistory = try tale.history(of: firstID)
-        require(firstHistory.map(\.type) == ["task.created", "task.status", "attempt.started", "attempt.ended", "task.status", "decision.opened", "task.status", "decision.resolved", "task.status", "attempt.started", "attempt.ended", "task.status"], "a task's history lists what happened in order, including the blocker that opened when it needed an allowance and ended when it got one: \(firstHistory.map(\.type))")
-        require(firstHistory.map(\.seq) == Array(1...12), "a task's entries are numbered one after another without a gap")
+        require(firstHistory.map(\.type) == ["task.created", "task.status", "attempt.started", "attempt.ended", "task.status", "task.status", "task.status", "attempt.started", "attempt.ended", "task.status"], "a task's history lists what happened in order: \(firstHistory.map(\.type))")
+        require(firstHistory.map(\.seq) == Array(1...10), "a task's entries are numbered one after another without a gap")
         require(firstHistory[0].cause == "request" && firstHistory[0].correlation == "first", "an entry says what caused it and which request it belongs to")
-        require(firstHistory[6].cause == "resume" && (firstHistory[6].payload["from"] as? String) == "paused" && (firstHistory[6].payload["to"] as? String) == "queued", "resuming is recorded as a move from paused to queued")
+        let resumed = firstHistory.first { $0.cause == "resume" }
+        require(resumed != nil && (resumed!.payload["from"] as? String) == "paused" && (resumed!.payload["to"] as? String) == "queued", "resuming is recorded as a move from paused to queued")
         require(firstHistory.map(\.id) == firstHistory.map(\.id).sorted(), "entries are ordered across the whole log as well")
         require(try tale.history(of: aside).map(\.type) == ["task.created", "task.status", "task.archived"], "a task that is archived says so in its history")
-        require(try tale.history(of: firstID, after: 10).map(\.seq) == [11, 12], "history can be read from just after a point")
+        require(try tale.history(of: firstID, after: 8).map(\.seq) == [9, 10], "history can be read from just after a point")
         let tries = try tale.attempts(of: firstID)
         require(tries.map(\.number) == [1, 2] && tries.map(\.outcome) == ["paused", "completed"] && tries.map(\.runID) == ["run-1", "run-2"] && tries.allSatisfy { $0.provider == "claude" && $0.endedAt != nil }, "attempts record their run, provider and how each ended")
         let storyProblems = try historyProblems(story)

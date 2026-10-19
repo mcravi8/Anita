@@ -130,6 +130,15 @@ import Foundation
         require(close(BuddyBudget.headroom(support: main, workspace: w, agent: a)?.room ?? -1, 0), "a limit below what is already used leaves no room")
         try store.setLimit(workspace: w, scope: "agent", id: a, amount: nil, setBy: "user")
         require(BuddyBudget.headroom(support: main, workspace: w, agent: a)?.scope == "workspace", "removing an agent's limit falls back again")
+        // Runs have no limit of their own: a task with none sets nothing aside, and the model is only held to what a daily limit leaves.
+        let open = try store.create(workspace: w, agent: b, requestId: "open-ended", title: "Open", goal: "Do it", kind: "general", provider: "claude", budget: BuddyRunLimit.none)
+        try store.update(open["id"] as! String, ["status": "running", "attempt": 1, "remainingBudgetUSD": 0, "reservedBudgetUSD": BuddyRunLimit.none])
+        require(close(try store.exposure(workspace: w, agent: b).reserved, 0.5), "a task with no limit of its own sets nothing aside")
+        require(BuddyRunLimit.bridge(BuddyRunLimit.none, room: nil) is NSNull, "with no run limit and no daily limit the model gets no ceiling")
+        require(close(BuddyRunLimit.bridge(BuddyRunLimit.none, room: 3.2) as? Double ?? 0, 3.2) && close(BuddyRunLimit.bridge(BuddyRunLimit.none, room: 0) as? Double ?? 0, 0.01), "a daily limit is the only ceiling there is")
+        // A limit on the whole workspace is spent by everyone in it.
+        try JSONSerialization.data(withJSONObject: ["agents": [["id": a], ["id": b]]]).write(to: main.appendingPathComponent("workspace.json"))
+        require(close(BuddyBudget.headroom(support: main, workspace: w, agent: b)?.room ?? -1, 9.0), "a workspace-wide limit counts what the whole team has used, not one agent's share")
         for bad in [-1.0, Double.nan, Double.infinity, 200000] { var refused = false; do { try store.setLimit(workspace: w, scope: "workspace", amount: bad, setBy: "user") } catch { refused = true }; require(refused, "a limit of \(bad) is refused") }
         var badScope = false; do { try store.setLimit(workspace: w, scope: "agent", id: "not-an-agent", amount: 1, setBy: "user") } catch { badScope = true }
         require(badScope, "a limit needs a real agent")

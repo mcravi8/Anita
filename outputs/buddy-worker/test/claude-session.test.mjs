@@ -45,3 +45,12 @@ test('streaming activity keeps live work observable without exposing token or th
  assert.deepEqual(f.events.find(e=>e.type==='activity'),{type:'activity',runId:'one'});
  assert.equal(JSON.stringify(f.events).includes('PRIVATE_STREAM_CONTENT'),false);f.host.close();
 });
+
+test('a run with no budget is given no ceiling, and one with a number is held to it',async()=>{
+  const open=fixture();await open.host.start({...config,budget:null});
+  assert.equal('maxBudgetUsd' in open.calls[0].options,false,'no limit of its own means no ceiling is sent to the model');
+  const capped=fixture();await capped.host.start({...config,budget:1.25});
+  assert.equal(capped.calls[0].options.maxBudgetUsd,1.25,'a daily limit that leaves 1.25 is passed on');
+  const refused=fixture();
+  await assert.rejects(refused.host.start({...config,budget:-1}),/Connect Claude/,'a nonsense number is refused rather than ignored');
+});

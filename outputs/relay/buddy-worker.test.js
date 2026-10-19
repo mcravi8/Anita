@@ -41,15 +41,12 @@ test('task blockers stay brief and keep diagnostic logs or partial results out o
 });
 test('sign-in transitions keep one actionable message and preserve the final result',()=>{const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}},t={id:'job',workspace:'w',agentId:'a',title:'Create inbox',attempt:1,status:'waiting_review',attentionKey:'auth',updatedAt:'2026-10-18T05:44:00Z',reviews:[{status:'pending',kind:'authentication',mode:'signin'}]};worker.deliverResult(s,t);assert.equal(s.messages.a[0].body,'Please sign in to continue.');worker.deliverResult(s,{...t,status:'waiting_user',attentionKey:'private',updatedAt:'2026-10-18T05:45:00Z',progress:'Private Chrome is open. Finish sign-in in Buddy when ready.'});assert.equal(s.messages.a.length,1);assert.match(s.messages.a[0].body,/Finish private sign-in/);worker.deliverResult(s,{...t,status:'completed',result:'Created chief@example.test.',updatedAt:'2026-10-18T05:46:00Z'});assert.equal(worker.presentation(s,s.messages.a[0]).hidden,true);assert.equal(worker.presentation(s,s.messages.a[1]).body,'Created chief@example.test.');});
 
-test('an interrupted or paused coding session offers a fresh allowance, because starting an attempt zeroes the one it had',()=>{
+test('no task waits for an allowance any more: runs have no limit of their own',()=>{
  const coding={id:'code',kind:'coding',provider:'claude',status:'interrupted',budgetUSD:2,remainingBudgetUSD:0,reservedBudgetUSD:2};
- for(const status of ['paused','failed','interrupted','waiting_user'])assert.equal(worker.needsAllowance({...coding,status}),true,status+' coding work needs an allowance to continue');
+ for(const status of ['paused','failed','interrupted','waiting_user'])assert.equal(worker.needsAllowance({...coding,status}),false,status+' work simply continues');
  assert.equal(worker.canResume('interrupted','coding'),true);
- assert.equal(worker.needsAllowance({...coding,remainingBudgetUSD:1.5}),false,'a session that still has an allowance does not ask for another');
- assert.equal(worker.needsAllowance({...coding,status:'completed'}),false);
- assert.equal(worker.needsAllowance({...coding,provider:'chatgpt'}),false,'ChatGPT work is not metered here');
- assert.equal(worker.needsAllowance({...coding,kind:'research'}),true,'ordinary Claude tasks keep asking, as before');
 });
+
 
 test('actions that may or may not have gone through are listed for the user to check, and nothing else is',()=>{
  const task={reviews:[{id:'1',status:'pending'},{id:'2',status:'uncertain',tool:{name:'Click Send'}},{id:'3',status:'completed'},{id:'4',status:'not_sent'},{id:'5',status:'dispatched'},{id:'6',status:'uncertain',kind:'authentication',origin:'https://example.com'}]};

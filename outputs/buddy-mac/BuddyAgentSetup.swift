@@ -101,7 +101,7 @@ import Foundation
         if let draft=run.profileDraft {input["draftToShorten"]=draft;input["revisionRequest"]="Rewrite this draft concisely, preserving the user's job, preferences and boundaries. Role must fit 55 characters; instructions must fit 1,500 characters. Aim for 700–1,100 characters. Return the same role/instructions JSON shape."}
         let data=try JSONSerialization.data(withJSONObject:input)
         let instructions=Self.guidance(phase:phase)
-        try run.process.send(["command":"start","runId":run.id+":"+phase,"apiKey":apiKey,"model":model.isEmpty ? "claude-sonnet-4-6":model,"budget":budget,"home":home.path,"cwd":root.path,"tools":[],"outputSchema":phase=="questions" ? Self.questionSchema:Self.profileSchema,"prompt":String(data:data,encoding:.utf8)!,"instructions":instructions])
+        try run.process.send(["command":"start","runId":run.id+":"+phase,"apiKey":apiKey,"model":model.isEmpty ? "claude-sonnet-4-6":model,"budget":BuddyRunLimit.bridge(budget,room:nil),"home":home.path,"cwd":root.path,"tools":[],"outputSchema":phase=="questions" ? Self.questionSchema:Self.profileSchema,"prompt":String(data:data,encoding:.utf8)!,"instructions":instructions])
     }
     private func consume(_ event:[String:Any],run:Run){
         guard event["runId"] as? String==nil || event["runId"] as? String==run.id+":"+run.phase else{return}

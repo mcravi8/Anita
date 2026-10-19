@@ -77,28 +77,44 @@ import Foundation
         let handoff = fake.calls[3].payload["text"] as? String ?? ""
         require(handoff.contains("ACTUAL_FIRST_WORK") && handoff.contains("ACTUAL_SECOND_WORK"), "reviewer receives actual completed dependency work")
         fake.complete(3, text: "ACTUAL_REVIEW")
-        await wait { fake.calls.count == 5 }
-        require(fake.calls[4].options.fileScope == nil && (fake.calls[4].payload["text"] as? String)?.contains("actual.md") == true, "synthesis receives actual save receipts without writing access")
-        require(!fake.calls[4].options.toolsEnabled && (fake.calls[4].payload["text"] as? String)?.contains("ACTUAL_REVIEW") == true, "final lead synthesizes actual work without new service calls")
-        fake.complete(4, text: "ONE_COMBINED_REPLY")
         await wait { team.snapshots()[0]["status"] as? String == "completed" }
-        require(team.snapshots().count == 1 && team.snapshots()[0]["text"] as? String == "ONE_COMBINED_REPLY", "only one group reply is exposed")
+        require(fake.calls.count == 4, "nobody is asked to combine what the agents said: each agent's reply is its own message")
+        let said = team.snapshots()[0]["text"] as? String ?? ""
+        require(team.snapshots().count == 1 && said == "**Write Bot**\nACTUAL_FIRST_WORK\n\n**Search Bot**\nACTUAL_SECOND_WORK\n\n**Review Bot**\nACTUAL_REVIEW", "the run keeps what each agent said, in order and under its name, for history and search: \(said)")
+        require((team.snapshots()[0]["team"] as? [String: Any])?["direct"] as? Bool == false && (team.snapshots()[0]["files"] as? [[String: Any]])?.first?["path"] as? String == "actual.md", "the run says agents answered for themselves, and the saved-file receipt is kept")
         let recordedEntries=(team.snapshots()[0]["team"] as! [String:Any])["entries"] as! [[String:Any]]
         require(recordedEntries.allSatisfy { ($0["startedAt"] as? String).flatMap { ISO8601DateFormatter().date(from:$0) } != nil && ($0["finishedAt"] as? String).flatMap { ISO8601DateFormatter().date(from:$0) } != nil }, "group contributions retain actual start and finish timestamps for the chat timeline")
-        print("PASS: independent parallel work, dependent handoffs, private internal turns, scoped permissions, and one combined reply")
+        require(recordedEntries.map { $0["notes"] as? String ?? "" } == ["ACTUAL_FIRST_WORK", "ACTUAL_SECOND_WORK", "ACTUAL_REVIEW"], "each agent's message is its own entry, in full")
+        print("PASS: independent parallel work, dependent handoffs, private internal turns, scoped permissions, and each agent answering in its own message with nothing combined")
 
         let (failureFake, failureTeam) = fixture(), failureRequest = request()
         _ = try failureTeam.send(failureRequest); await wait { failureFake.calls.count == 1 }
         let failedPlan = BuddyTeamPlan(leadId: "writer", tasks: [BuddyTeamTask(agentId: "researcher", task: "Read evidence", dependsOn: []), BuddyTeamTask(agentId: "reviewer", task: "Review evidence", dependsOn: ["researcher"])])
         failureFake.complete(0, text: String(data: try JSONEncoder().encode(failedPlan), encoding: .utf8)!)
         await wait { failureFake.calls.count == 2 }; failureFake.complete(1, text: "Connection unavailable", status: "failed")
-        await wait { failureFake.calls.count == 3 }
-        let failureText = failureFake.calls[2].payload["text"] as? String ?? ""
-        require(failureText.contains("Connection unavailable") && failureText.contains("could not be completed"), "missing work is honestly passed to synthesis and review is blocked")
-        failureFake.complete(2, text: "Missing evidence, explained")
-        await wait { failureTeam.snapshots()[0]["status"] as? String == "completed" }
-        require((failureTeam.snapshots()[0]["team"] as? [String: Any])?["partial"] as? Bool == true, "partial failure remains visible and retryable")
-        print("PASS: worker failures block dependent work and remain visible in the combined reply")
+        await wait { failureTeam.snapshots()[0]["status"] as? String == "failed" }
+        let failedEntries = (failureTeam.snapshots()[0]["team"] as? [String: Any])?["entries"] as? [[String: Any]] ?? []
+        require(failureFake.calls.count == 2 && failedEntries.map { $0["status"] as? String ?? "" } == ["failed", "blocked"], "a review that depends on failed work is blocked, not asked for, and nothing is combined")
+        require((failureTeam.snapshots()[0]["error"] as? String)?.contains("None of the teammates could finish") == true && (failedEntries[0]["error"] as? String)?.contains("Connection unavailable") == true, "when nobody could finish, the group says so and each failure stays visible")
+        // One agent finishes and another does not: the finished one's message stands, and the failure stays visible and retryable.
+        let (partialFake, partialTeam) = fixture(), partialRequest = request()
+        _ = try partialTeam.send(partialRequest); await wait { partialFake.calls.count == 1 }
+        let partialPlan = BuddyTeamPlan(leadId: "writer", tasks: [BuddyTeamTask(agentId: "writer", task: "Write", dependsOn: []), BuddyTeamTask(agentId: "researcher", task: "Search", dependsOn: [])])
+        partialFake.complete(0, text: String(data: try JSONEncoder().encode(partialPlan), encoding: .utf8)!)
+        await wait { partialFake.calls.count == 3 }
+        let writerIndex = partialFake.calls.firstIndex { ($0.payload["agent"] as? [String: String])?["name"] == "Write Bot" }!, searchIndex = partialFake.calls.firstIndex { ($0.payload["agent"] as? [String: String])?["name"] == "Search Bot" }!
+        partialFake.complete(writerIndex, text: "WRITER_SAYS"); partialFake.complete(searchIndex, text: "Search is down", status: "failed")
+        await wait { partialTeam.snapshots()[0]["status"] as? String == "completed" }
+        require(partialTeam.snapshots()[0]["text"] as? String == "**Write Bot**\nWRITER_SAYS" && (partialTeam.snapshots()[0]["team"] as? [String: Any])?["partial"] as? Bool == true && partialFake.calls.count == 3, "partial failure keeps the agent that finished and stays visible and retryable")
+        // Nobody needed: the spokesperson simply answers.
+        let (directFake, directTeam) = fixture(), directRequest = request()
+        _ = try directTeam.send(directRequest); await wait { directFake.calls.count == 1 }
+        directFake.complete(0, text: String(data: try JSONEncoder().encode(BuddyTeamPlan(leadId: "reviewer", tasks: [])), encoding: .utf8)!)
+        await wait { directFake.calls.count == 2 }
+        require((directFake.calls[1].payload["agent"] as? [String: String])?["name"] == "Review Bot", "with no assignments the spokesperson answers")
+        directFake.complete(1, text: "JUST_ONE_ANSWER"); await wait { directTeam.snapshots()[0]["status"] as? String == "completed" }
+        require(directTeam.snapshots()[0]["text"] as? String == "JUST_ONE_ANSWER" && (directTeam.snapshots()[0]["team"] as? [String: Any])?["direct"] as? Bool == true, "a request nobody else needed is one agent's own answer")
+        print("PASS: worker failures block dependent work and stay visible, a finished agent's message survives another's failure, and an unneeded team leaves one agent answering")
 
         let (stopFake, stopTeam) = fixture(), stopRequest = request()
         _ = try stopTeam.send(stopRequest); await wait { stopFake.calls.count == 1 }

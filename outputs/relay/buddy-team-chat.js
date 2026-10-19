@@ -27,7 +27,15 @@
   api.render=m=>{
     const time=new Date(m.createdAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
     if(m.variant==='assignment')return `<div class="team-chat-assignment"><details><summary>${avatar(m.agentId,true)}<span>Assigned to ${esc(agentName(m.agentId))}</span><time>${esc(time)}</time></summary><div class="reply-markdown">${BuddyMarkdown.render(m.body)}</div></details></div>`;
-    const first=m.body.split(/\n\s*\n/)[0],brief=first.length>420?first.slice(0,420).replace(/\s+\S*$/,'')+'…':first,more=brief!==m.body;
-    return `<div class="message bot-message team-chat-contribution ${m.variant==='error'?'is-error':''}">${avatar(m.agentId,true)}<div class="bot-bubble"><div class="team-chat-author"><strong>${esc(agentName(m.agentId))}</strong><span>${m.variant==='error'?'Couldn’t finish':m.recipients.length?`For ${m.recipients.map(id=>esc(agentName(id))).join(', ')}`:'Team contribution'}</span></div><div class="reply-markdown">${BuddyMarkdown.render(brief)}</div>${more?`<details class="team-update-evidence"><summary>Read full message</summary><div class="reply-markdown">${BuddyMarkdown.render(m.body)}</div></details>`:''}<time title="${m.approximate?'Recorded with the saved team reply':esc(new Date(m.createdAt).toLocaleString())}">${esc(time)}</time></div></div>`;
+    // An agent's contribution is that agent's own message in the group: its name and picture, its full reply.
+    const agent=findAgent(m.agentId),error=m.variant==='error';
+    const author=agent&&typeof authorColor==='function'?`<button type="button" class="message-author" style="${authorColor(agent)}" data-action="agent-info" data-id="${esc(agent.id)}">${esc(agent.name)}</button>`:`<strong>${esc(agentName(m.agentId))}</strong>`;
+    const note=error?'Couldn’t finish':m.recipients.length?`For ${m.recipients.map(id=>esc(agentName(id))).join(', ')}`:'';
+    return `<div class="message bot-message team-chat-contribution ${error?'is-error':''}">${avatar(m.agentId,true)}<div class="bot-bubble"><div class="team-chat-author">${author}${note?`<span>${note}</span>`:''}</div><div class="reply-markdown">${BuddyMarkdown.render(m.body)}</div><time title="${m.approximate?'Recorded with the saved team reply':esc(new Date(m.createdAt).toLocaleString())}">${esc(time)}</time></div></div>`;
   };
+  // The overview above the work says who was chosen to bring the reply together; with agents answering for themselves nobody does.
+  if(typeof window.teamworkBody==='function'){
+    const original=window.teamworkBody;
+    window.teamworkBody=function(run){const html=original.call(this,run);return run?.team&&run.team.direct!==true?html.replace(/<p>[^<]*(?:brought the reply together|is bringing the reply together|will bring the reply together|was chosen to reply)\.<\/p>/,''):html;};
+  }
 })(typeof globalThis!=='undefined'?globalThis:this);

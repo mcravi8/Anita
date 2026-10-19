@@ -44,3 +44,16 @@ test('delegated routine receipts require the registered owner and a participatin
  const g=grouped(),gr=Chat.begin(g,'team');assert.equal(Chat.apply(g,{type:'routine',runId:gr.run.runId,routine:{...routine,workspace:g.conversationWorkspace},delegatedBy:'a'}),true);
  assert.equal(Chat.apply(g,{type:'routine',runId:gr.run.runId,routine:{...routine,workspace:g.conversationWorkspace},delegatedBy:'outsider'}),false);
 });
+
+test('a group request the agents answered for themselves shows no combined reply of its own',()=>{
+ const entries=[{agentId:'lyra',status:'completed',notes:'Lyra says this.'},{agentId:'forge',status:'completed',notes:'Forge says that.'}];
+ const s={runs:{r:{runId:'r',team:{direct:false,partial:false,entries}}}},m={runId:'r',status:'completed',body:'**Lyra**\nLyra says this.\n\n**Forge**\nForge says that.',team:{direct:false,entries}};
+ assert.deepEqual(Chat.presentation(s,m),{hidden:true},'their messages are the reply');
+ assert.deepEqual(Chat.presentation(s,{...m,files:[{path:'a.md'}]}),{body:'Saved from this request:'},'but saved files still show');
+ s.runs.r.team.partial=true;assert.match(Chat.presentation(s,m).body,/couldn’t finish/,'a partial failure keeps a bubble to retry from');assert.equal(Chat.presentation(s,m).hidden,undefined);
+ s.runs.r.team.partial=false;assert.equal(Chat.presentation(s,{...m,status:'answering'}).hidden,undefined,'while it is running the progress shows');
+ assert.equal(Chat.presentation(s,{...m,status:'failed'}).hidden,undefined,'a failure is shown');
+ s.runs.r.team.direct=true;assert.equal(Chat.presentation(s,m).hidden,undefined,'when no one else was needed the one agent’s answer is shown as it is');
+ s.runs.r.team={direct:false,entries:[{agentId:'lyra',status:'failed',error:'x'}]};assert.equal(Chat.presentation(s,m).hidden,undefined,'with nothing from anyone, nothing is hidden');
+ assert.equal(Chat.presentation({runs:{}},{runId:'zz',body:'Plain reply'}).body,'Plain reply');
+});

@@ -31,7 +31,19 @@
     if(!previous)state.drafts[target]='';
     return {run,payload:group?{kind:'group',runId,key:run.key,text,groupId:target}:{runId,key:run.key,text,agentId:target,agent:{name:agent.name,role:agent.role,description:agent.description}}};
   }
+  // A group request that agents answered for themselves has no reply of its own to show: their messages are the reply. (The run keeps them joined
+  // in `body`, which history and search read.) What can still belong to the reply bubble is shown, and a failure keeps its retry.
+  function agentsAnswered(state,message){
+    const team=state.runs?.[message.runId]?.team||message.team;
+    return !!team&&message.status==='completed'&&team.direct!==true&&Array.isArray(team.entries)&&team.entries.some(e=>e.status==='completed'&&String(e.notes||'').trim());
+  }
   function presentation(state,message){
+    if(agentsAnswered(state,message)){
+      const team=state.runs?.[message.runId]?.team||message.team;
+      if(team.partial)return {body:'Some of the work couldn’t finish. You can retry the request.'};
+      const cards=typeof window!=='undefined'&&window.BuddyActions?.cards?String(window.BuddyActions.cards(message.runId)||''):'';
+      return message.files?.length||message.proposalIds?.length||message.teamPlanIds?.length||message.routines?.length||message.coverage?.length||cards?{body:'Saved from this request:'}:{hidden:true};
+    }
     const run=state.runs?.[message.runId],body=String(message.body||'');
     if(!body||message.setup||run&&/\b(?:explain|details|detail|why|breakdown|report|full|thorough)\b/i.test(run.text||''))return {body};
     const operational=message.teamPlanIds?.length||message.proposalIds?.length||message.routines?.length||message.workerTaskID;

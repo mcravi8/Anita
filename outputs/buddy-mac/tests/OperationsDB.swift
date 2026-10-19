@@ -105,7 +105,7 @@ import CryptoKit
         require(mode == 0o600, "the database is private to the user")
         let probe = try BuddyOperationsDB(directory: fresh, existing: true)
         require(try probe.rows("PRAGMA journal_mode").first?.first?.string == "wal", "changes are journaled so a crash cannot leave half of one")
-        require(try probe.rows("PRAGMA user_version").first?.first?.int == 6, "the schema carries a version")
+        require(try probe.rows("PRAGMA user_version").first?.first?.int == 7, "the schema carries a version")
         require(!names(fresh).contains { $0.hasSuffix(".migrated") } && !names(fresh).contains("Backups"), "nothing is backed up or renamed when there was nothing to migrate")
 
         // 2. A full old history: live tasks, two archive files, routines and a paused queue.
@@ -306,9 +306,26 @@ import CryptoKit
             try raw.run("PRAGMA user_version = 1")
         }
         let moved = try BuddyWorkerStore(directory: upgraded)
-        require(try BuddyOperationsDB(directory: upgraded, existing: true).rows("PRAGMA user_version").first?.first?.int == 6, "a database from slice 1 is brought up to the current version")
+        require(try BuddyOperationsDB(directory: upgraded, existing: true).rows("PRAGMA user_version").first?.first?.int == 7, "a database from slice 1 is brought up to the current version")
         let movedTypes = try moved.history(of: moved.jobs[0]["id"] as! String).map(\.type)
         require(moved.jobs.count == 2 && moved.eventCount == 2 && movedTypes == ["task.imported"], "each task it already held gets a starting entry")
+
+        // A database that an in-progress build had already recorded as version 6, with the settings table in its earlier layout, is repaired.
+        let priorSix = root.appendingPathComponent("early-v6")
+        do {
+            _ = try BuddyWorkerStore(directory: priorSix)
+            let raw = try BuddyOperationsDB(directory: priorSix, existing: true)
+            try raw.run("DROP TABLE setting_changes")
+            try raw.run("CREATE TABLE setting_changes(id TEXT PRIMARY KEY, workspace TEXT NOT NULL, scope TEXT NOT NULL, agent_id TEXT NOT NULL DEFAULT '', field TEXT NOT NULL, old_value TEXT NOT NULL DEFAULT 'null', new_value TEXT NOT NULL DEFAULT 'null', actor TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', quote TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, risk TEXT NOT NULL DEFAULT 'low', frontend INTEGER NOT NULL DEFAULT 0, adopted INTEGER NOT NULL DEFAULT 0, seq INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            for (id, field, frontend) in [("a", "name", 1), ("b", "instructions", 1), ("c", "model", 0)] {
+                try raw.run("INSERT INTO setting_changes(id, workspace, scope, agent_id, field, status, frontend, created_at, updated_at) VALUES(?, ?, 'agent', ?, ?, 'applied', ?, 'now', 'now')", [.text(id), .text(w), .text(a), .text(field), .int(Int64(frontend))])
+            }
+            try raw.run("PRAGMA user_version = 6")
+        }
+        let mended = try BuddyWorkerStore(directory: priorSix)
+        let carriers: [(String, String)] = try BuddyOperationsDB(directory: priorSix, existing: true).rows("SELECT id, adopter FROM setting_changes ORDER BY id").map { (row: [BuddyOperationsDB.Column]) -> (String, String) in (row[0].string ?? "", row[1].string ?? "") }
+        require(try BuddyOperationsDB(directory: priorSix, existing: true).rows("PRAGMA user_version").first?.first?.int == 7 && carriers.map { $0.0 + ":" + $0.1 } == ["a:page", "b:app", "c:"], "a settings table from an earlier build keeps its rows and gains who carries each: \(carriers)")
+        require(try mended.recordChange(workspace: w, scope: "agent", agent: a, field: "name", old: "x", new: "y", actor: "chat", source: "chat", quote: "q", status: "applied", risk: "low").isEmpty == false && (try mended.unadoptedChanges(workspace: w, adopter: "page")).count == 2, "the repaired table works with the current code")
 
         // 8. The outbox: events reach each consumer once, and replaying them changes nothing.
         let hub = root.appendingPathComponent("hub")

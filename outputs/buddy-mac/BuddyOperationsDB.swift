@@ -13,7 +13,7 @@ struct BuddyOperationsFailure: LocalizedError {
 /// original dictionary as JSON in `body`, so the code above the store sees exactly the shape it always saw.
 final class BuddyOperationsDB {
     static let fileName = "operations.sqlite"
-    static let schemaVersion: Int64 = 6
+    static let schemaVersion: Int64 = 7
     /// Called just before COMMIT and just after it. Only the crash tests set them, to end the process at each commit boundary.
     static var beforeCommit: (() -> Void)?
     static var afterCommit: (() -> Void)?
@@ -71,6 +71,7 @@ final class BuddyOperationsDB {
         if version < 4 { try createVersion4() }
         if version < 5 { try createVersion5() }
         if version < 6 { try createVersion6() }
+        if version < 7 { try createVersion7() }
     }
     private func createVersion1() throws {
         try transaction {
@@ -303,6 +304,21 @@ final class BuddyOperationsDB {
             // Each review the person approved under a rule, counted once.
             try run("CREATE TABLE IF NOT EXISTS rule_approvals(rule_id TEXT NOT NULL, review_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(rule_id, review_id))")
             try run("PRAGMA user_version = 6")
+        }
+    }
+    /// Version 7: a build made while version 6 was being written created `setting_changes` with a `frontend` flag where the finished one has `adopter`,
+    /// and was already recorded as version 6. Such a table is brought to the finished layout and keeps its rows: the flag meant "the page owns the
+    /// field", which then included role and instructions (now carried by the app's saved profile).
+    private func createVersion7() throws {
+        try transaction {
+            let columns = try rows("PRAGMA table_info(setting_changes)").compactMap { $0[1].string }
+            if !columns.isEmpty && !columns.contains("adopter") {
+                try run("ALTER TABLE setting_changes ADD COLUMN adopter TEXT NOT NULL DEFAULT ''")
+                if columns.contains("frontend") {
+                    try run("UPDATE setting_changes SET adopter = CASE WHEN frontend = 1 AND field IN ('role', 'instructions') THEN 'app' WHEN frontend = 1 THEN 'page' ELSE '' END")
+                }
+            }
+            try run("PRAGMA user_version = 7")
         }
     }
     /// The row number SQLite gave the most recent INSERT on this connection.

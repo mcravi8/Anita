@@ -56,8 +56,50 @@
     if(!window.BuddyDesktop?.agentSetup)return;
     await ensure(id);const result=await request({action:'edit',agentId:id,role:config.role,instructions:config.description});receive(result.interview);
   }
+  // An agent that already has a complete role and instructions (a team plan wrote them) can skip the questions: saving them as they are finishes setup.
+  const usable=a=>required(a)&&typeof a.role==='string'&&!!a.role.trim()&&a.role.length<=55&&typeof a.description==='string'&&!!a.description.trim()&&a.description.length<=1500;
+  async function useInstructions(ids){
+    const done=[];
+    for(const id of ids){
+      const a=findAgent(id);if(!a||!required(a))continue;
+      if(!usable(a))throw Error(`${a.name}’s role or instructions are empty or too long (55 and 1,500 characters). Open their settings to shorten them.`);
+      await edit(id,{role:a.role,description:a.description});done.push(id);
+    }
+    return done;
+  }
+  const pendingMembers=group=>(group?.members||[]).map(findAgent).filter(a=>a&&required(a));
+  const list=names=>names.length>1?names.slice(0,-1).join(', ')+' and '+names.at(-1):names[0]||'';
+  // Offers the one-click way out wherever the person is stuck on setup: the agent's own chat, its settings, and a team chat with unfinished members.
+  function offer(){
+    document.querySelectorAll('.setup-offer').forEach(el=>el.remove());
+    if(typeof ui==='undefined'||ui.view?.kind!=='chat')return;
+    const wrap=document.querySelector('.composer-wrap');if(!wrap)return;
+    const target=ui.view.target,agent=findAgent(target),group=agent?null:findGroup(target);
+    if(agent&&usable(agent))wrap.insertAdjacentHTML('afterbegin',`<div class="setup-offer"><span>${esc(agent.name)} can start with the instructions already saved.</span><button type="button" class="small-link" data-setup-use="${esc(agent.id)}">Skip the questions</button></div>`);
+    else if(group){const pending=pendingMembers(group);if(pending.length)wrap.insertAdjacentHTML('afterbegin',`<div class="setup-offer"><span>${esc(list(pending.map(a=>a.name)))} ${pending.length>1?'haven’t':'hasn’t'} finished setup, so the team can’t start work yet.</span><button type="button" class="small-link" data-setup-use="${esc(pending.filter(usable).map(a=>a.id).join(','))}" ${pending.some(usable)?'':'disabled'}>Use their instructions</button></div>`);}
+  }
+  function offerInSettings(){
+    const form=document.getElementById('bot-settings'),open=form?.querySelector('[data-continue-setup]');
+    if(!form||!open||form.querySelector('[data-setup-use]'))return;
+    const agent=findAgent(open.dataset.continueSetup);if(!usable(agent))return;
+    open.insertAdjacentHTML('afterend',`<button type="button" class="small-link" data-setup-use="${esc(agent.id)}">Use these instructions and finish setup</button>`);
+  }
   async function stop(id){try{const result=await request({action:'stop',agentId:id});receive(result.interview);}catch(e){showToast(String(e.message||e));}}
   window.addEventListener('buddy-conversation',event=>{if(event.detail?.type==='agent-setup')receive(event.detail.interview);});
   document.addEventListener('click',event=>{const button=event.target.closest('[data-setup-retry],[data-setup-finish],[data-continue-setup]');if(!button)return;const id=button.dataset.setupRetry||button.dataset.setupFinish||button.dataset.continueSetup;if(button.hasAttribute('data-continue-setup')){closeModal();navigate('chat',id);}else send(id,{action:button.hasAttribute('data-setup-retry')?'retry':'finish'});});
-  Object.assign(api,{ensure,send,edit,stop,boot:async()=>{if(!window.BuddyDesktop?.agentSetup)return;try{const result=await request({action:'status'});for(const r of result.interviews||[])receive(r);if(ui.view.kind==='chat')ensure(ui.view.target);}catch(e){showToast(String(e.message||e));}}});
+  let using=false;
+  document.addEventListener('click',async event=>{
+    const button=event.target.closest('[data-setup-use]');if(!button||using||button.disabled)return;
+    const ids=String(button.dataset.setupUse).split(',').filter(Boolean);if(!ids.length)return;
+    using=true;button.disabled=true;
+    try{
+      const done=await useInstructions(ids);
+      if(document.getElementById('bot-settings'))closeModal();
+      render();showToast(done.length>1?'Setup finished for '+list(done.map(id=>findAgent(id).name))+'.':done.length?`${findAgent(done[0]).name} is ready.`:'Nothing to finish.');
+    }catch(e){showToast(String(e.message||e));button.disabled=false;}
+    finally{using=false;}
+  });
+  window.addEventListener('buddy-view-updated',()=>{offer();});
+  new MutationObserver(()=>offerInSettings()).observe(document.body,{childList:true,subtree:true});
+  Object.assign(api,{useInstructions,usable,ensure,send,edit,stop,boot:async()=>{if(!window.BuddyDesktop?.agentSetup)return;try{const result=await request({action:'status'});for(const r of result.interviews||[])receive(r);if(ui.view.kind==='chat')ensure(ui.view.target);}catch(e){showToast(String(e.message||e));}}});
 })(typeof globalThis!=='undefined'?globalThis:this);

@@ -337,7 +337,11 @@ import AppKit
                     let state = try workspaceState()
                     var request = try BuddyTeamRequest.from(workspace: state, payload: payload)
                     let agents=state["agents"] as? [[String:Any]] ?? []
-                    guard request.members.allSatisfy({member in agents.first(where:{$0["id"] as? String==member.id})?["setupStatus"] as? String != "pending" || agentSetup.ready(workspace:request.workspace,agent:member.id)}) else {throw BuddyFailure(message:"Finish each agent's setup before starting group work.")}
+                    let notReady=request.members.compactMap{member->String? in guard let a=agents.first(where:{$0["id"] as? String==member.id}),a["setupStatus"] as? String=="pending",!agentSetup.ready(workspace:request.workspace,agent:member.id) else{return nil};return a["name"] as? String ?? "An agent"}
+                    guard notReady.isEmpty else {
+                        let names=notReady.count>1 ? notReady.dropLast().joined(separator:", ")+" and "+notReady.last! : notReady[0]
+                        throw BuddyFailure(message:"\(names) \(notReady.count>1 ? "haven't":"hasn't") finished setup. Choose “Use their instructions” above the message box, or answer their first question in their own chat.")
+                    }
                     request.fileScope = try conversations.projectFiles.scope(request.workspace)
                     replyHandler(try teamwork.send(request), nil)
                     return

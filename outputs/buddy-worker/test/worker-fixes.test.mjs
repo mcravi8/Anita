@@ -11,7 +11,10 @@ test('a cut inside an emoji never produces a line the Mac app would drop',{skip:
   const line=await talk(here('coding-shell.mjs'),{id:1,command:'run',cwd:root+'/project',scratch:root+'/scratch',code:`node -e "process.stdout.write('a'.repeat(63999)+String.fromCodePoint(0x1F600))"`});
   const frame=JSON.parse(line);assert.equal(frame.id,1,line.slice(0,200));
   assert.equal(frame.result.output.isWellFormed(),true,'no lone surrogate reaches the Mac app');
-  assert.equal(frame.result.output.length,64000);
+  assert.ok(frame.result.output.length<=64100,'long output stays bounded');
+  // The start of long output is kept up to 16,000 characters: here that cut lands between the two halves of the emoji.
+  const head=JSON.parse(await talk(here('coding-shell.mjs'),{id:2,command:'run',cwd:root+'/project',scratch:root+'/scratch',code:`node -e "process.stdout.write('a'.repeat(15999)+String.fromCodePoint(0x1F600)+'b'.repeat(60000))"`}));
+  assert.equal(head.result.output.isWellFormed(),true,'a cut at the end of the kept start is well formed too');
  }finally{await rm(root,{recursive:true,force:true});}
 });
 test('the coding runner starts through a symlinked path',{skip:process.platform!=='darwin'},async()=>{
@@ -108,5 +111,5 @@ test('a Claude run that ends in a failed result reports its cost before the erro
  await new Promise(r=>setTimeout(r,100));
  const kinds=events.filter(e=>['result','error'].includes(e.type)).map(e=>e.type);
  assert.deepEqual(kinds,['result','error'],'the charged result is delivered first, once');
- const result=events.find(e=>e.type==='result');assert.equal(result.cost,0.21);assert.equal(result.error,'error_max_turns','a failed result names its reason, not "success"');
+ const result=events.find(e=>e.type==='result');assert.equal(result.cost,0.21);assert.match(result.error,/limit on steps/,'a failed result names its reason in plain words, not "success" or a raw code');
 });

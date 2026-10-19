@@ -57,7 +57,8 @@
     await ensure(id);const result=await request({action:'edit',agentId:id,role:config.role,instructions:config.description});receive(result.interview);
   }
   // An agent that already has a complete role and instructions (a team plan wrote them) can skip the questions: saving them as they are finishes setup.
-  const usable=a=>required(a)&&typeof a.role==='string'&&!!a.role.trim()&&a.role.length<=55&&typeof a.description==='string'&&!!a.description.trim()&&a.description.length<=1500;
+  // The placeholder a brand-new agent starts with is not a job, so it can never be skipped to.
+  const usable=a=>required(a)&&a.description!==bootstrap&&a.role!=='Getting started'&&typeof a.role==='string'&&!!a.role.trim()&&a.role.length<=55&&typeof a.description==='string'&&!!a.description.trim()&&a.description.length<=1500;
   async function useInstructions(ids){
     const done=[];
     for(const id of ids){

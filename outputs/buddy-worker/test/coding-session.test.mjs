@@ -17,3 +17,21 @@ test('coding rejects stale tool replies, preserves errors and does not invent su
  let resolved=false;host.runId='new';host.pending.set('1',()=>{resolved=true;});host.result({runId:'old',id:'1',result:{exitCode:0}});assert.equal(resolved,false);host.result({runId:'new',id:'1',result:{exitCode:1}});assert.equal(resolved,true);
  await assert.rejects(host.start({...config,resume:'bad'}));host.close();await assert.rejects(host.start(config));
 });
+
+test('a coding run that ends in a failed result reports its cost first, in plain words, so its allowance is settled',async()=>{
+  const events=[];
+  const host=new CodingSession({query:()=>({async *[Symbol.asyncIterator](){yield {type:'system',subtype:'init',session_id:id};yield {type:'result',subtype:'error_max_budget_usd',is_error:true,errors:[],total_cost_usd:0.5,session_id:id};throw Error('Claude Code process exited with code 1');},close(){}}),tool:(n,d,s,call)=>({name:n,call}),createSdkMcpServer:x=>x,fromJSONSchema:()=>({shape:{}}),write:x=>events.push(x)});
+  await host.start(config);
+  const kinds=events.filter(e=>['result','error'].includes(e.type)).map(e=>e.type);
+  assert.deepEqual(kinds,['result','error'],'the charged result comes before the error that ends the task, once');
+  const result=events.find(e=>e.type==='result');
+  assert.equal(result.cost,0.5);assert.match(result.error,/spending limit/,'the reason is a sentence, not error_max_budget_usd');
+});
+
+test('a coding run streams activity so a long single turn is not mistaken for a stalled connection',async()=>{
+  const events=[],calls=[];
+  const host=new CodingSession({query:input=>{calls.push(input);return {async *[Symbol.asyncIterator](){yield {type:'system',subtype:'init',session_id:id};yield {type:'stream_event'};yield {type:'result',result:'Done.',total_cost_usd:0.01,is_error:false,session_id:id};},close(){}};},tool:(n,d,s,call)=>({name:n,call}),createSdkMcpServer:x=>x,fromJSONSchema:()=>({shape:{}}),write:x=>events.push(x)});
+  await host.start(config);
+  assert.equal(calls[0].options.includePartialMessages,true,'partial messages are requested');
+  assert.ok(events.some(e=>e.type==='activity'),'activity is reported while the model is writing');
+});

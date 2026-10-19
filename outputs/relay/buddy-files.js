@@ -126,8 +126,10 @@
     catch(reason){const error=document.getElementById('project-version-error');if(error)error.textContent=message(reason);}
     finally{if(button.isConnected)button.disabled=false;}
   }
+  let listTimer=null,listSeq=0;
   async function changed(detail){
-    if(document.querySelector('[data-project-list]')){const token=++generation;try{await loadFolder();if(token===generation&&document.querySelector('[data-project-list]')){const el=document.querySelector('[data-project-list]'),expanded=el.querySelector('details')?.open,scroll=el.closest('.modal-body').scrollTop;el.innerHTML=folderBody();el.querySelector('details').open=expanded;el.closest('.modal-body').scrollTop=scroll;}}catch(reason){showToast(message(reason));}}
+    // While an agent writes, every streamed update says the folder changed. Reload the list once things go quiet, and never let those reloads cancel the first load of the drawer (they share no counter), or the list would not appear until the reply ended.
+    if(document.querySelector('[data-project-list]')){clearTimeout(listTimer);listTimer=setTimeout(async()=>{if(!document.querySelector('[data-project-list]'))return;const token=++listSeq;try{await loadFolder();if(token===listSeq&&document.querySelector('[data-project-list]')){const el=document.querySelector('[data-project-list]'),expanded=el.querySelector('details')?.open,scroll=el.closest('.modal-body').scrollTop;el.innerHTML=folderBody();const d=el.querySelector('details');if(d&&expanded)d.open=true;el.closest('.modal-body').scrollTop=scroll;}}catch(reason){showToast(message(reason));}},300);}
     if(current?.editing){const receipts=detail.files||[detail.file].filter(Boolean);if(detail.type==='project-files-changed'||receipts.some(file=>file.folderId===current.folderId&&file.path===current.path&&file.revision!==current.version)){const note=document.querySelector('.file-changed-note');if(note)note.hidden=false;const conflict=document.getElementById('project-conflict');if(conflict)conflict.hidden=false;}}
   }
   document.addEventListener('click',async event=>{

@@ -196,7 +196,8 @@ import CryptoKit
         let id="team-"+(job["id"] as! String)+":"+agent
         guard !updates.contains(where:{$0["id"] as? String==id}) else{return}
         let update:[String:Any]=["id":id,"workspace":job["workspace"]!,"agentId":agent,"checkId":job["id"]!,"body":Self.brief(body),"detail":detail ?? body,"sources":sources,"priority":priority,"checkStatus":checkStatus,"at":Self.stamp(now),"checkedAt":job["startedAt"] ?? Self.stamp(now)]
-        try mutate{var entries=updates;guard entries.count<2000 else{throw BuddyWorkerFailure(message:"Saved team updates are full.")};entries.append(update);value["updates"]=entries}
+        // The ledger of team updates is a log: when it is full the oldest go, rather than every new update failing for good.
+        try mutate{var entries=updates;if entries.count>=2000 {entries=Array(entries.suffix(1500))};entries.append(update);value["updates"]=entries}
     }
     private func exchanges(state:[String:Any])->[[String:Any]] {
         let w=state["conversationWorkspace"] as? String ?? "",ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})

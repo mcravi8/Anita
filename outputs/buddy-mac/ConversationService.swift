@@ -972,13 +972,13 @@ struct BuddyFailure: LocalizedError {
             var value = record; value["status"] = "uncertain"; inputRecords[requestID] = value; emitInput(value)
         }
         var status=status, error=error
-        if status=="completed",runs[id]?["requiresRoutine"] as? Bool==true,runs[id]?["routineReceipt"] as? Bool != true {
+        if status=="completed",runs[id]?["requiresRoutine"] as? Bool==true,runs[id]?["routineReceipt"] as? Bool != true,BuddyReplyClaims.schedule(runs[id]?["text"] as? String ?? "") {
             status="failed";error="No active routine was saved. Try again or open Background work → Routines.";runs[id]?["text"]="Your recurring request has not been scheduled."
         }
-        if status=="completed",runs[id]?["requiresRule"] as? Bool==true,runs[id]?["ruleReceipt"] as? Bool != true {
+        if status=="completed",runs[id]?["requiresRule"] as? Bool==true,runs[id]?["ruleReceipt"] as? Bool != true,BuddyReplyClaims.rule(runs[id]?["text"] as? String ?? "") {
             status="failed";error="The rule wasn't saved, so it won't be followed. Say it again in one message, or open this agent's settings → Rules & changes.";runs[id]?["text"]="Your rule has not been saved."
         }
-        if status=="completed",let expected=runs[id]?["requiresProactive"] as? Bool,runs[id]?["proactiveReceipt"] as? Bool != expected {status="failed";error="The proactive-update setting wasn't saved. Try again or open this agent's Preferences & updates.";runs[id]?["text"]="Your proactive-update preference has not been changed."}
+        if status=="completed",let expected=runs[id]?["requiresProactive"] as? Bool,BuddyReplyClaims.proactive(runs[id]?["text"] as? String ?? ""),runs[id]?["proactiveReceipt"] as? Bool != expected {status="failed";error="The proactive-update setting wasn't saved. Try again or open this agent's Preferences & updates.";runs[id]?["text"]="Your proactive-update preference has not been changed."}
         if status=="completed" { do { try inboxReviews.commit(runID:id) } catch let failure { status="failed";error=failure.localizedDescription } }
         runs[id]?["status"] = status
         if let error { runs[id]?["error"] = error }

@@ -5,6 +5,24 @@ struct BuddyTeamFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
+/// What a reply says it did. A reply that says "scheduled", "rule saved" or "I'll keep you posted" without the matching receipt is a false claim and is
+/// failed; a reply that says nothing of the kind is just an answer, however the question was worded.
+enum BuddyReplyClaims {
+    private static func has(_ pattern: String, _ text: String) -> Bool { text.lowercased().replacingOccurrences(of: "’", with: "'").range(of: pattern, options: .regularExpression) != nil }
+    private static let negated = #"\b(?:not|n't|no longer|never|can't|cannot|couldn't|didn't|haven't|hasn't|won't|wasn't)\b"#
+    static func schedule(_ reply: String) -> Bool {
+        let claim = #"\b(?:scheduled|routine (?:is |was |has been |have been )?(?:saved|created|set|active|running)|(?:saved|created|set up|added) (?:a |the |your |that |this )?(?:routine|schedule)|next run|set (?:it )?up to run)"#
+        let promise = #"\b(?:i'll|i will|it will|it'll|will|we'll)\b[^.\n]{0,50}\b(?:(?:every|each)\b|(?:daily|weekly|weekdays)\b\s*(?:[.,;!]|$|at\b|on\b))"#
+        return (has(claim, reply) || has(promise, reply)) && !has(negated + #"[^.\n]{0,30}\b(?:scheduled|saved|set up|created)"#, reply)
+    }
+    static func rule(_ reply: String) -> Bool {
+        has(#"\b(?:rule (?:is |was |has been )?(?:saved|set|added|recorded|in place)|(?:saved|recorded|added|noted) (?:that|this|the|your|a)\b[^.\n]{0,20}\brule|i'll (?:follow|apply|do that)|i will (?:follow|apply|do that)|from now on)"#, reply) && !has(negated + #"[^.\n]{0,30}\b(?:saved|recorded|added|follow)"#, reply)
+    }
+    static func proactive(_ reply: String) -> Bool {
+        has(#"\b(?:i'll (?:keep you|update you|message you|let you know|send you updates|stop)|i will (?:keep you|update you|message you|stop)|proactive updates? (?:are|is|have been)? ?(?:on|off|enabled|disabled|set|saved|turned)|keep you (?:posted|updated|informed)|no longer (?:message|update|ping)|won't (?:message|update|ping) you)"#, reply)
+    }
+}
+
 struct BuddyTurnOptions {
     var permissionKeys: [String]? = nil
     var toolsEnabled = true
@@ -181,7 +199,7 @@ struct BuddyHistoryScope {let workspace:String;let agent:String}
 struct BuddyConversationHistory {
     static func messages(_ state:[String:Any],target:String,runId:String)->[[String:Any]] {
         let currentUser=((state["runs"] as? [String:[String:Any]])?[runId])?["userId"] as? String
-        return ((state["messages"] as? [String:[[String:Any]]])?[target] ?? []).filter{$0["live"] as? Bool==true && $0["id"] as? String != currentUser && $0["runId"] as? String != runId && ($0["who"] as? String=="you" || $0["status"] as? String=="completed")}
+        return ((state["messages"] as? [String:[[String:Any]]])?[target] ?? []).filter{$0["live"] as? Bool==true && $0["id"] as? String != currentUser && $0["runId"] as? String != runId && $0["teamUpdate"] as? Bool != true && ($0["who"] as? String=="you" || $0["status"] as? String=="completed")}
     }
     static func context(_ state:[String:Any],target:String,runId:String)->String {
         let history=messages(state,target:target,runId:runId)
@@ -189,7 +207,8 @@ struct BuddyConversationHistory {
         for message in history.reversed() {
             let body=message["body"] as? String ?? "",author=message["who"] as? String=="you" ? "You":"Agent"
             let chunk=author+": "+body
-            if total+chunk.utf8.count>180000 {break}
+            // What is replayed on every turn is paid for on every turn, and a big Opus history alone can use most of a turn's allowance; older messages stay one tool call away.
+            if total+chunk.utf8.count>64000 {break}
             chunks.append(chunk);total+=chunk.utf8.count;count+=1
         }
         let prefix=count<history.count ? "Earlier \(history.count-count) saved messages are outside this prompt. Use buddy_read_chat_history for earlier details; do not guess them.\n\n":""

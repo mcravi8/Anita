@@ -154,6 +154,12 @@ struct BuddyOfficeZip {
         default:
             if let text=String(data:data,encoding:.utf8), !data.contains(0), data.count<=1024*1024 { return ["format":"text","content":text,"editable":true] }
             var result:[String:Any]=["format":"binary","editable":false,"notice":"Ask your agent to work with this format, or open it in its usual app. Buddy preserves the original bytes."]
+            // Say what the file is. A big spreadsheet export is text, not an unknown format, and a coding session can work on it.
+            if !data.contains(0), data.count>1024*1024, String(data:data,encoding:.utf8) != nil {
+                result["notice"]=String(format:"This is a text file of %.1f MB. Chats read up to 1 MB, so ask an agent to work on it in a coding session: it copies the file into its project and runs commands on it. Buddy preserves the original bytes.",Double(data.count)/1_048_576)
+            } else if !data.contains(0), String(data:data,encoding:.utf8) == nil {
+                result["notice"]="This looks like text in an encoding other than UTF-8. Ask an agent to read it in a coding session, which can convert it. Buddy preserves the original bytes."
+            }
             if preview, ["png","jpg","jpeg","gif","webp","heic","tiff","bmp"].contains(ext), let image=NSImage(data:data) {
                 let scale=min(1,1200/max(image.size.width,image.size.height)), size=NSSize(width:max(1,image.size.width*scale),height:max(1,image.size.height*scale))
                 let thumb=NSImage(size:size); thumb.lockFocus(); image.draw(in:NSRect(origin:.zero,size:size)); thumb.unlockFocus()

@@ -94,6 +94,8 @@ test('an agent with saved instructions can skip its setup questions in one click
   await page.locator('.setup-offer').waitFor();assert.match(await page.locator('.setup-offer').innerText(),/Forge can start with the instructions already saved/);
   await page.evaluate(()=>{ui.view={kind:'chat',target:'long'};render();});
   assert.equal(await page.locator('.setup-offer').count(),0,'instructions over the limit are not offered');
+  await page.evaluate(()=>{state.agents.push({id:'fresh',name:'Fresh',role:'Getting started',description:BuddyAgentSetup.bootstrap,setupStatus:'pending',setupSeed:'seed',tools:{},avatarShape:'cube',avatarColor:'blue'});state.messages.fresh=[];ui.view={kind:'chat',target:'fresh'};render();});
+  assert.equal(await page.locator('.setup-offer').count(),0,'a brand-new agent has no job yet, so it is not offered a way to skip learning one');
   // And in the agent's settings, next to "Continue setup in chat".
   await page.evaluate(()=>{state.agents.find(a=>a.id==='forge').setupStatus='pending';agentInfo('forge');});
   await page.locator('#bot-settings [data-setup-use="forge"]').waitFor({timeout:8000});

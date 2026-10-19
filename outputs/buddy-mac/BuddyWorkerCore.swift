@@ -10,15 +10,17 @@ struct BuddyWorkerFailure: LocalizedError {
 enum BuddyRoutineAuthorization {
     static func owner(_ args:[String:Any],actor:String,runID:String,text:String,state:[String:Any])throws->String {
         let target=args["agentId"] as? String ?? actor
+        let creating = ["create", ""].contains(args["action"] as? String ?? "")
         guard target != actor else{return actor}
         let agents=state["agents"] as? [[String:Any]] ?? []
         guard let agent=agents.first(where:{$0["id"] as? String==target}),agents.contains(where:{$0["id"] as? String==actor}),
               let run=(state["runs"] as? [String:[String:Any]])?[runID],["starting","answering"].contains(run["status"] as? String ?? ""),
               let chat=run["target"] as? String,(chat==actor || (state["groups"] as? [[String:Any]] ?? []).contains(where:{$0["id"] as? String==chat && ($0["members"] as? [String] ?? []).contains(actor)})),
               let user=run["userId"] as? String,((state["messages"] as? [String:[[String:Any]]])?[chat] ?? []).contains(where:{$0["id"] as? String==user && $0["who"] as? String=="you" && $0["body"] as? String==text}),
-              let quote=args["authorizationQuote"] as? String,quote.count>=3,text.contains(quote),
-              text.range(of:#"(?i)\b(?:every|daily|weekdays|routine|schedule|interval|same.{0,25}checks)\b"#,options:.regularExpression) != nil,
-              text.range(of:#"(?i)\b(?:hypothetical|example|don't|do not|never)\b|```"#,options:.regularExpression)==nil else{throw BuddyWorkerFailure(message:"Scheduling for another agent needs the user's current delegation request.")}
+              let quote=args["authorizationQuote"] as? String,quote.count>=3,BuddyAgentChanges.normalized(text).contains(BuddyAgentChanges.normalized(quote)),
+              // Only starting a routine for someone else has to sound like scheduling; pausing, resuming, changing or deleting one only has to be asked.
+              !creating || (text.range(of:#"(?i)\b(?:every|each|daily|weekly|weekdays|routine|schedule|interval|same.{0,25}checks)\b"#,options:.regularExpression) != nil
+                 && text.range(of:#"(?i)\b(?:hypothetical|example|don't|do not|never)\b|```"#,options:.regularExpression)==nil) else{throw BuddyWorkerFailure(message:"Scheduling for another agent needs the user's current delegation request.")}
         let name=agent["name"] as? String ?? ""
         let named = !name.isEmpty && text.range(of:name,options:.caseInsensitive) != nil
         guard agent["managedBy"] as? String==actor || named else{throw BuddyWorkerFailure(message:"Choose the teammate named in the user's request.")}
@@ -172,7 +174,7 @@ struct BuddyAttempt {
         db = try BuddyOperationsDB(directory: directory)
         try BuddyOperationsMigration.importLegacy(into: db, directory: directory)
         let tasks = try db.rows("SELECT body FROM tasks WHERE archived = 0 ORDER BY seq").compactMap { $0.first?.string }.map(BuddyOperationsDB.decode)
-        guard tasks.count <= 1000, tasks.allSatisfy({ ($0["id"] as? String).flatMap(UUID.init(uuidString:)) != nil && ($0["workspace"] as? String).flatMap(UUID.init(uuidString:)) != nil }), Set(tasks.compactMap { $0["id"] as? String }).count == tasks.count else { throw BuddyWorkerFailure(message: "Buddy couldn’t verify its saved background tasks. Restore them from the newest ZIP in Worker/Backups before starting the worker.") }
+        guard tasks.count <= 1000, tasks.allSatisfy({ ($0["id"] as? String).flatMap(UUID.init(uuidString:)) != nil && ($0["workspace"] as? String).flatMap(UUID.init(uuidString:)) != nil }), Set(tasks.compactMap { $0["id"] as? String }).count == tasks.count else { throw BuddyWorkerFailure(message: "Buddy couldn’t verify its saved background tasks. Your chats and files are not affected. Don’t delete anything in Application Support/Buddy/Worker; ask Claude Code to repair it.") }
         jobs = tasks; paused = try db.meta("paused") == "1"
         if jobs.count > Self.archiveTrigger { try? archiveFinished(keeping: Self.archiveKeep) }
         try recordBaseline()
@@ -833,8 +835,8 @@ struct BuddyAttempt {
         db=try BuddyOperationsDB(directory:directory)
         try BuddyOperationsMigration.importLegacy(into:db,directory:directory)
         let values=try db.rows("SELECT body FROM routines ORDER BY seq").compactMap{$0.first?.string}.map(BuddyOperationsDB.decode)
-        guard values.count<=100,Set(values.compactMap{$0["id"] as? String}).count==values.count else { throw BuddyWorkerFailure(message:"Buddy couldn't verify saved routines. Restore them from the newest ZIP in Worker/Backups before starting the worker.") }
-        for value in values { try Self.validate(value);guard let id=value["id"] as? String,UUID(uuidString:id) != nil,let next=value["nextRun"] as? String,ISO8601DateFormatter().date(from:next) != nil else { throw BuddyWorkerFailure(message:"A saved routine has invalid timing. Restore it from the newest ZIP in Worker/Backups before starting.") } }
+        guard values.count<=100,Set(values.compactMap{$0["id"] as? String}).count==values.count else { throw BuddyWorkerFailure(message:"Buddy couldn't verify saved routines. Your chats and files are not affected. Don’t delete anything in Application Support/Buddy/Worker; ask Claude Code to repair it.") }
+        for value in values { try Self.validate(value);guard let id=value["id"] as? String,UUID(uuidString:id) != nil,let next=value["nextRun"] as? String,ISO8601DateFormatter().date(from:next) != nil else { throw BuddyWorkerFailure(message:"A saved routine has invalid timing. Your chats and files are not affected. Don’t delete anything in Application Support/Buddy/Worker; ask Claude Code to repair it.") } }
         routines=values
     }
     /// Writes only what changed, in one transaction: new routines are added, edited ones updated, removed ones deleted.
@@ -1192,6 +1194,7 @@ enum BuddyAgentChanges {
             guard let model = (value as? [String: Any]) ?? parsed, let provider = model["provider"] as? String, ["chatgpt", "claude"].contains(provider), let name = model["model"] as? String, name.isEmpty || name.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"#, options: .regularExpression) != nil else {
                 throw fail("Give the model as {\"provider\": \"claude\" or \"chatgpt\", \"model\": the model name}.")
             }
+            if provider == "claude", !name.isEmpty, !name.hasPrefix("claude-") { throw fail("Claude models are named like claude-sonnet-5-5, claude-opus-5-5 or claude-haiku-5-5.") }
             return ["provider": provider, "model": name]
         case "dailyLimitUSD": return try money(value, field, allowNone: true)
         case "teamDailyLimitUSD": return try money(value, field, allowNone: false, minimum: 0.1)
@@ -1420,7 +1423,7 @@ enum BuddyRulesReader {
 
     private func fail(_ message: String) -> BuddyWorkerFailure { BuddyWorkerFailure(message: message) }
     static let labels: [String: String] = ["name": "name", "role": "role", "instructions": "instructions", "avatarShape": "figure", "avatarColor": "colour", "hidden": "visibility", "model": "model", "dailyLimitUSD": "daily spending limit",
-        "proactive": "proactive updates", "tools.web": "web access", "tools.projectFiles": "file access", "tools.desktop": "browser access", "teamCheckInsEnabled": "team check-ins", "teamCheckInIntervalMinutes": "team check-in interval",
+        "proactive": "proactive updates", "tools.web": "web access (also needed for website tasks)", "tools.projectFiles": "file access", "tools.desktop": "Mac app access (also needed for website tasks)", "teamCheckInsEnabled": "team check-ins", "teamCheckInIntervalMinutes": "team check-in interval",
         "teamCheckInModel": "team check-in model", "teamDailyLimitUSD": "team check-in limit", "teamSupervisor": "team supervisor"]
     private func name(of agent: String) -> String { ((try? agents())?.first { $0["id"] as? String == agent }?["name"] as? String) ?? "this agent" }
     func describe(_ field: String, _ value: Any?) -> String {
@@ -1543,7 +1546,10 @@ enum BuddyRulesReader {
         var out: [String: Any] = [:]
         if let agent, UUID(uuidString: agent) != nil, (try agents()).contains(where: { $0["id"] as? String == agent }) {
             var values: [String: Any] = [:]
-            for field in BuddyAgentChanges.agentFields.sorted() { values[field] = describe(field, try current("agent", agent, field)) }
+            for field in BuddyAgentChanges.agentFields.sorted() {
+                // Changing instructions means sending the whole new text, so the whole current text is shown, not a preview of it.
+                if field == "instructions" { values[field] = try current("agent", agent, field) as? String ?? "" } else { values[field] = describe(field, try current("agent", agent, field)) }
+            }
             out["agent"] = ["id": agent, "name": name(of: agent), "settings": values]
         }
         if workspaceFields {

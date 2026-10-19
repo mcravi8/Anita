@@ -27,11 +27,13 @@
     place();
     if(items.length){input.setAttribute('aria-activedescendant',`buddy-mention-${active}`);const row=menu.children[active];if(row.offsetTop<menu.scrollTop)menu.scrollTop=row.offsetTop;else if(row.offsetTop+row.offsetHeight>menu.scrollTop+menu.clientHeight)menu.scrollTop=row.offsetTop+row.offsetHeight-menu.clientHeight;}else input.removeAttribute('aria-activedescendant');
   }
+  // In a group only its members can be asked; offering anyone else would send the "@" nowhere.
+  function pool(){const g=(state.groups||[]).find(g=>ui.view?.kind==='chat'&&g.id===ui.view.target);return g?state.agents.filter(a=>(g.members||[]).includes(a.id)):state.agents;}
   function update(){
     if(!input?.isConnected||document.activeElement!==input){close();return;}
     current=query(input.value,input.selectionStart);
-    if(!current||finished(state.agents,current)||input.selectionStart!==input.selectionEnd||dismissed===input.value+'|'+input.selectionStart){close();return;}
-    items=matches(state.agents,current);active=0;
+    if(!current||finished(pool(),current)||input.selectionStart!==input.selectionEnd||dismissed===input.value+'|'+input.selectionStart){close();return;}
+    items=matches(pool(),current);active=0;
     if(/\s$/.test(current.text)&&!items.length){close();return;}
     if(!menu){menu=document.createElement('div');menu.id='buddy-agent-mentions';menu.className='buddy-mention-menu';menu.setAttribute('role','listbox');menu.setAttribute('aria-label','Agents');document.body.append(menu);}
     input.setAttribute('aria-expanded','true');paint();

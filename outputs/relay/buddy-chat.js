@@ -76,7 +76,7 @@
     }
     const message=(state.messages[run.target]||[]).find(m=>m.id===run.replyId);
     const body=typeof event.text==='string'?event.text:message?.body||'';
-    const empty=event.status==='completed'&&!body.trim()&&!(event.files?.length||message?.files?.length||message?.proposalIds?.length||message?.teamPlanIds?.length);
+    const empty=event.status==='completed'&&!body.trim()&&!(event.files?.length||message?.files?.length||message?.proposalIds?.length||message?.teamPlanIds?.length||message?.routines?.length);
     const status=empty?'failed':event.status,error=empty?'No answer came back. Try again.':event.error||'';
     run.status=status;run.error=error;run.updatedAt=new Date().toISOString();
     if(team)run.team=team;

@@ -57,3 +57,11 @@ test('a group request the agents answered for themselves shows no combined reply
  s.runs.r.team={direct:false,entries:[{agentId:'lyra',status:'failed',error:'x'}]};assert.equal(Chat.presentation(s,m).hidden,undefined,'with nothing from anyone, nothing is hidden');
  assert.equal(Chat.presentation({runs:{}},{runId:'zz',body:'Plain reply'}).body,'Plain reply');
 });
+
+test('a reply that saved a routine but ended with no text is a finished reply, not "No answer came back"',()=>{
+ const s=seed(),r=Chat.begin(s,'a'),routine={id:'saved',workspace:s.conversationWorkspace,agentId:'a',title:'Morning review',nextRun:'2026-10-17T16:00:00Z',status:'active'};
+ Chat.apply(s,{type:'routine',runId:r.run.runId,routine});
+ Chat.apply(s,{runId:r.run.runId,status:'completed',text:''});
+ const m=s.messages.a[1];
+ assert.notEqual(m.status,'failed','a retry would save the routine twice');assert.ok(!m.error,'no error is shown');assert.equal(m.routines.length,1);
+});

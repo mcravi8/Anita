@@ -232,6 +232,26 @@ import Foundation
   let safeWork=try monitor.store.observed(state,jobs:jobs+[["id":"secret-job","workspace":w,"agentId":maze,"title":"Saved password: hunter22","status":"waiting_user"]],now:Date())
   require(!String(data:try JSONSerialization.data(withJSONObject:safeWork),encoding:.utf8)!.contains("hunter22"),"credential text is withheld from teammate work records")
   require(BuddyAgentMemory.containsCredential("Bearer "+String(repeating:"a",count:30)) && !BuddyAgentMemory.containsCredential("Always ask me to enter passwords privately."),"credential filters distinguish literal tokens from ordinary credential-handling preferences")
+  for text in ["The risk-adjusted-performance-metrics table needs review.","The risk-adjusted-2025-performance-metrics table is due.","The API key is stored in Keychain.","Password: never share it with anyone."] {require(!BuddyAgentMemory.containsCredential(text),"ordinary finance and credential-handling sentences are not credentials: \(text)")}
+  for text in ["password=hunter2","My password: hunter22","api key is sk-proj-"+String(repeating:"a",count:30),"Bearer "+String(repeating:"b",count:30)] {require(BuddyAgentMemory.containsCredential(text),"real credential text is still caught: \(text)")}
+  // Learning must not wedge: a batch that fails is retried one message at a time, and a message that still fails is passed over.
+  for (n,id) in ["w1","w2","w3"].enumerated() {freshMessages[maze]!.append(["id":id,"who":"you","body":"Rule number \(n).","createdAt":BuddyAgentMemory.timestamp(Date().addingTimeInterval(Double(10+n)))])}
+  state["messages"]=freshMessages
+  let wholeBatch=monitor.memory.input(state,agent:agents[1])!,batchIds=(wholeBatch["messages"] as! [[String:Any]]).compactMap{$0["id"] as? String}
+  require(batchIds.count>1,"several unlearned messages are offered together at first")
+  try monitor.memory.failure(workspace:w,agent:maze,error:"The learned instructions didn't fit the saved format.",messageIds:batchIds)
+  let single=monitor.memory.input(state,agent:agents[1])!,singleIds=(single["messages"] as! [[String:Any]]).compactMap{$0["id"] as? String}
+  require(singleIds==[batchIds[0]],"after a failure the same batch is not offered again; the first message is tried alone: \(singleIds)")
+  try monitor.memory.failure(workspace:w,agent:maze,error:"Still no.",messageIds:singleIds)
+  let afterSkip=monitor.memory.input(state,agent:agents[1])!,skippedTo=(afterSkip["messages"] as! [[String:Any]]).compactMap{$0["id"] as? String}
+  require(!skippedTo.isEmpty && !skippedTo.contains(batchIds[0]) && Set(skippedTo).isSubset(of:Set(batchIds)),"a message that cannot be learned from is passed over so the ones after it are not held back: \(skippedTo)")
+  // Rules the model copied with straight quotes for the person's curly ones still match; one rule without a quote does not spoil the rest.
+  let curly:[String:Any]=["id":"curly","text":"You’re to always say “thanks”.","audience":"Direct message to this agent","createdAt":"","conversationId":maze]
+  let curlyInput:[String:Any]=["messages":[curly],"baseRevision":afterSkip["baseRevision"]!,"memoryRevision":afterSkip["memoryRevision"]!]
+  let mixed:[String:Any]=["changed":true,"role":"Researcher","instructions":"Always say thanks.","rules":[["messageId":"curly","quote":"You're to always say \"thanks\".","instruction":"Always say thanks.","replaces":[String]()],["messageId":"curly","quote":"never said this","instruction":"Invented rule.","replaces":[String]()]]]
+  try monitor.memory.commit(mixed,input:curlyInput,workspace:w,agent:maze,state:state,now:Date())
+  let keptRules=monitor.memory.records[w+":"+maze]?["rules"] as? [[String:Any]] ?? []
+  require(keptRules.count==1 && keptRules[0]["instruction"] as? String=="Always say thanks.","the rule with a real quote is kept and the invented one is left out: \(keptRules)")
   _ = try monitor.handle(["action":"learning","agentId":maze,"enabled":false],state:state,jobs:jobs)
   require(monitor.memory.input(state,agent:agents[1])==nil,"learning can be disabled independently per agent")
   let other=UUID().uuidString;var foreign=state;foreign["conversationWorkspace"]=other;let foreignStatus=try monitor.status(foreign)

@@ -49,13 +49,13 @@ final class BuddyOperationsDB {
                 _ = try rows("PRAGMA journal_mode=WAL")
                 try run("PRAGMA synchronous=FULL")
                 let check = try rows("PRAGMA quick_check(1)")
-                guard check.first?.first?.string == "ok" else { throw BuddyOperationsFailure(message: "Buddy couldn’t verify its saved task database. Restore it from the newest ZIP in Worker/Backups before starting the worker.") }
+                guard check.first?.first?.string == "ok" else { throw BuddyOperationsFailure(message: "Buddy couldn’t verify its saved task database. Your chats and files are not affected. Don’t delete anything in Application Support/Buddy/Worker; ask Claude Code to repair it.") }
                 try prepareSchema()
             }
         } catch {
             sqlite3_close_v2(opened); handle = nil
             if let known = error as? BuddyOperationsFailure, known.message.hasPrefix("Buddy couldn’t verify") || known.message.hasPrefix("The task database was written by a newer") { throw known }
-            throw BuddyOperationsFailure(message: "Buddy couldn’t verify its saved task database (\(error.localizedDescription)). Restore it from the newest ZIP in Worker/Backups before starting the worker.")
+            throw BuddyOperationsFailure(message: "Buddy couldn’t verify its saved task database (\(error.localizedDescription)). Your chats and files are not affected. Don’t delete anything in Application Support/Buddy/Worker; ask Claude Code to repair it.")
         }
     }
     deinit { if let handle { sqlite3_close_v2(handle) } }
@@ -464,7 +464,10 @@ enum BuddyBudget {
         }
         // What running tasks have set aside right now.
         for row in try db.rows("SELECT body FROM tasks WHERE archived = 0 AND workspace = ? AND agent_id = ?", [.text(workspace), .text(agent)]) {
-            if let body = try? BuddyOperationsDB.decode(row[0].string ?? "{}"), let reservedNow = body["reservedBudgetUSD"] as? Double, reservedNow > 0 { out.reserved += reservedNow }
+            guard let body = try? BuddyOperationsDB.decode(row[0].string ?? "{}"), let reservedNow = body["reservedBudgetUSD"] as? Double, reservedNow > 0 else { continue }
+            if ["running", "waiting_review", "queued", "starting"].contains(body["status"] as? String ?? "") { out.reserved += reservedNow }
+            // A paused, cancelled or failed task that never reported its cost is uncertain money for the day it stopped; it does not weigh on every day after.
+            else if let stopped = (body["updatedAt"] as? String).flatMap({ ISO8601DateFormatter().date(from: $0) }), day(stopped) == today { out.uncertain += reservedNow }
         }
         return out
     }
@@ -472,7 +475,17 @@ enum BuddyBudget {
     static func headroom(support: URL, workspace: String, agent: String, now: Date = Date()) -> (limit: Double, scope: String, exposure: Exposure, room: Double)? {
         let directory = support.appendingPathComponent("Worker")
         guard FileManager.default.fileExists(atPath: directory.appendingPathComponent(BuddyOperationsDB.fileName).path), let db = try? BuddyOperationsDB(directory: directory, existing: true),
-              let limit = try? limit(db, workspace: workspace, agent: agent), let used = try? exposure(db, support: support, workspace: workspace, agent: agent, now: now) else { return nil }
+              let limit = try? limit(db, workspace: workspace, agent: agent) else { return nil }
+        // A limit on the whole workspace is spent by everyone in it, not by this agent alone.
+        var who = [agent]
+        if limit.scope == "workspace", let state = (try? JSONSerialization.jsonObject(with: Data(contentsOf: support.appendingPathComponent("workspace.json")))) as? [String: Any] {
+            who = Array(Set(who + ((state["agents"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })))
+        }
+        var used = Exposure()
+        for id in who {
+            guard let part = try? exposure(db, support: support, workspace: workspace, agent: id, now: now) else { return nil }
+            used.spent += part.spent; used.reserved += part.reserved; used.uncertain += part.uncertain
+        }
         return (limit.amount, limit.scope, used, max(0, limit.amount - used.total))
     }
 }

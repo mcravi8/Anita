@@ -78,9 +78,11 @@ import AppKit
                 return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"coding","workspace":workspace.workspace,"agentId":id,"requestId":(context["runId"] as? String ?? "")+":"+(context["callId"] as? String ?? ""),"arguments":args])
             }
             if tool=="buddy_manage_routine" {
-                let owner=try BuddyRoutineAuthorization.owner(args,actor:id,runID:context["runId"] as? String ?? "",text:context["authorizedUserText"] as? String ?? "",state:self.workspaceState())
+                // In a group each agent's turn has its own run id, but the person's message and the reply on screen belong to the group's run.
+                let replyRun=(context["replyRunId"] as? String).flatMap{$0.isEmpty ? nil:$0} ?? (context["proposalScope"] as? BuddyProposalScope)?.replyRunId ?? context["runId"] as? String ?? ""
+                let owner=try BuddyRoutineAuthorization.owner(args,actor:id,runID:replyRun,text:context["authorizedUserText"] as? String ?? "",state:self.workspaceState())
                 let result=try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"routine","workspace":workspace.workspace,"agentId":owner,"actorId":id,"runId":context["runId"] ?? "","authorizedText":context["authorizedUserText"] ?? "","requestId":(context["runId"] as? String ?? "")+":"+(context["callId"] as? String ?? ""),"arguments":args])
-                for value in (result["saved"] as? Bool==true ? (result["routines"] as? [[String:Any]] ?? ((result["routine"] as? [String:Any]).map{[$0]} ?? [])):[]) {self.deliver(["type":"routine","runId":context["runId"] ?? "","routine":value,"delegatedBy":id])}
+                for value in (result["saved"] as? Bool==true ? (result["routines"] as? [[String:Any]] ?? ((result["routine"] as? [String:Any]).map{[$0]} ?? [])):[]) {self.deliver(["type":"routine","runId":replyRun,"routine":value,"delegatedBy":id])}
                 return result
             }
             let choice = try self.ai.settings.current(workspace.workspace)

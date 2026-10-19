@@ -116,6 +116,18 @@ import Darwin
             for n in 0..<101 { try Data("y".utf8).write(to: sourceRoot.appendingPathComponent("venv/g\(n).txt")) }
             let crowded = try project.copy(from: sourceScope, to: projectScope, paths: ["many/"] + (0..<101).map { "venv/g\($0).txt" }, actor: "coder", actorName: "Coder")
             require((crowded["copied"] as? [Any])?.count == 200 && (crowded["failed"] as? [[String: Any]])?.count == 1 && ((crowded["failed"] as? [[String: Any]])?.first?["error"] as? String)?.contains("up to 200 files") == true, "files beyond one call's limit are reported as not copied")
+            // A folder bigger than one listing is explored a subfolder at a time, and a folder deep inside it is still reachable.
+            try fm.createDirectory(at: sourceRoot.appendingPathComponent("lots"), withIntermediateDirectories: true); try fm.createDirectory(at: sourceRoot.appendingPathComponent("deep/inner"), withIntermediateDirectories: true)
+            for n in 0..<210 { try Data("z".utf8).write(to: sourceRoot.appendingPathComponent("lots/n\(n).txt")) }
+            try Data("target".utf8).write(to: sourceRoot.appendingPathComponent("deep/inner/target.txt"))
+            let inner = try project.list(sourceScope, under: "deep/inner")
+            require((inner["files"] as? [[String: Any]])?.compactMap { $0["path"] as? String } == ["deep/inner/target.txt"], "a subfolder can be listed by itself")
+            let deepCopy = try project.copy(from: sourceScope, to: projectScope, paths: ["deep/inner/"], actor: "coder", actorName: "Coder")
+            require((deepCopy["copied"] as? [[String: Any]])?.compactMap { $0["path"] as? String } == ["deep/inner/target.txt"], "a folder path reaches a subfolder however crowded the rest of the folder is")
+            let lotsCopy = try project.copy(from: sourceScope, to: projectScope, paths: ["lots/"], actor: "coder", actorName: "Coder")
+            require((lotsCopy["copied"] as? [Any])?.count == 200 && (lotsCopy["note"] as? String)?.contains("more files") == true, "a folder with more files than one listing says so instead of pretending it copied everything")
+            rejects("invalid_path") { _ = try project.list(sourceScope, under: "nowhere") }
+            rejects("invalid_path") { _ = try project.list(sourceScope, under: "../Outside") }
             // Results go back out as new files only: never over one of the person's, and never outside the folder.
             try fm.createDirectory(at: projectRoot.appendingPathComponent("out"), withIntermediateDirectories: true); try big.write(to: projectRoot.appendingPathComponent("out/result.csv")); try Data("note".utf8).write(to: projectRoot.appendingPathComponent("report.md"))
             let saved = try project.copy(from: projectScope, to: sourceScope, paths: ["out/", "report.md"], into: "results-1", replacing: false, actor: "coder", actorName: "Coder")

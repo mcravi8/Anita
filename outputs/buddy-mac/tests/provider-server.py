@@ -4,8 +4,9 @@ import json,sys
 seq=0;calls={}
 
 def out(x):print(json.dumps(x),flush=True)
+reply='ChatGPT fixture answer'
 def finish(tid,turn):
- out({'method':'item/completed','params':{'threadId':tid,'turnId':turn,'item':{'type':'agentMessage','id':'answer-'+turn,'phase':'final_answer','text':'ChatGPT fixture answer'}}})
+ out({'method':'item/completed','params':{'threadId':tid,'turnId':turn,'item':{'type':'agentMessage','id':'answer-'+turn,'phase':'final_answer','text':reply}}})
  out({'method':'turn/completed','params':{'threadId':tid,'turn':{'id':turn,'status':'completed'}}})
 for line in sys.stdin:
  m=json.loads(line);p=m.get('params',{});method=m.get('method');r={}
@@ -33,7 +34,9 @@ for line in sys.stdin:
   elif 'SAVE_PROACTIVE' in str(p.get('input')):
    rid='proactive-'+str(seq);calls[rid]=(tid,turn)
    out({'id':rid,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':rid,'tool':'buddy_team','arguments':{'action':'set_proactive','enabled':True,'quote':'Keep me updated.'}}})
-  else:finish(tid,turn)
+  else:
+   reply='Sure, I will keep you posted.' if 'CLAIM_PROACTIVE' in str(p.get('input')) else 'ChatGPT fixture answer'
+   finish(tid,turn)
   continue
  elif method not in ['initialize','initialized','thread/inject_items','thread/unsubscribe','turn/interrupt']:raise AssertionError(method)
  if 'id' in m:out({'id':m['id'],'result':r})

@@ -19,9 +19,9 @@ import Foundation
         require(false, "asynchronous teamwork fixture timed out")
     }
     static let members = [BuddyTeamAgent(id: "writer", name: "Write Bot", role: "Writer", description: "Current writing instruction"), BuddyTeamAgent(id: "reviewer", name: "Review Bot", role: "Reviewer", description: "Current review instruction"), BuddyTeamAgent(id: "researcher", name: "Search Bot", role: "Research", description: "Find evidence")]
-    static func request(members: [BuddyTeamAgent] = members, group: String = "group") -> BuddyTeamRequest {
+    static func request(members: [BuddyTeamAgent] = members, group: String = "group", text: String = "work together on an announcement") -> BuddyTeamRequest {
         let workspace = UUID().uuidString
-        return BuddyTeamRequest(runId: UUID().uuidString, key: workspace + ":" + group, workspace: workspace, groupId: group, name: "Launch", objective: "Clear and accurate", text: "@Review Bot work together on an announcement", members: members, history: "You: Our event is Sunday.")
+        return BuddyTeamRequest(runId: UUID().uuidString, key: workspace + ":" + group, workspace: workspace, groupId: group, name: "Launch", objective: "Clear and accurate", text: text, members: members, history: "You: Our event is Sunday.")
     }
     @MainActor static func fixture() -> (FakeConversations, BuddyTeamService) {
         let fake = FakeConversations(), team = BuddyTeamService(conversations: fake)
@@ -42,8 +42,15 @@ import Foundation
         _ = reviewTeam.consume(["type": "tool-input", "runId": reviewRequest.runId, "executionRunId": reviewChild, "request": ["id": "review", "status": "answered"]])
         reviewFake.complete(0, text: "Confirmed test action."); await wait { reviewTeam.snapshots().first?["status"] as? String == "completed" }
         print("PASS: group review attaches to parent reply, pauses worker timeout, and resumes after decision")
-        var r = request(); r.fileScope = BuddyFileScope(workspace: r.workspace, folderId: r.workspace)
+        var r = request(text: "@Review Bot work together on an announcement"); r.fileScope = BuddyFileScope(workspace: r.workspace, folderId: r.workspace)
         require(r.mentionedIds == ["reviewer"], "actual mentions resolve by full agent name")
+        let ignoring = BuddyTeamPlan(leadId: "writer", tasks: [BuddyTeamTask(agentId: "writer", task: "Write", dependsOn: [])])
+        let honored = BuddyTeamService.honoringMentions(ignoring, request: r)
+        require(honored.tasks.map(\.agentId) == ["writer", "reviewer"], "an agent the person mentioned is not left out of the plan: \(honored.tasks.map(\.agentId))")
+        let direct = BuddyTeamService.honoringMentions(BuddyTeamPlan(leadId: "writer", tasks: []), request: r)
+        require(direct.leadId == "reviewer" && direct.tasks.isEmpty, "one mentioned agent answers a request nobody else was assigned")
+        let plain = request(members: [members[0]])
+        require(plain.mentionedIds.isEmpty && BuddyTeamService.honoringMentions(ignoring, request: plain) == ignoring, "a request that mentions nobody is left as planned")
         let plan = BuddyTeamPlan(leadId: "reviewer", tasks: [BuddyTeamTask(agentId: "writer", task: "Write a draft", dependsOn: []), BuddyTeamTask(agentId: "researcher", task: "Find evidence", dependsOn: []), BuddyTeamTask(agentId: "reviewer", task: "Review both contributions", dependsOn: ["writer", "researcher"])])
         let planText = String(data: try JSONEncoder().encode(plan), encoding: .utf8)!
         require(try BuddyTeamPlan.decode(planText, members: members) == plan, "valid dependencies are accepted")
@@ -59,6 +66,17 @@ import Foundation
         var rejected = false
         do { _ = try BuddyTeamRequest.from(workspace: state, payload: ["runId": r.runId, "groupId": r.groupId, "key": r.key, "text": r.text]) } catch { rejected = true }
         require(rejected, "duplicate native group members are rejected")
+        // A reply is failed for a missing receipt only when it claims the thing was done; a plain answer to a question that merely sounded like a request is left alone.
+        for text in ["Yes, I will run this every morning.", "Done. I’ve scheduled it for 9:00 each day.", "Your routine is saved; next run is tomorrow at 9:00.", "I'll check your inbox daily."] { require(BuddyReplyClaims.schedule(text), "claims a schedule: \(text)") }
+        for text in ["I'll run the pipeline now and report the exponents.", "Here are the daily VIX figures for COVID.", "Done. The weekly returns file is reviewed.", "I haven't scheduled anything yet.", "The schedule wasn't saved.", "I'll review the weekly returns file and tell you what changed.", "Yes: the same checks make sense, but I can't promise more.", "Both look right."] { require(!BuddyReplyClaims.schedule(text), "makes no scheduling claim: \(text)") }
+        for text in ["Done. I saved that rule and will follow it from now on.", "Got it — the rule is saved.", "I’ll follow that."] { require(BuddyReplyClaims.rule(text), "claims a rule: \(text)") }
+        for text in ["Here is the CV for you to check.", "I didn't save a rule because the wording was unclear.", "The first three applications are ready."] { require(!BuddyReplyClaims.rule(text), "makes no rule claim: \(text)") }
+        for text in ["I'll keep you posted on what Forge finds.", "Proactive updates are on.", "I'll stop messaging you unless you ask."] { require(BuddyReplyClaims.proactive(text), "claims an update preference: \(text)") }
+        for text in ["Forge is still re-running the pipeline.", "Here is the status.", "Updates are in the report."] { require(!BuddyReplyClaims.proactive(text), "makes no update claim: \(text)") }
+        // What is replayed to a model each turn leaves out the agent's own status bubbles and is bounded.
+        let historyState:[String:Any]=["messages":["chief":[["id":"1","who":"you","live":true,"body":"Where are we?"],["id":"2","who":"chief","live":true,"status":"completed","teamUpdate":true,"body":"STATUS BUBBLE"],["id":"3","who":"chief","live":true,"status":"completed","body":"A real answer."]] + (0..<200).map { n in ["id":"b\(n)","who":"you","live":true,"body":String(repeating:"x",count:1000)] as [String:Any] }]]
+        let replay = BuddyConversationHistory.context(historyState, target: "chief", runId: UUID().uuidString)
+        require(!replay.contains("STATUS BUBBLE") && replay.utf8.count < 70_000 && replay.contains("buddy_read_chat_history"), "replayed history leaves out status bubbles, stays bounded, and points to the tool for older messages")
         print("PASS: group registration, current configurations, isolated history, mentions, and bounded valid plans")
 
         let (fake, team) = fixture(); _ = try team.send(r); _ = try team.send(r)
@@ -117,6 +135,12 @@ import Foundation
         require((directFake.calls[1].payload["agent"] as? [String: String])?["name"] == "Review Bot", "with no assignments the spokesperson answers")
         directFake.complete(1, text: "JUST_ONE_ANSWER"); await wait { directTeam.snapshots()[0]["status"] as? String == "completed" }
         require(directTeam.snapshots()[0]["text"] as? String == "JUST_ONE_ANSWER" && (directTeam.snapshots()[0]["team"] as? [String: Any])?["direct"] as? Bool == true, "a request nobody else needed is one agent's own answer")
+        // Someone the person wrote "@" to is asked, even when the coordinator did not pick them.
+        let (mentionFake, mentionTeam) = fixture(), mentionRequest = request(text: "@Review Bot are we ready to publish?")
+        _ = try mentionTeam.send(mentionRequest); await wait { mentionFake.calls.count == 1 }
+        mentionFake.complete(0, text: String(data: try JSONEncoder().encode(BuddyTeamPlan(leadId: "writer", tasks: [BuddyTeamTask(agentId: "writer", task: "Write", dependsOn: [])])), encoding: .utf8)!)
+        await wait { mentionFake.calls.count == 3 }
+        require(Set(mentionFake.calls[1...2].compactMap { ($0.payload["agent"] as? [String: String])?["name"] }) == ["Write Bot", "Review Bot"], "the mentioned agent is asked even though the coordinator left them out")
         // The chat already shows who is speaking, so a label the agent put on its own message is taken off.
         let label = BuddyTeamService.withoutSpeakerLabel
         require(label("Forge: microstage 1 is not done.", "Forge") == "microstage 1 is not done." && label("**Chief:** Start at the first microstage", "Chief") == "Start at the first microstage" && label("**Lyra: Research-track plan (draft)**\n\nBody", "Lyra") == "**Research-track plan (draft)**\n\nBody" && label("## Vera: Plan\nBody", "Vera") == "## Plan\nBody" && label("  forge : lower case works", "Forge") == "lower case works", "a leading name and colon is removed, keeping a heading's own formatting")

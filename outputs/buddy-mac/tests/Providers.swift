@@ -38,10 +38,13 @@ import Foundation
         let second=try send("HISTORY_CHECK second message",options);await wait{terminal(second)}
         require(processes==1,"completed messages reuse the same authorized Claude bridge")
         var scheduleOptions=options;scheduleOptions.requiresRoutine=true
-        let fakeSchedule=try send("Run this every morning",scheduleOptions);await wait{terminal(fakeSchedule)}
+        let fakeSchedule=try send("Run this every morning CLAIM_SCHEDULE",scheduleOptions);await wait{terminal(fakeSchedule)}
         require(events.contains{$0["runId"] as? String==fakeSchedule && $0["status"] as? String=="failed" && ($0["error"] as? String)?.contains("No active routine")==true},"Claude cannot finish a schedule request without a native saved routine receipt")
+        // A request that merely sounds like a schedule, answered without claiming one, is an ordinary answer and not a failure.
+        let sounds=try send("Run the pipeline on the daily VIX data and report the exponents.",scheduleOptions);await wait{terminal(sounds)}
+        require(events.contains{$0["runId"] as? String==sounds && $0["status"] as? String=="completed"},"an answer that claims no schedule is not failed because the question mentioned 'daily'")
         var proactiveOptions=options;proactiveOptions.requiresProactive=true
-        let fakeProactive=try send("Keep me updated.",proactiveOptions);await wait{terminal(fakeProactive)}
+        let fakeProactive=try send("Keep me updated. CLAIM_PROACTIVE",proactiveOptions);await wait{terminal(fakeProactive)}
         require(events.contains{$0["runId"] as? String==fakeProactive && $0["status"] as? String=="failed" && ($0["error"] as? String)?.contains("setting") == true},"Claude cannot claim proactive updates were enabled without a native saved setting receipt")
         primary.extraToolHandler={tool,args,context in require(tool=="buddy_team" && context["agentId"] as? String==agent && context["authorizedUserText"] as? String=="Keep me updated.","the tool receives this actor's actual current user request");return ["saved":true,"agentId":agent,"proactive":true]}
         proactiveOptions.authorizedUserText="Keep me updated.";proactiveOptions.extraTools=[["type":"function","name":"buddy_team","description":"Fixture saved setting","inputSchema":["type":"object","properties":["action":["type":"string"]]]]]
@@ -50,7 +53,7 @@ import Foundation
         let inGroup=Set(BuddyWorkerClient.groupTools.compactMap{$0["name"] as? String})
         require(inGroup==Set(BuddyWorkerClient.tools.compactMap{$0["name"] as? String}) && inGroup.isSuperset(of:["buddy_coding_session","buddy_computer_task","buddy_agent_settings","buddy_agent_rules","buddy_manage_routine","buddy_team"]),"an agent in a group chat has everything it has in a direct chat, so a request is never answered with 'ask me in my own chat': \(inGroup)")
         var ruleOptions=options;ruleOptions.requiresRule=true
-        let unsavedRule=try send("Keep it in mind.",ruleOptions);await wait{terminal(unsavedRule)}
+        let unsavedRule=try send("Keep it in mind. CLAIM_RULE",ruleOptions);await wait{terminal(unsavedRule)}
         require(events.contains{$0["runId"] as? String==unsavedRule && $0["status"] as? String=="failed" && ($0["error"] as? String)?.contains("rule wasn’t saved")==true},"Claude cannot finish a stated rule without a native saved-rule receipt")
         primary.extraToolHandler={tool,args,context in require(tool=="buddy_agent_rules" && args["action"] as? String=="add" && args["quote"] as? String=="send me the CV" && context["authorizedUserText"] as? String=="Please send me the CV first.","the rule tool receives the person’s actual message");return ["saved":true,"ruleId":UUID().uuidString]}
         ruleOptions.authorizedUserText="Please send me the CV first.";ruleOptions.extraTools=[["type":"function","name":"buddy_agent_rules","description":"Fixture saved rule","inputSchema":["type":"object","properties":["action":["type":"string"]]]]]
@@ -79,7 +82,7 @@ import Foundation
         primary.extraToolHandler={tool,args,context in return ["saved":true,"agentId":agent,"proactive":true]}
         let gpt=try send("GPT_CHECK",options);await wait{terminal(gpt)}
         require(events.contains{$0["runId"] as? String == gpt && $0["text"] as? String == "ChatGPT fixture answer" && $0["status"] as? String == "completed"},"new turns use selected ChatGPT without changing history")
-        let fakeGPTProactive=try send("Keep me updated.",proactiveOptions);await wait{terminal(fakeGPTProactive)}
+        let fakeGPTProactive=try send("Keep me updated. CLAIM_PROACTIVE",proactiveOptions);await wait{terminal(fakeGPTProactive)}
         require(events.contains{$0["runId"] as? String==fakeGPTProactive && $0["status"] as? String=="failed" && ($0["error"] as? String)?.contains("setting") == true},"ChatGPT cannot claim proactive updates were enabled without a native saved setting receipt")
         let savedGPTProactive=try send("SAVE_PROACTIVE",proactiveOptions);await wait{terminal(savedGPTProactive)}
         require(events.contains{$0["runId"] as? String==savedGPTProactive && $0["status"] as? String=="completed"},"ChatGPT's real native saved-setting receipt satisfies the proactive acknowledgement guard")

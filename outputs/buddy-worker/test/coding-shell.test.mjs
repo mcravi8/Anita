@@ -19,3 +19,12 @@ test('real macOS sandbox runs builds with a clean environment and blocks outside
   result=await shell.run({cwd:root+'/project',scratch:root+'/scratch',code:'node -e \'setInterval(()=>{},1000)\'',timeoutSeconds:1});assert.equal(result.timedOut,true);assert.notEqual(result.exitCode,0);
  }finally{shell.close();delete process.env.ANTHROPIC_API_KEY;delete process.env.BUDDY_SECRET_TEST;await rm(root,{recursive:true,force:true});}
 });
+
+test('long command output keeps its end, where the error is, and says the middle was left out',{skip:process.platform!=='darwin'},async()=>{
+ const root=await mkdtemp('/tmp/buddy-coding-tail-'),shell=new CodingShell();
+ try{
+  await mkdir(root+'/project');
+  const result=await shell.run({cwd:root+'/project',scratch:root+'/scratch',code:'node -e \'console.log("HEAD-LINE");for(let i=0;i<4000;i++)console.log("filler line number "+i+" ............................");console.log("TRACEBACK-AT-THE-END")\''});
+  assert.equal(result.truncated,true);assert.match(result.output,/HEAD-LINE/);assert.match(result.output,/TRACEBACK-AT-THE-END/,'the last lines survive');assert.match(result.output,/middle of the output is left out/);assert.ok(result.output.length<66000);
+ }finally{await rm(root,{recursive:true,force:true});}
+});

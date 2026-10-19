@@ -21,6 +21,25 @@ test('mentions preserve drafts and agent-message history exposes real replies wi
   await messageLink.click();await page.getByText('The verified deadline is Tuesday.',{exact:true}).waitFor();assert.equal(await page.getByText('SHOULD NOT SHOW A PENDING REPLY',{exact:true}).count(),0);await page.getByText('Details',{exact:true}).click();await page.getByText('Sources remain available for this recorded check-in.',{exact:true}).waitFor();
   assert.deepEqual(await page.evaluate(()=>historyCalls.at(-1).arguments.exchangeIds),['exchange','pending']);assert.equal(await page.getByLabel('Filter agent messages').inputValue(),'inbox');await page.getByLabel('Filter agent messages').selectOption('chief');await page.getByText('The verified deadline is Tuesday.',{exact:true}).waitFor();assert.equal(await page.evaluate(()=>historyCalls.at(-1).arguments.agentId),'chief');
   await page.evaluate(()=>historyFailure=true);await page.getByRole('button',{name:'Refresh',exact:true}).click();await page.getByRole('alert').filter({hasText:'Fixture offline'}).waitFor();assert.equal(await page.getByText('The verified deadline is Tuesday.',{exact:true}).isVisible(),true);await page.evaluate(()=>historyFailure=false);await page.getByRole('button',{name:'Refresh',exact:true}).click();await page.getByRole('alert').waitFor({state:'detached'});
-  await page.setViewportSize({width:390,height:844});await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>setTimeout(r,50)))));assert.equal(await page.locator('.modal').evaluate(e=>e.scrollWidth<=e.clientWidth),true);await page.getByRole('button',{name:'Close dialog',exact:true}).click();assert.equal(await page.locator('#message-input').inputValue(),'Keep this draft @Inbox ');await page.locator('#message-input').fill('@');assert.equal(await page.getByRole('option').count(),2);const box=await page.getByRole('listbox').boundingBox();assert.ok(box.x>=0&&box.x+box.width<=390);assert.equal(await page.evaluate(()=>historyCalls.every(p=>p.operation==='team'&&p.arguments.action==='messages')),true,'viewing history never changes report routing');
+  await page.setViewportSize({width:390,height:844});await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>setTimeout(r,50)))));assert.equal(await page.locator('.modal').evaluate(e=>e.scrollWidth<=e.clientWidth),true);await page.getByRole('button',{name:'Close dialog',exact:true}).click();assert.equal(await page.locator('#message-input').inputValue(),'Keep this draft @Inbox ');await page.locator('#message-input').fill('@');assert.equal(await page.getByRole('option').count(),2);const box=await page.getByRole('listbox').boundingBox();assert.ok(box.x>=0&&box.x+box.width<=390);assert.equal(await page.evaluate(()=>historyCalls.filter(p=>!(p.operation==='status'||(p.operation==='team'&&p.arguments?.action==='status'))).every(p=>p.operation==='team'&&p.arguments.action==='messages')),true,'viewing history never changes report routing');
+ }finally{await context?.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('in a group the @ menu offers only the group\'s members',{timeout:45000},async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'buddy-mention-group-'));let context;
+ try{
+  context=await chromium.launchPersistentContext(dir,{channel:'chrome',headless:true,viewport:{width:1120,height:850}});const page=context.pages()[0];
+  await page.goto(new URL('../../relay/index.html',import.meta.url).href);await page.waitForFunction(()=>!!window.BuddyMentions);
+  await page.evaluate(()=>{
+   document.getElementById('onboarding-root').innerHTML='';closeModal();
+   state.agents=['chief','inbox','lyra'].map(id=>({id,name:id[0].toUpperCase()+id.slice(1),role:'Helper',avatarShape:'star',avatarColor:'lilac',setupStatus:'ready',tools:{}}));
+   state.groups=[{id:'g1',name:'Launch',objective:'Ship it',members:['chief','lyra'],description:'Ship it'}];state.onboarding={status:'completed',agentId:'chief'};state.runs={};
+   state.messages={g1:[],chief:[]};state.drafts={g1:'',chief:''};state.attachments={};ui.view={kind:'chat',target:'g1'};
+   BuddyDesktop={saveState:async()=>({saved:true}),sendMessage:async()=>{},worker:async()=>({})};render();
+  });
+  const input=page.locator('#message-input');await input.fill('@');
+  assert.deepEqual(await page.getByRole('option').locator('strong').allInnerTexts(),['Chief','Lyra'],'only members of the group, not Inbox');
+  await page.evaluate(()=>{ui.view={kind:'chat',target:'chief'};render();});
+  await page.locator('#message-input').fill('@');assert.equal(await page.getByRole('option').count(),3,'in a direct chat every agent can be mentioned');
  }finally{await context?.close();await rm(dir,{recursive:true,force:true});}
 });

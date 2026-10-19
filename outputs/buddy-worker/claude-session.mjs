@@ -1,3 +1,5 @@
+const stopReasons={error_max_budget_usd:'It reached its spending limit before it could finish. Raise the Claude task limit in Settings and continue.',error_max_turns:'It reached its limit on steps before it could finish. Continue it to keep going.',error_during_execution:'Claude hit an error while working.'};
+const stopText=message=>message.errors?.length?message.errors.join('\n'):(message.subtype&&message.subtype!=='success'?(stopReasons[message.subtype]||message.subtype):(message.result||'Claude stopped before finishing.'));
 // A ready SDK process is single use: every turn keeps its own budget and context.
 // Preparing the next process performs the SDK handshake, never a model query.
 function canonical(value){
@@ -43,7 +45,7 @@ export class ClaudeSession {
         if(message.type==='assistant'){
           const text=message.message.content.filter(x=>x.type==='text').map(x=>x.text).join('\n');if(text)this.emit({type:'progress',text});
         }
-        if(message.type==='result')result={type:'result',text:message.structured_output?JSON.stringify(message.structured_output):message.result||'',error:message.is_error?(message.errors?.join('\n')||(message.subtype&&message.subtype!=='success'?message.subtype:'Claude stopped before finishing.')):null,cost:message.total_cost_usd||0};
+        if(message.type==='result')result={type:'result',text:message.structured_output?JSON.stringify(message.structured_output):message.result||'',error:message.is_error?stopText(message):null,cost:message.total_cost_usd||0};
       }
     } catch(error){
       // A run that ended in a failed result (turn or budget limit) has already been charged. The error that follows ends the task, so

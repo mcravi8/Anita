@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Offline SDK protocol fixture; actual files and commands run through native tools."""
-import json,re,sys
+import json,re,sys,time
 session='4b088c90-af25-410c-8a7d-74d54e9c1cad'
 config={}
 def emit(value):
@@ -10,7 +10,7 @@ for line in sys.stdin:
     if value['command']=='start':
         config=value
         names=[t['name'] for t in config['tools']]
-        assert 'buddy_coding_command' in names and 'buddy_write_file' in names and 'buddy_copy_into_project' in names and 'buddy_copy_out_of_project' in names
+        assert 'buddy_coding_command' in names and 'buddy_write_file' in names and 'buddy_copy_into_project' in names and 'buddy_copy_out_of_project' in names and 'buddy_checkpoint' in names and 'buddy_review_checkpoint' not in names
         assert 'buddy_browser' not in names and 'buddy_connected_services' not in names
         emit({'type':'session','sessionId':session})
         if config.get('resume'):
@@ -18,6 +18,8 @@ for line in sys.stdin:
             emit({'type':'call','id':'command','tool':'buddy_coding_command','arguments':{'code':'node -e \'console.log("continued")\'' if 'CHECKPOINT_FIXTURE' in config['prompt'] else 'node --check index.js'}})
         elif 'CHECKPOINT_FIXTURE' in config['prompt']:
             emit({'type':'call','id':'checkpoint','tool':'buddy_checkpoint','arguments':{'reason':'Choose the feature to implement next.'}})
+        elif 'SLOW_FIXTURE' in config['prompt']:
+            emit({'type':'call','id':'command','tool':'buddy_coding_command','arguments':{'code':'node -e \'console.log("slow")\''}})
         elif 'COPY_FIXTURE' in config['prompt']:
             folder=re.search(r'COPY_FIXTURE ([0-9A-Fa-f-]{36})',config['prompt']).group(1)
             emit({'type':'call','id':'copy','tool':'buddy_copy_into_project','arguments':{'folderId':folder,'paths':['data/','missing.csv']}})
@@ -49,4 +51,5 @@ for line in sys.stdin:
                 emit({'type':'result','text':'The native command was declined. It did not run.','cost':0.01,'sessionId':session})
             else:
                 assert result['exitCode']==0,result
+                if 'SLOW_FIXTURE' in config['prompt']: time.sleep(4)   # long enough for the host's one-second checks to see the agent change
                 emit({'type':'result','text':'Implemented the fixture and ran the actual Node syntax check.','cost':0.01,'sessionId':session})

@@ -34,15 +34,16 @@ export class CodingShell {
     const seconds=Math.min(300,Math.max(1,Number(timeoutSeconds)||120));
     const env={PATH:'/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',HOME:scratch,TMPDIR:scratch,TMPPREFIX:scratch+'/zsh',LANG:'en_US.UTF-8',TERM:'dumb',CI:'1',NO_COLOR:'1',GIT_TERMINAL_PROMPT:'0',PYTHONNOUSERSITE:'1',npm_config_cache:scratch+'/npm',npm_config_userconfig:'/dev/null',PIP_CACHE_DIR:scratch+'/pip'};
     return await new Promise((resolve,reject)=>{
-      const at=Date.now();let output='',truncated=false,timedOut=false,settled=false;
+      const at=Date.now();let output='',tail='',truncated=false,timedOut=false,settled=false;
       const child=spawn('/usr/bin/sandbox-exec',['-p',sandboxProfile(project,scratch,network),'/bin/zsh','-f','-c',code],{cwd:project,env,detached:true,stdio:['ignore','pipe','pipe']});this.child=child;
-      const append=data=>{if(Buffer.byteLength(output)<64000)output+=data.toString();else truncated=true;};child.stdout.on('data',append);child.stderr.on('data',append);
+      // Errors are at the end of long output, so keep the start and the end and leave out the middle.
+      const append=data=>{const text=data.toString();if(Buffer.byteLength(output)<16000)output+=text;else{truncated=true;tail=(tail+text).slice(-48000);}};child.stdout.on('data',append);child.stderr.on('data',append);
       const terminate=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
       const timer=setTimeout(()=>{timedOut=true;terminate();},seconds*1000);
       child.once('error',error=>{if(settled)return;settled=true;clearTimeout(timer);this.child=null;reject(error);});
       // 'close' waits for the output pipes, which a background process started in its own session can hold open for as long as it likes.
       // So finish as soon as the shell itself has exited (after a moment for its last output), and let go of the pipes.
-      const finish=(exitCode,signal)=>{if(settled)return;settled=true;clearTimeout(timer);terminate();child.stdout.destroy();child.stderr.destroy();this.child=null;resolve({exitCode,signal,output:output.slice(0,64000),truncated,timedOut,durationMs:Date.now()-at,network,project});};
+      const finish=(exitCode,signal)=>{if(settled)return;settled=true;clearTimeout(timer);terminate();child.stdout.destroy();child.stderr.destroy();this.child=null;resolve({exitCode,signal,output:truncated?output.slice(0,16000)+'\n… (the middle of the output is left out) …\n'+tail:output,truncated,timedOut,durationMs:Date.now()-at,network,project});};
       child.once('close',finish);
       child.once('exit',(exitCode,signal)=>setTimeout(()=>finish(exitCode,signal),300));
     });

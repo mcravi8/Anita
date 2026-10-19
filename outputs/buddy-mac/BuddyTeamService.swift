@@ -59,7 +59,7 @@ import Foundation
                 let coordinator = BuddyTeamAgent(id: "coordinator", name: "Buddy", role: "Group coordinator", description: "Choose the right people and concrete work for this request.")
                 let guidance = "Organize this group request. Pick a spokesperson from the actual members. Prefer explicitly mentioned agents as spokesperson when appropriate. Choose up to three useful, distinct assignments based on their current roles and instructions. Every assigned agent will post its own reply to the user in the group chat and nobody combines them, so assign only the agents who actually need to speak for this request (a status question goes to the agents who own that status) and leave the others out. Use only members listed in the request. Simple requests can have no assignments. For a collaboration/review request, use the relevant specialists and make review depend on the draft or research it reviews. Independent assignments can run together. Assign each external action (sending, changing, deleting) to exactly one worker. Other workers may research or review it, but must not repeat the effect. Ensure any dependent review happens before an action when required. Dependencies must refer to other assigned agent IDs and must form no cycles. Do not invent teammates or perform the work yourself. Return only the required JSON plan. This planning step has no service tools."
                 let raw = try await generate(job, agent: coordinator, text: request.context, session: "coordinator", instructions: guidance, tools: false, schema: BuddyTeamPlan.schema(memberIds: request.members.map(\.id)))
-                plan = try BuddyTeamPlan.decode(raw, members: request.members)
+                plan = Self.honoringMentions(try BuddyTeamPlan.decode(raw, members: request.members), request: request)
             }
             try check(job)
             job.leadId = plan.leadId; job.direct = plan.tasks.isEmpty; job.status = "answering"; job.phase = "working"
@@ -158,6 +158,19 @@ import Foundation
             if busy(job.status) { updateEntry(job, task.agentId, status: stopped ? "stopped" : "failed", error: stopped ? "" : error.localizedDescription); emit(job) }
             return Contribution(agentId: task.agentId, notes: "", error: stopped ? "Stopped" : error.localizedDescription, stopped: stopped)
         }
+    }
+
+    /// A person who writes "@Chief …" expects Chief to answer. The coordinator is only asked to prefer mentioned agents, so make sure they are not left
+    /// out: a single mention speaks for the group, and more than one each get an assignment (up to the three a plan allows).
+    static func honoringMentions(_ plan: BuddyTeamPlan, request: BuddyTeamRequest) -> BuddyTeamPlan {
+        let mentioned = request.mentionedIds
+        guard !mentioned.isEmpty else { return plan }
+        var tasks = plan.tasks, lead = plan.leadId
+        if tasks.isEmpty && mentioned.count == 1 { lead = mentioned[0]; return BuddyTeamPlan(leadId: lead, tasks: tasks) }
+        for id in mentioned where !tasks.contains(where: { $0.agentId == id }) && tasks.count < 3 {
+            tasks.append(BuddyTeamTask(agentId: id, task: "The person addressed you by name in their request. Answer what they asked of you.", dependsOn: []))
+        }
+        return BuddyTeamPlan(leadId: lead, tasks: tasks)
     }
 
     private func generate(_ job: Job, agent: BuddyTeamAgent, text: String, session: String, instructions: String, tools: Bool, schema: [String: Any]? = nil, entry: String? = nil, finalReply: Bool = false) async throws -> String {

@@ -122,6 +122,25 @@ import AppKit
         require(try Data(contentsOf:support.appendingPathComponent("Worker/Tasks/"+copyID+"/Files/data/prices.csv"))==dataset,"a connected folder's file reaches the coding project byte for byte without passing through the model")
         require((copied["commands"] as? [[String:Any]])?.first?["output"] as? String=="2500000\n","a command in the project reads the copied file")
         require(try Data(contentsOf:copySource.appendingPathComponent("results/data/prices.csv"))==dataset,"a result saved from the project reaches the connected folder byte for byte")
+        // Chatting with an agent renames it, teaches it preferences and bumps its revisions; none of that is a reason to stop what it is doing.
+        let slow=try await call(["action":"start","title":"Slow fixture","goal":"SLOW_FIXTURE"],requestID:"slow")["task"] as! [String:Any],slowID=slow["id"] as! String
+        for _ in 0..<100 {if (try await call(["action":"status","taskId":slowID])["task"] as! [String:Any])["status"] as? String=="running" {break};try await Task.sleep(nanoseconds:50_000_000)}
+        var churn=try JSONSerialization.jsonObject(with:Data(contentsOf:support.appendingPathComponent("workspace.json"))) as! [String:Any]
+        var churnAgents=churn["agents"] as! [[String:Any]]
+        let churned=churnAgents.firstIndex(where:{$0["id"] as? String==agent})
+        require(churned != nil,"the agent whose work is under way is in the workspace the test changes")
+        if let i=churned {churnAgents[i]["name"]="Renamed while working";churnAgents[i]["description"]="New instructions.";churnAgents[i]["memoryRevision"]=99;churnAgents[i]["profileRevision"]=7;churnAgents[i]["learnedRules"]=[["instruction":"Be brief.","quote":"be brief please","at":"2026-10-19T00:00:00Z"]]}
+        churn["agents"]=churnAgents;try JSONSerialization.data(withJSONObject:churn).write(to:support.appendingPathComponent("workspace.json"),options:.atomic)
+        var sawPaused=false
+        for _ in 0..<200 {
+            let status=(try await call(["action":"status","taskId":slowID])["task"] as! [String:Any])["status"] as? String
+            if status=="paused" || status=="interrupted" {sawPaused=true;break}
+            if status=="completed" {break}
+            try await Task.sleep(nanoseconds:100_000_000)
+        }
+        require(!sawPaused,"renaming an agent or teaching it a preference does not pause the work it is doing")
+        let slowDone=try await wait(slowID,for:"completed")
+        require((slowDone["result"] as? String)?.contains("Implemented the fixture")==true && (slowDone["commands"] as? [[String:Any]])?.first?["exitCode"] as? Int==0,"nor is its next command refused: \(slowDone["result"] ?? "")")
         let net=try await call(["action":"start","title":"Network review fixture","goal":"NETWORK_REVIEW_FIXTURE"],requestID:"network")["task"] as! [String:Any],netID=net["id"] as! String
         _ = try await wait(netID,for:"waiting_review")
         let pending=try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"detail","taskId":netID])["task"] as! [String:Any],review=(pending["reviews"] as! [[String:Any]]).last!

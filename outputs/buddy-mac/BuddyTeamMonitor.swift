@@ -85,7 +85,7 @@ import Foundation
         if action=="configure" {guard actor==nil else{throw BuddyWorkerFailure(message:"Change team-wide settings in Workspace settings → Teamwork & updates.")};_ = try store.setPolicy(args,state:state)}
         else if action=="set_proactive" {
             let id=actor ?? args["agentId"] as? String ?? ""
-            if actor != nil {guard let quote=args["quote"] as? String,quote.count>=3,authorizedText.contains(quote) else{throw BuddyWorkerFailure(message:"Changing proactive updates needs an exact quote from the user's current request.")}}
+            if actor != nil {guard let quote=args["quote"] as? String,quote.count>=3,BuddyAgentChanges.normalized(authorizedText).contains(BuddyAgentChanges.normalized(quote)) else{throw BuddyWorkerFailure(message:"Changing proactive updates needs an exact quote from the user's current request.")}}
             guard let enabled=args["enabled"] as? Bool else{throw BuddyWorkerFailure(message:"Choose whether this agent should send proactive updates.")};_ = try store.setPolicy(["agentId":id,"proactive":enabled],state:state)
         } else if action=="learning" {guard actor==nil,let id=args["agentId"] as? String,agents.contains(where:{$0["id"] as? String==id}),let enabled=args["enabled"] as? Bool else{throw BuddyWorkerFailure(message:"Choose this agent's learning setting in its settings.")};try memory.setEnabled(workspace:w,agent:id,enabled:enabled)}
         else if action=="retry" {
@@ -103,7 +103,11 @@ import Foundation
                 var input=observation;input["agent"]=["id":id,"name":BuddyAgentMemory.privateText(a["name"] as? String ?? "Buddy")];input["requesterId"]=actor ?? policy["supervisorId"] ?? "";input["question"]=String((args["question"] as? String ?? "What changed, what is blocked, and does the user need to decide anything?").prefix(1500))
                 let job=try store.enqueue(kind:"checkin",workspace:w,agent:id,input:input,fingerprint:observation["fingerprint"] as! String,policy:policy,selection:oversight(a,workspace:w,policy:policy),now:now,force:true);ids.append(job["id"] as! String)
             }
-            var result=try response(raw,jobs:jobs,actor:actor,target:target,now:now);result["queuedCheckIds"]=ids;result["accepted"]=true;return result
+            var result=try response(raw,jobs:jobs,actor:actor,target:target,now:now);result["queuedCheckIds"]=ids
+            // Only a check-in that was really queued is accepted: an agent still in setup, one that doesn't share its work, or one with nothing recorded yet has none.
+            result["accepted"] = !ids.isEmpty
+            if ids.isEmpty {result["message"]="No check-in was queued. An agent that is still finishing setup, doesn't share work with the supervisor, or has no recorded work yet cannot be asked. Do not tell the person a check-in is underway."}
+            return result
         } else if action != "status" {throw BuddyWorkerFailure(message:"Choose status, check_in or a supported team setting.")}
         var result=try response(raw,jobs:jobs,actor:actor,target:args["agentId"] as? String,now:now)
         if action=="set_proactive" {let id=actor ?? args["agentId"] as? String ?? "";result["saved"]=true;result["agentId"]=id;result["proactive"]=store.configuration(try store.policy(state),agent:id)["proactive"] as? Bool ?? false}
@@ -156,12 +160,17 @@ import Foundation
             }
             guard (id != chief && supervisor != nil && p["participates"] as? Bool != false || p["proactive"] as? Bool==true),!(observation["sources"] as? [Any] ?? []).isEmpty,observation["meaningful"] as? Bool != false,!store.checks.contains(where:{$0["workspace"] as? String==w && $0["agentId"] as? String==id && $0["kind"] as? String=="checkin" && ["queued","running","budget"].contains($0["status"] as? String ?? "")}),let a=agents.first(where:{$0["id"] as? String==id}) else{continue}
             let prior=store.checks.last{$0["workspace"] as? String==w && $0["agentId"] as? String==id && $0["kind"] as? String=="checkin"}
-            if prior?["fingerprint"] as? String==observation["fingerprint"] as? String,prior?["status"] as? String != "cancelled",prior?["policyRevision"] as? Int==policy["revision"] as? Int {continue}
+            // A check-in that failed or was cut short (the worker restarts on every update) is tried again a little later, up to three times, instead of being
+            // treated as done: the blocker it was about would otherwise never reach the person.
+            let finishedAt=(prior?["finishedAt"] as? String ?? prior?["createdAt"] as? String).flatMap{ISO8601DateFormatter().date(from:$0)} ?? .distantPast
+            let retries=store.checks.filter{$0["workspace"] as? String==w && $0["agentId"] as? String==id && $0["kind"] as? String=="checkin" && $0["fingerprint"] as? String==observation["fingerprint"] as? String && ["failed","interrupted"].contains($0["status"] as? String ?? "")}.count
+            let retry=["failed","interrupted"].contains(prior?["status"] as? String ?? "") && retries<3 && now.timeIntervalSince(finishedAt)>=600
+            if prior?["fingerprint"] as? String==observation["fingerprint"] as? String,prior?["status"] as? String != "cancelled",prior?["policyRevision"] as? Int==policy["revision"] as? Int,!retry {continue}
             let last=(prior?["createdAt"] as? String).flatMap{ISO8601DateFormatter().date(from:$0)} ?? .distantPast
             let interval=observation["urgent"] as? Bool==true ? 60.0:Double(policy["intervalMinutes"] as? Int ?? 15)*60
             guard now.timeIntervalSince(last)>=interval else{continue}
             var input=observation;input["agent"]=["id":id,"name":BuddyAgentMemory.privateText(a["name"] as? String ?? "Buddy")];input["requesterId"]=chief ?? "";input["priorReport"]=prior?["output"] ?? NSNull()
-            _ = try store.enqueue(kind:"checkin",workspace:w,agent:id,input:input,fingerprint:observation["fingerprint"] as! String,policy:policy,selection:oversight(a,workspace:w,policy:policy),now:now)
+            _ = try store.enqueue(kind:"checkin",workspace:w,agent:id,input:input,fingerprint:observation["fingerprint"] as! String,policy:policy,selection:oversight(a,workspace:w,policy:policy),now:now,force:retry)
         }
         if let supervisor,let chief,!store.checks.contains(where:{$0["workspace"] as? String==w && $0["kind"] as? String=="overview" && ["queued","running","budget"].contains($0["status"] as? String ?? "")}) {
             let reported=Set(store.checks.filter{$0["workspace"] as? String==w && $0["kind"] as? String=="overview" && $0["status"] as? String=="completed"}.flatMap{($0["input"] as? [String:Any])?["checkinIds"] as? [String] ?? []})
@@ -234,7 +243,7 @@ import Foundation
             lastError=""
         }catch {
             try? store.update(job["id"] as! String,["status":"failed","error":error.localizedDescription,"finishedAt":BuddyTeamMonitorStore.stamp(Date())])
-            if job["kind"] as? String=="memory" {try? memory.failure(workspace:job["workspace"] as! String,agent:job["agentId"] as! String,error:error.localizedDescription)}
+            if job["kind"] as? String=="memory" {try? memory.failure(workspace:job["workspace"] as! String,agent:job["agentId"] as! String,error:error.localizedDescription,messageIds:((job["input"] as? [String:Any])?["messages"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})}
             // A check-in formatting failure belongs in Notifications with its actual
             // cause and retry action, not as a vague repeated message in Chief's chat.
             lastError=error.localizedDescription

@@ -127,7 +127,7 @@ import Darwin
                 return ["tasks":store.jobs.filter{$0["workspace"] as? String==current && $0["agentId"] as? String==agentID && $0["kind"] as? String != "coding"}.map{job in ["id":job["id"] ?? "","title":job["title"] ?? "","status":job["status"] ?? "","progress":job["progress"] ?? "","provider":job["provider"] ?? "","model":job["model"] ?? ""]}]
             }
             if action=="start" {
-                guard (a["tools"] as? [String:Bool])?["desktop"] != false,(a["tools"] as? [String:Bool])?["web"] != false else {throw BuddyWorkerFailure(message:"This agent's browser or web access is off.")}
+                guard (a["tools"] as? [String:Bool])?["desktop"] != false,(a["tools"] as? [String:Bool])?["web"] != false else {throw BuddyWorkerFailure(message:"Website tasks need both Web research and Mac apps turned on in this agent's settings, and one of them is off.")}
                 return try await handle(["operation":"create","workspace":current,"agentId":agentID,"requestId":request["requestId"] ?? "","title":args["title"] ?? "","goal":args["goal"] ?? "","kind":"general"])
             }
             guard ["continue","cancel"].contains(action),let id=args["taskId"] as? String else {throw BuddyWorkerFailure(message:"Choose start, status, continue or cancel with a task ID.")}
@@ -157,7 +157,7 @@ import Darwin
             guard (a["tools"] as? [String:Bool])?["projectFiles"] != false,try providerSettings.current(current).claudeEnabled,keyReader(current) != nil else {throw BuddyWorkerFailure(message:"Reconnect Claude and enable this agent's file access before continuing coding work.")}
             guard privateAgent==nil,active != id,let goal=args["goal"] as? String,!goal.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,goal.count<=10000 else {throw BuddyWorkerFailure(message:"Finish or pause the active session and give a short follow-up brief.")}
             let updates=(job["updates"] as? [String] ?? [])+[goal];guard updates.joined().count<=30000 else {throw BuddyWorkerFailure(message:"Start a new coding task with a fresh brief.")}
-            guard (job["remainingBudgetUSD"] as? Double ?? 0)>0 else {throw BuddyWorkerFailure(message:"This coding task's budget is exhausted or uncertain. Start a new task with an explicit budget.")}
+            guard (job["remainingBudgetUSD"] as? Double ?? 0)>0 else {throw BuddyWorkerFailure(message:"This coding task has no Claude allowance left, or its last cost could not be confirmed. Give it more under “Additional Claude allowance” on the task, or start a new task (the limit for a new task is in Settings).")}
             // Validate state before saving the follow-up, then persist it with the queue receipt.
             guard ["completed","paused","failed","interrupted","waiting_user"].contains(job["status"] as? String ?? "") else {throw BuddyWorkerFailure(message:"This coding task cannot be continued while it is queued or running.")}
             _ = try store.update(id,["updates":updates]);let result=try store.resume(id,continuingCoding:true);return ["task":result]
@@ -200,7 +200,10 @@ import Darwin
                 guard actor == nil else { throw BuddyWorkerFailure(message: "Only the user can answer this, on screen.") }
                 return try engine.answer(changeID: args["changeId"] as? String ?? "", allow: args["allow"] as? Bool == true)
             case "current": return try engine.snapshot(agent: agentID, workspaceFields: actor == nil || engine.supervisor() == actor)
-            case "list": return ["changes": try engine.list(agent: args["agentId"] as? String ?? (actor == nil ? nil : actor)), "rules": try engine.listRules(agent: args["agentId"] as? String ?? (actor == nil ? nil : actor))]
+            case "list":
+                // The person and the team's supervisor see every change (a teammate's, and the workspace's own, which belong to no agent); anyone else sees their own.
+                let whose = args["agentId"] as? String ?? ((actor == nil || engine.supervisor() == actor) ? nil : actor)
+                return ["changes": try engine.list(agent: whose), "rules": try engine.listRules(agent: whose)]
             case "pending":
                 guard actor == nil, let adopter = args["adopter"] as? String, ["page", "app"].contains(adopter) else { throw BuddyWorkerFailure(message: "Only the app can read this.") }
                 return ["changes": try store.unadoptedChanges(workspace: current, adopter: adopter).map { c in ["id": c.id, "agentId": c.agentID, "field": c.field, "status": c.status, "old": c.old as Any? ?? NSNull(), "new": c.new as Any? ?? NSNull(), "seq": c.seq, "createdAt": c.createdAt] as [String: Any] }]
@@ -259,6 +262,8 @@ import Darwin
             let selected=try agentModels.selection(workspace:current,agent:id) ?? .initial(choice.provider)
             if ["create","update"].contains(args["action"] as? String ?? "") {
                 guard choice.enabled(selected.provider),selected.provider != "claude" || BuddyClaudeKey.read(current) != nil else { throw BuddyWorkerFailure(message:"Connect the selected AI provider before saving an active routine.") }
+                // A Gmail search runs through ChatGPT. Saying "scheduled" now and failing at the first run helps nobody.
+                if !((args["query"] as? String) ?? "").trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, !choice.chatgptEnabled { throw BuddyWorkerFailure(message:"Checking Gmail on a schedule needs ChatGPT connected in Settings, because Gmail is read through it. Nothing was scheduled.") }
             }
             if args["action"] as? String=="resume",let rid=args["routineID"] as? String,let prior=store.jobs.last(where:{$0["routineID"] as? String==rid}),!["completed","cancelled"].contains(prior["status"] as? String ?? "") { throw BuddyWorkerFailure(message:"Open the last run and finish or cancel it before resuming this routine.") }
             let result=try routines.manage(args,workspace:current,agent:id,requestID:request["requestId"] as? String ?? UUID().uuidString,provider:selected.provider,budget:selected.provider=="claude" ? choice.claudeBudgetUSD:0,model:selected.model)
@@ -475,11 +480,14 @@ import Darwin
         guard (source["tools"] as? [String:Bool])?["desktop"] != false,(source["tools"] as? [String:Bool])?["web"] != false else{throw BuddyWorkerFailure(message:"The shared website session is no longer available.")}
         let p = makeBrowser(); try p.launch("browser.mjs", arguments: [root.appendingPathComponent("Browsers/" + owner).path,job["browserOrigin"] as? String ?? ""]); browser = p; return p
     }
+    /// What a running task was allowed to do when it started: which agent, what that agent may use, whose browser it shares and what each connection allows.
+    /// Anything else about the agent (its name, role, instructions, learned preferences, picture) is not authority, and changes whenever the person chats
+    /// with it, so it must not stop work that is under way.
+    private func access(_ a: [String: Any]) -> Data { (try? JSONSerialization.data(withJSONObject: ["id": a["id"] ?? "", "tools": a["tools"] ?? [String: Bool]()], options: [.sortedKeys])) ?? Data() }
     private func authorizationData(_ job: [String: Any]) -> Data {
-        guard let a = try? agent(job["agentId"] as? String ?? "", workspace: job["workspace"] as? String ?? ""), let data = try? JSONSerialization.data(withJSONObject: a, options: [.sortedKeys]) else { return Data() }
+        guard let a = try? agent(job["agentId"] as? String ?? "", workspace: job["workspace"] as? String ?? "") else { return Data() }
         let source=(job["browserAgentId"] as? String).flatMap{try? agent($0,workspace:job["workspace"] as? String ?? "")}
-        let sourceData=source.flatMap{try? JSONSerialization.data(withJSONObject:$0,options:.sortedKeys)} ?? Data()
-        return data + sourceData + ((try? Data(contentsOf: support.appendingPathComponent("connection-access.json"))) ?? Data())
+        return access(a) + (source.map(access) ?? Data()) + ((try? Data(contentsOf: support.appendingPathComponent("connection-access.json"))) ?? Data())
     }
     private func tick() async {
         // Time the Mac spends asleep says nothing about whether the model or the connection stopped, so it counts toward neither the
@@ -496,10 +504,12 @@ import Darwin
             if let choice = try? providerSettings.current(job["workspace"] as? String ?? ""), choice.revision(job["provider"] as? String ?? "") != providerRevision { await stop(id, status: "paused"); return }
             if job["provider"] as? String == "claude", delegatedResult != nil, (try? providerSettings.current(job["workspace"] as? String ?? "").chatgptEnabled) != true { service?.shutdown() }
             if !permitted(job) || (job["kind"] as? String=="coding" && !permitted(job,tool:"projectFiles")) || (try? providerSettings.current(job["workspace"] as? String ?? "").enabled(job["provider"] as? String ?? "")) != true || authorizationData(job) != authorization { await stop(id, status: "paused"); return }
-            if Date().timeIntervalSince(startedAt) > 3600 { await stop(id, status: "paused"); return }
+            // The hour is for the work, not for the person to answer a review: waiting for them does not count (this runs once a second).
+            if job["status"] as? String == "waiting_review" { startedAt = startedAt.addingTimeInterval(1) }
+            else if Date().timeIntervalSince(startedAt) > 3600 { await stop(id, status: "paused"); return }
             return
         }
-        if !store.paused { do { try routines.enqueueDue(store:store,workspace:workspace);try? FileManager.default.removeItem(at:root.appendingPathComponent("schedule-error.txt")) } catch { try? Data(error.localizedDescription.utf8).write(to:root.appendingPathComponent("schedule-error.txt"),options:.atomic);return } }
+        if !store.paused { do { try routines.enqueueDue(store:store,workspace:workspace);try? FileManager.default.removeItem(at:root.appendingPathComponent("schedule-error.txt")) } catch { try? Data(error.localizedDescription.utf8).write(to:root.appendingPathComponent("schedule-error.txt"),options:.atomic) } }
         guard !store.paused, let job = store.jobs.first(where: { $0["status"] as? String == "queued" }) else { return }
         let jobID = job["id"] as! String
         do { try await execute(job) } catch {
@@ -507,6 +517,7 @@ import Darwin
             // flight then throws. Recording that as a failure would overwrite "cancelled" and make the routine need attention, and
             // cleaning up again could tear down the next task. Only a run that was still going has failed.
             guard ["queued", "running", "waiting_review"].contains((try? store.job(jobID))?["status"] as? String ?? "") else { return }
+            try? store.settleActions(of: jobID, pending: "cancelled", cause: "run.ended"); refundIfNothingHappened(jobID)
             try? store.update(jobID, ["status": "failed", "progress": error.localizedDescription]); cleanup()
         }
     }
@@ -568,8 +579,8 @@ import Darwin
         if job["provider"] as? String == "claude" {
             guard let key = keyReader(workspace) else { throw BuddyWorkerFailure(message: "Reconnect Claude API credits.") }
             let budget = job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0
-            guard budget > 0 else { throw BuddyWorkerFailure(message: "This task’s Claude budget is exhausted or its last cost is uncertain. Start a new task with an explicit budget to continue.") }
-            try store.update(id, ["remainingBudgetUSD": 0, "reservedBudgetUSD": budget])
+            guard budget > 0 else { throw BuddyWorkerFailure(message: "This task has no Claude allowance left, or its last cost could not be confirmed. Give it more under “Additional Claude allowance” on the task, or start a new task (the limit for a new task is in Settings).") }
+            try store.update(id, ["remainingBudgetUSD": 0, "reservedBudgetUSD": budget]); attemptHeard = false
             let p = makeClaude(); claude = p
             p.onEvent = { [weak self] event in self?.claudeEvent(event, job: job) }
             try p.launch("claude.mjs")
@@ -591,7 +602,7 @@ import Darwin
         let home=folder.appendingPathComponent("Claude",isDirectory:true),project=folder.appendingPathComponent("Files",isDirectory:true)
         try FileManager.default.createDirectory(at:home,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         codingNeedsInput=false
-        try store.update(id,["remainingBudgetUSD":0,"reservedBudgetUSD":budget,"codingProject":project.path,"progress":"Starting coding session"])
+        try store.update(id,["remainingBudgetUSD":0,"reservedBudgetUSD":budget,"codingProject":project.path,"progress":"Starting coding session"]);attemptHeard=false
         let instructions="""
         You are \(a["name"] as? String ?? "Buddy"), coding with Claude Code's Agent SDK using the user's saved Claude API credits. This IS an active coding session. Your project directory is \(project.path), default folderId \(id). Your role is \(a["role"] as? String ?? ""). User configuration: \(a["description"] as? String ?? "").
         \(BuddyAgentMemory.guidance(a))
@@ -604,7 +615,7 @@ import Darwin
         let p=makeCoding();claude=p
         p.onEvent = { [weak self] event in guard let self,self.runID==runID else{return};self.claudeEvent(event,job:job) }
         try p.launch("coding.mjs")
-        var configuration:[String:Any] = ["command":"start","runId":runID,"model":job["model"] as? String ?? "claude-sonnet-4-6","apiKey":key,"budget":budget,"cwd":project.path,"home":home.path,"prompt":prompt,"instructions":instructions,"tools":BuddyProjectFiles.tools+[Self.codingCopyTool,Self.codingCopyOutTool,Self.codingCommandTool,Self.tools.last!]]
+        var configuration:[String:Any] = ["command":"start","runId":runID,"model":job["model"] as? String ?? "claude-sonnet-4-6","apiKey":key,"budget":budget,"cwd":project.path,"home":home.path,"prompt":prompt,"instructions":instructions,"tools":BuddyProjectFiles.tools+[Self.codingCopyTool,Self.codingCopyOutTool,Self.codingCommandTool,Self.tools.first{$0["name"] as? String=="buddy_checkpoint"}!]]
         if let resume=job["codingSessionID"] as? String {guard UUID(uuidString:resume) != nil else {throw BuddyWorkerFailure(message:"The saved coding session is invalid.")};configuration["resume"]=resume}
         try p.send(configuration)
     }
@@ -684,9 +695,17 @@ import Darwin
             } else if Date().timeIntervalSince(lastProgressSave) > 0.5 { lastProgressSave = Date(); _ = try? store.update(id, values) }
         }
     }
+    /// Whether the model side has said anything yet in this attempt. An allowance is set aside before the bridge starts; if the attempt ends
+    /// before the model ever spoke, nothing was spent, so it is given back and the task can simply be tried again.
+    private var attemptHeard = false
+    private func refundIfNothingHappened(_ id: String) {
+        guard !attemptHeard, let job = try? store.job(id), job["provider"] as? String == "claude", let reserved = job["reservedBudgetUSD"] as? Double, reserved > 0, (job["remainingBudgetUSD"] as? Double ?? 0) == 0 else { return }
+        _ = try? store.update(id, ["remainingBudgetUSD": reserved, "reservedBudgetUSD": 0])
+    }
     private func claudeEvent(_ event: [String: Any], job: [String: Any]) {
         guard active == job["id"] as? String, !stopped else { return }; let id = active!
         if let eventRun=event["runId"] as? String,eventRun != runID {return}
+        if !["error", "closed"].contains(event["type"] as? String ?? "") { attemptHeard = true }
         lastActivityAt=Date()
         if event["type"] as? String=="activity" {
             if Date().timeIntervalSince(lastProgressSave)>15 {
@@ -743,7 +762,7 @@ import Darwin
             if event["error"] as? String == nil,let runID { do { try service?.inboxReviews.commit(runID:runID) } catch { memoryError=error.localizedDescription } }
             let needsInput=taskNeedsInput || coding && codingNeedsInput
             try? store.update(id, ["status": privateTask == id || needsInput ? "waiting_user" : event["error"] as? String == nil && memoryError == nil ? "completed" : "failed", "progress": privateTask == id ? "Private Chrome is open. Finish sign-in in Buddy when ready." : needsInput ? (try? store.job(id)["progress"] as? String) ?? "Coding needs your input" : memoryError ?? (event["error"] as? String) ?? "Finished", "spentUSD": spent + cost, "remainingBudgetUSD": max(0, reserved-cost), "reservedBudgetUSD": 0]); cleanup()
-        } else if ["error", "closed"].contains(event["type"] as? String ?? "") { try? store.update(id, ["status": "failed", "progress": (event["error"] as? String) ?? "Claude stopped without confirming a result. Its reserved budget remains unavailable for retry."]); cleanup() }
+        } else if ["error", "closed"].contains(event["type"] as? String ?? "") { try? store.settleActions(of: id, pending: "cancelled", cause: "run.ended"); refundIfNothingHappened(id); try? store.update(id, ["status": "failed", "progress": (event["error"] as? String) ?? "Claude stopped without confirming a result. Its reserved budget remains unavailable for retry."]); cleanup() }
     }
     private func emailCompletionIssue(_ job:[String:Any])->String? {
         let current=(try? store.job(job["id"] as! String)) ?? job
@@ -853,7 +872,12 @@ import Darwin
             var command: [String: Any] = ["command": "commit", "token": token]; if let upload { command["upload"] = upload }
             let result = try await browser.request(command)
             try finishReview(reviewID, job: id, status: "completed", receipt: ["performed": result["performed"] ?? false]); return result
-        } catch { try? finishReview(reviewID, job: id, status: "uncertain", receipt: ["error": error.localizedDescription]); throw error }
+        } catch {
+            // When the page refuses before touching anything ("Nothing was sent by this request"), the action never happened. Calling that "uncertain" asks the person
+            // whether it went through, and then blocks the agent from proposing the same action again.
+            let neverSent = error.localizedDescription.contains("Nothing was sent by this request")
+            try? finishReview(reviewID, job: id, status: neverSent ? "not_sent" : "uncertain", receipt: ["error": error.localizedDescription]); throw error
+        }
     }
     /// Shows the person prepared work under one of their standing rules and waits for their answer, which counts toward what the rule asked for.
     private func reviewCheckpoint(_ args: [String: Any], job: [String: Any]) async throws -> [String: Any] {
@@ -963,6 +987,7 @@ import Darwin
             let decisions = reviewDecisions.values; reviewDecisions.removeAll(); decisions.forEach { $0(false) }
             if let runID { _ = try? await service?.stop(runID) }
             try? store.settleActions(of: id, pending: "cancelled", cause: "stop"); cleanup()
+            refundIfNothingHappened(id)
         }
         var values: [String: Any] = ["status": status]
         if !keepProgress { values["progress"] = status == "cancelled" ? "Cancelled. Check any interrupted external action before retrying." : status == "waiting_user" ? "Browser opened for you. Resume when ready." : "Paused. Saved progress is available." }

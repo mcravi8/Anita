@@ -31,4 +31,7 @@ for line in sys.stdin:
  if 'HISTORY_CHECK' in prompt:assert 'Earlier ChatGPT answer' in prompt
  out({'type':'progress','text':'Claude fixture responding.'})
  text=json.dumps({'ok':True}) if config.get('outputSchema') else 'Claude fixture answer'
+ if 'CLAIM_SCHEDULE' in prompt:text='Yes, I will run this every morning.'
+ if 'CLAIM_RULE' in prompt:text='Done. I saved that rule and will follow it from now on.'
+ if 'CLAIM_PROACTIVE' in prompt:text='Sure, I will keep you posted.'
  out({'type':'result','text':text,'cost':0.01,'error':None})

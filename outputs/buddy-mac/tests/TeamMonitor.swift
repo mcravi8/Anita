@@ -49,6 +49,7 @@ import Foundation
   let factory={BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[1]),runtime:URL(fileURLWithPath:CommandLine.arguments[2]))}
   let monitor=try BuddyTeamMonitor(support:root,makeClaude:factory,keyReader:{_ in "fixture-key"})
   let first=try monitor.status(state);require(first["supervisorId"] as? String==chief,"existing Chief is selected by stable ID without creating an agent")
+  require(first["supervisorName"] as? String=="Chief" && first["supervisorChosen"]==nil,"the status says who supervises and never shows a 'not chosen' flag an agent could take for an unfinished setup")
   monitor.lastError="Fixture diagnostic"
   let diagnostic=try monitor.status(state)
   require(diagnostic["monitorError"] as? String=="Fixture diagnostic" && diagnostic["error"]==nil && (diagnostic["profiles"] as? [[String:Any]])?.count==2,"monitor diagnostics preserve the usable snapshot and never occupy the IPC failure key")

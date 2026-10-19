@@ -69,10 +69,13 @@ import Foundation
         await wait { fake.calls.count == 3 }
         require(Set(fake.calls[1...2].compactMap { ($0.payload["agent"] as? [String: String])?["name"] }) == ["Write Bot", "Search Bot"], "independent agents start together before either is completed")
         require(fake.calls.allSatisfy { $0.options.permissionKeys == r.permissionKeys && $0.options.internalRun && $0.options.finalAnswerOnly }, "every internal turn has common group access and private final-only work")
-        require((fake.calls[1].payload["text"] as? String)?.contains("Current writing instruction") == true, "workers receive current configuration and group history")
+        // The two start together, so which of them is call 1 is not fixed: find each by name.
+        func call(of name: String) -> Int { fake.calls.firstIndex { ($0.payload["agent"] as? [String: String])?["name"] == name }! }
+        let writeCall = call(of: "Write Bot"), searchCall = call(of: "Search Bot")
+        require((fake.calls[writeCall].payload["text"] as? String)?.contains("Current writing instruction") == true, "workers receive current configuration and group history")
         require(fake.calls[1...2].allSatisfy { $0.options.fileScope == r.fileScope }, "workers use the same trusted shared folder")
-        fake.receiver?(["type": "file", "runId": fake.calls[1].payload["runId"]!, "file": ["path": "actual.md", "folderId": r.workspace, "revision": "test-hash", "actorName": "Write Bot"], "internal": true])
-        fake.complete(1, text: "ACTUAL_FIRST_WORK"); fake.complete(2, text: "ACTUAL_SECOND_WORK")
+        fake.receiver?(["type": "file", "runId": fake.calls[writeCall].payload["runId"]!, "file": ["path": "actual.md", "folderId": r.workspace, "revision": "test-hash", "actorName": "Write Bot"], "internal": true])
+        fake.complete(writeCall, text: "ACTUAL_FIRST_WORK"); fake.complete(searchCall, text: "ACTUAL_SECOND_WORK")
         await wait { fake.calls.count == 4 }
         let handoff = fake.calls[3].payload["text"] as? String ?? ""
         require(handoff.contains("ACTUAL_FIRST_WORK") && handoff.contains("ACTUAL_SECOND_WORK"), "reviewer receives actual completed dependency work")

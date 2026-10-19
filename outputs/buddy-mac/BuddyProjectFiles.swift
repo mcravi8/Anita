@@ -332,6 +332,43 @@ struct BuddyFileReceipt: Codable {
         guard Self.hash(data) == record.previousHash else { throw failure("version_missing", "The backup could not be verified. The current file hasn’t changed.") }
         return try writeBytes(scope, path: path, data: data, expectedVersion: expectedVersion, actor: "you", actorName: "You", kind: "restored")
     }
+    /// Copies whole files between two folders in native code (a connected folder into a coding project, and a project's results back out), so a large
+    /// script or dataset never has to pass through the model as text. A path ending in "/" stands for every file under that folder ("/" for all of them).
+    /// Sources are only read. Copying in replaces an earlier copy and keeps the project's version check and history; copying out only creates files, so it
+    /// can never overwrite one of the person's. A file that can't be copied is reported and the rest still copy.
+    func copy(from source: BuddyFileScope, to destination: BuddyFileScope, paths: [String], into subfolder: String = "", replacing: Bool = true, actor: String, actorName: String) throws -> [String: Any] {
+        _ = try location(source); _ = try location(destination)
+        guard source.folderId != destination.folderId else { throw failure("invalid_arguments", "Choose a different folder to copy from. Files already in the destination don’t need copying.") }
+        guard !paths.isEmpty, paths.count <= Self.maximumCopiedFiles, Set(paths).count == paths.count else { throw failure("invalid_arguments", "Choose between 1 and \(Self.maximumCopiedFiles) different files or folders.") }
+        var copied: [[String: Any]] = [], failed: [[String: Any]] = [], total = 0, incomplete = false, listing: [String: Any]?, wanted: [String] = []
+        for entry in paths {
+            guard entry.hasSuffix("/") else { wanted.append(entry); continue }
+            let all = try listing ?? list(source); listing = all
+            let found = (all["files"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }.filter { entry == "/" || $0.hasPrefix(entry) }
+            if found.isEmpty { failed.append(["path": entry, "error": "This folder has no files Buddy can copy."]) }
+            if all["limited"] as? Bool == true { incomplete = true }
+            wanted += found
+        }
+        var seen = Set<String>()
+        for path in wanted where seen.insert(path).inserted {
+            do {
+                guard copied.count < Self.maximumCopiedFiles else { throw failure("too_many_files", "This call copies up to \(Self.maximumCopiedFiles) files; copy the rest in another call."); }
+                let data = try readBytes(source, path: path)
+                guard total + data.count <= Self.maximumCopiedBytes else { throw failure("file_too_large", "This call copies up to \(Self.maximumCopiedBytes / 1_048_576) MB; copy the rest in another call.") }
+                let target = subfolder.isEmpty ? path : subfolder.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/" + path
+                let existing = try? readBytes(destination, path: target)
+                if existing != nil && !replacing { throw failure("file_exists", "A file named \(target) already exists. Copying never overwrites a file; choose another subfolder.") }
+                _ = try writeBytes(destination, path: target, data: data, expectedVersion: existing.map { Self.hash($0) } ?? "", actor: actor, actorName: actorName)
+                total += data.count
+                copied.append(["path": path, "to": target, "bytes": data.count, "version": Self.hash(data), "replaced": existing != nil])
+            } catch { failed.append(["path": path, "error": error.localizedDescription]) }
+        }
+        var result: [String: Any] = ["copied": copied, "failed": failed, "totalBytes": total, "folderId": destination.folderId]
+        if incomplete { result["note"] = "The folder holds more files than Buddy lists at once, so some may not have been included. Name the remaining files or subfolders." }
+        return result
+    }
+    static let maximumCopiedFiles = 200
+    static let maximumCopiedBytes = 64 * 1024 * 1024
     static var tools: [[String: Any]] {
         func schema(_ properties: [String: Any], required: [String]) -> [String: Any] { ["type": "object", "additionalProperties": false, "properties": properties, "required": required] }
         let path: [String: Any] = ["type": "string", "description": "Relative non-hidden path inside the selected connected folder."]

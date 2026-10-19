@@ -113,6 +113,15 @@ import AppKit
         _ = try await call(["action":"continue","taskId":codingID,"goal":"Run the syntax check once more as this explicit follow-up."],requestID:"follow-up")
         let followed=try await wait(codingID,for:"completed")
         require(followed["attempt"] as? Int==2 && (followed["commands"] as? [[String:Any]])?.count==2,"completed coding session resumes saved SDK context for an explicit follow-up")
+        // Files in a connected folder reach the project natively, however large; the model never sees their contents.
+        let copySource=support.appendingPathComponent("Copy source"),dataset=Data((0..<2_500_000).map{UInt8(truncatingIfNeeded:$0 &* 7)})
+        try FileManager.default.createDirectory(at:copySource.appendingPathComponent("data"),withIntermediateDirectories:true);try dataset.write(to:copySource.appendingPathComponent("data/prices.csv"))
+        let connectedID=try BuddyProjectFiles(support:support).addFolder(workspace,to:copySource)["folderId"] as! String
+        let copyTask=try await call(["action":"start","title":"Copy fixture","goal":"COPY_FIXTURE "+connectedID],requestID:"copy")["task"] as! [String:Any],copyID=copyTask["id"] as! String
+        let copied=try await wait(copyID,for:"completed")
+        require(try Data(contentsOf:support.appendingPathComponent("Worker/Tasks/"+copyID+"/Files/data/prices.csv"))==dataset,"a connected folder's file reaches the coding project byte for byte without passing through the model")
+        require((copied["commands"] as? [[String:Any]])?.first?["output"] as? String=="2500000\n","a command in the project reads the copied file")
+        require(try Data(contentsOf:copySource.appendingPathComponent("results/data/prices.csv"))==dataset,"a result saved from the project reaches the connected folder byte for byte")
         let net=try await call(["action":"start","title":"Network review fixture","goal":"NETWORK_REVIEW_FIXTURE"],requestID:"network")["task"] as! [String:Any],netID=net["id"] as! String
         _ = try await wait(netID,for:"waiting_review")
         let pending=try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"detail","taskId":netID])["task"] as! [String:Any],review=(pending["reviews"] as! [[String:Any]]).last!

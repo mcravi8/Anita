@@ -226,6 +226,9 @@ import CryptoKit
         let w=state["conversationWorkspace"] as? String ?? "",ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
         var out=(value["settings"] as? [String:[String:Any]])?[w] ?? [:]
         out["agents"]=Dictionary(uniqueKeysWithValues:ids.map{($0,configuration(out,agent:$0))})
+        // Whether the person has ever opened the supervisor menu is bookkeeping, not a missing step: agents read this status, and one took the flag for an unfinished setup and kept telling the person to "choose" a supervisor that was already set.
+        out.removeValue(forKey:"supervisorChosen")
+        if let id=out["supervisorId"] as? String,let name=(state["agents"] as? [[String:Any]] ?? []).first(where:{$0["id"] as? String==id})?["name"] as? String {out["supervisorName"]=name}
         out["workspace"]=w;out["checkInModel"]=checkInModel(out);out["checks"]=checks.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}.suffix(80).map{var j=$0;j.removeValue(forKey:"input");return j}
         out["journalRevision"]=value["journalRevision"] as? Int ?? 0
         out["updates"]=updates.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}

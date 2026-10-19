@@ -13,7 +13,7 @@ struct BuddyOperationsFailure: LocalizedError {
 /// original dictionary as JSON in `body`, so the code above the store sees exactly the shape it always saw.
 final class BuddyOperationsDB {
     static let fileName = "operations.sqlite"
-    static let schemaVersion: Int64 = 4
+    static let schemaVersion: Int64 = 5
     /// Called just before COMMIT and just after it. Only the crash tests set them, to end the process at each commit boundary.
     static var beforeCommit: (() -> Void)?
     static var afterCommit: (() -> Void)?
@@ -69,6 +69,7 @@ final class BuddyOperationsDB {
         if version < 2 { try createVersion2() }
         if version < 3 { try createVersion3() }
         if version < 4 { try createVersion4() }
+        if version < 5 { try createVersion5() }
     }
     private func createVersion1() throws {
         try transaction {
@@ -226,6 +227,33 @@ final class BuddyOperationsDB {
                     PRIMARY KEY(workspace, scope, scope_id, period))
                 """)
             try run("PRAGMA user_version = 4")
+        }
+    }
+    /// Version 5: what needs the person, one record per blocker, and whether an alert was read or dismissed.
+    private func createVersion5() throws {
+        try transaction {
+            // `id` is the blocker's identity (the same blocker is never recorded twice). `status` is open until the state that caused it ends.
+            try run("""
+                CREATE TABLE IF NOT EXISTS decisions(
+                    id TEXT PRIMARY KEY,
+                    workspace TEXT NOT NULL,
+                    agent_id TEXT NOT NULL DEFAULT '',
+                    task_id TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    question TEXT NOT NULL DEFAULT '',
+                    label TEXT NOT NULL DEFAULT '',
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    resolution TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT)
+                """)
+            try run("CREATE INDEX IF NOT EXISTS decisions_open ON decisions(workspace, status)")
+            try run("CREATE INDEX IF NOT EXISTS decisions_task ON decisions(task_id, status)")
+            // Read and dismissed state of any alert, by its id. Reading or dismissing never approves anything.
+            try run("CREATE TABLE IF NOT EXISTS notification_state(workspace TEXT NOT NULL, id TEXT NOT NULL, read INTEGER NOT NULL DEFAULT 0, dismissed INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, PRIMARY KEY(workspace, id))")
+            try run("PRAGMA user_version = 5")
         }
     }
     /// The row number SQLite gave the most recent INSERT on this connection.

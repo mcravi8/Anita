@@ -39,3 +39,47 @@ test('an action that may not have gone through is something to check, whatever s
  assert.notEqual(A.collect(state,worker(t))[0].id,A.collect(state,worker({...t,unconfirmedCount:2}))[0].id,'a further unconfirmed action is a new item');
  assert.equal(A.collect(state,worker({...t,unconfirmedCount:0,status:'completed'}))[0].kind,'finished','finished work with nothing unconfirmed is unchanged');
 });
+test('the app reports one blocker per cause, and the list shows exactly those, the work in progress, and what finished',()=>{
+ const task={id:'t',workspace:'w',agentId:'inbox',title:'Apply',status:'waiting_review',attempt:1,attentionKey:'review:one',progress:'Needs your review',updatedAt:'2026-10-18T18:00:00Z'};
+ const decision={id:'review:one',kind:'signin',agentId:'inbox',taskId:'t',title:'Sign-in needs your choice',question:'Choose how to sign in to https://example.com.',actionLabel:'Review',createdAt:'2026-10-18T18:00:00Z'};
+ const worker={workspace:'w',tasks:[task],decisions:[decision]};
+ const items=A.collect(state,worker);
+ assert.deepEqual(items.map(i=>[i.id,i.kind]),[['decision:review:one','needs']],'one sign-in issue is one item, though the task also looks "waiting"');
+ assert.equal(items[0].taskId,'t');assert.equal(items[0].unread,true);assert.equal(items[0].description,'Choose how to sign in to https://example.com.');
+ const legacy=A.collect(state,{workspace:'w',tasks:[task]});assert.equal(legacy.length,1,'before the app reports blockers, task states still stand in');assert.equal(legacy[0].id.startsWith('task:'),true);
+ const running=A.collect(state,{workspace:'w',tasks:[{...task,status:'running',progress:'Reading the job page'},{...task,id:'q',status:'queued'},{...task,id:'p',status:'paused'}],decisions:[]});
+ assert.deepEqual(running.map(i=>i.kind).sort(),['working','working'],'running and queued work is listed as working, paused is not');
+ assert.equal(running.every(i=>i.unread===false)&&A.unreadCounts(running).needs===0&&A.unreadCounts(running).finished===0,true,'working is never unread and never counted');
+ assert.match(running.find(i=>i.taskId==='t').description,/Reading the job page/);
+ const failed=A.collect(state,{workspace:'w',tasks:[{...task,status:'failed',progress:'The site did not answer.'}],decisions:[{id:'stopped:t:1:failed',kind:'stopped',agentId:'inbox',taskId:'t',title:'Apply',question:'The site did not answer.',actionLabel:'Open task',createdAt:'2026-10-18T18:05:00Z'}]});
+ assert.equal(failed.length,1,'a failed task is one item');
+ const done=A.collect(state,{workspace:'w',tasks:[{...task,status:'completed'}],decisions:[]});assert.deepEqual(done.map(i=>i.kind),['finished'],'a finished task is still listed as finished');
+});
+test('read and dismissed state is the app’s once it answers, separate from each other, and never changes the work',()=>{
+ const task={id:'t',workspace:'w',agentId:'inbox',title:'Apply',status:'completed',attempt:1,updatedAt:'2026-10-18T18:00:00Z'};
+ const worker=n=>({workspace:'w',tasks:[task],decisions:[],notifications:n});
+ const id=A.collect(state,worker({}))[0].id;
+ assert.equal(A.collect(state,worker({}))[0].unread,true);
+ assert.equal(A.collect(state,worker({[id]:{read:true,dismissed:false}}))[0].unread,false,'the app marks it read');
+ const localRead={...state,activitySeen:{[id]:true}};
+ assert.equal(A.collect(localRead,worker({[id]:{read:false,dismissed:false}}))[0].unread,true,'the app’s answer wins over the page’s copy');
+ assert.equal(A.collect(localRead,worker({}))[0].unread,false,'the page’s copy stands in when the app has no record');
+ assert.deepEqual(A.collect(state,worker({[id]:{read:true,dismissed:true}})),[],'a dismissed alert is hidden');
+ assert.equal(A.collect(state,worker({[id]:{read:false,dismissed:true}})).length,0,'dismissed does not depend on read');
+ const local={...state};A.dismiss(local,[id]);assert.deepEqual(A.collect(local,worker({})),[],'the page’s copy hides it too when the app has no record');
+ A.dismiss(local,[id],false);assert.equal(A.collect(local,worker({})).length,1,'a dismissal can be undone');
+ const stuck={id:'d',kind:'stopped',agentId:'inbox',taskId:'t',title:'Apply',question:'Stopped.',actionLabel:'Open task',createdAt:'2026-10-18T19:00:00Z'};
+ const dismissedNeed=A.collect(state,{workspace:'w',tasks:[{...task,status:'failed'}],decisions:[stuck],notifications:{'decision:d':{read:false,dismissed:true}}});
+ assert.deepEqual(dismissedNeed,[],'dismissing hides the alert');
+ const stillThere=[{...task,status:'failed'}];assert.equal(stillThere[0].status,'failed','and the task itself is untouched');
+});
+test('the bell, the chat badge and the Background work badge agree about one blocker',()=>{
+ const task={id:'t',workspace:'w',agentId:'inbox',title:'Apply',status:'waiting_user',attempt:1,updatedAt:'2026-10-18T18:00:00Z'};
+ const d={id:'waiting:t:1',kind:'waiting',agentId:'inbox',taskId:'t',title:'Apply',question:'Browser opened for you.',actionLabel:'Open task',createdAt:'2026-10-18T18:00:00Z'};
+ const items=A.collect(state,{workspace:'w',tasks:[task],decisions:[d]}),counts=A.unreadCounts(items);
+ assert.equal(counts.needs,1);assert.equal(A.workUnread(items),1);assert.equal(items.filter(i=>i.agentId==='inbox'&&i.kind==='needs'&&i.unread).length,1);
+ const read=A.collect(state,{workspace:'w',tasks:[task],decisions:[d],notifications:{'decision:waiting:t:1':{read:true,dismissed:false}}});
+ assert.equal(A.unreadCounts(read).needs,0);assert.equal(A.workUnread(read),0);assert.equal(read.length,1,'read keeps it listed, still needing you');
+ const resolved=A.collect(state,{workspace:'w',tasks:[{...task,status:'running'}],decisions:[]});
+ assert.equal(A.unreadCounts(resolved).needs,0);assert.equal(A.workUnread(resolved),0);assert.equal(resolved.filter(i=>i.kind==='needs').length,0,'resolving the blocker removes every representation of it');
+});

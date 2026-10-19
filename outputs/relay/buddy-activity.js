@@ -1,6 +1,6 @@
 (function(root){
   'use strict';
-  const needs=new Set(['waiting_review','waiting_user','failed','interrupted']);
+  const needs=new Set(['waiting_review','waiting_user','failed','interrupted']),working=new Set(['queued','running','starting','stopping']);
   function describe(error){
     const raw=String(error||'');
     if(/referenced work outside|did not include a source/.test(raw))return 'The team summary used a source reference Buddy could not verify. Retry the update.';
@@ -18,13 +18,28 @@
   function collect(state,worker={},team={}){
     const agents=new Set((state.agents||[]).map(a=>a.id)),groups=new Set((state.groups||[]).map(g=>g.id)),items=[];
     const name=id=>(state.agents||[]).find(a=>a.id===id)?.name||'Agent';
-    const add=item=>items.push({...item,unread:state.activitySeen?.[item.id]!==true});
+    // Read and dismissed state lives with the app once it has answered; the page keeps a copy for when it cannot.
+    const native=worker.workspace===state.conversationWorkspace?(worker.notifications||{}):{};
+    const isRead=id=>native[id]?native[id].read===true:state.activitySeen?.[id]===true;
+    const isDismissed=id=>native[id]?native[id].dismissed===true:state.activityDismissed?.[id]===true;
+    const add=item=>{if(isDismissed(item.id))return;items.push({...item,unread:!isRead(item.id)});};
     const tasks=worker.workspace===state.conversationWorkspace?(worker.tasks||[]):[];
+    // Once the app reports its blockers (one per cause), they are the "needs you" list for background work; before that, task states stand in.
+    const useDecisions=worker.workspace===state.conversationWorkspace&&Array.isArray(worker.decisions);
     for(const t of tasks){
       // An action that may or may not have gone through is something to check, whatever state the task is in.
+      if(useDecisions&&agents.has(t.agentId)&&(!t.workspace||t.workspace===state.conversationWorkspace)){
+        if(t.status==='completed')add({id:`task:${t.id}:${t.attempt||0}:${t.status}:${t.attentionKey||''}`,kind:'finished',title:t.title||'Agent task',description:'The task finished. Open it to see the result.',agentId:t.agentId,at:t.updatedAt||t.createdAt,taskId:t.id,actionLabel:'View result'});
+        else if(working.has(t.status))items.push({id:`working:${t.id}:${t.attempt||0}`,kind:'working',unread:false,title:t.title||'Agent task',description:String(t.progress||'Working on it.').slice(0,200),agentId:t.agentId,at:t.updatedAt||t.createdAt,taskId:t.id,actionLabel:'Open task'});
+        continue;
+      }
       const unsure=Number(t.unconfirmedCount)||0,asks=needs.has(t.status)||unsure>0;
       if(t.workspace&&t.workspace!==state.conversationWorkspace||!agents.has(t.agentId)||!asks&&t.status!=='completed')continue;
       add({id:`task:${t.id}:${t.attempt||0}:${t.status}:${t.attentionKey||''}${unsure?':check'+unsure:''}`,kind:asks?'needs':'finished',title:t.title||'Agent task',description:needs.has(t.status)?describe(t.progress):unsure?(unsure===1?'An action may not have gone through. Open the task to check.':`${unsure} actions may not have gone through. Open the task to check.`):'The task finished. Open it to see the result.',agentId:t.agentId,at:t.updatedAt||t.createdAt,taskId:t.id,actionLabel:needs.has(t.status)?'Open task':unsure?'Check action':'View result'});
+    }
+    if(useDecisions)for(const d of worker.decisions){
+      if(d.agentId&&!agents.has(d.agentId))continue;
+      add({id:'decision:'+d.id,kind:'needs',title:d.title||'Needs you',description:['stopped','waiting','limit'].includes(d.kind)?describe(d.question):String(d.question||'').slice(0,240),agentId:d.agentId||undefined,at:d.createdAt,taskId:d.taskId,actionLabel:d.actionLabel||'Open task'});
     }
     if(worker.workspace===state.conversationWorkspace){
       const issues=new Map();
@@ -52,47 +67,67 @@
   }
   function splitChats(state,entries){const hidden=new Set(state.hiddenAgents||[]);return {visible:entries.filter(e=>e.isGroup||!hidden.has(e.id)),hidden:entries.filter(e=>!e.isGroup&&hidden.has(e.id))};}
   function markRead(state,ids,read=true){state.activitySeen||={};for(const id of ids)state.activitySeen[id]=read;}
+  function dismiss(state,ids,dismissed=true){state.activityDismissed||={};for(const id of ids)state.activityDismissed[id]=dismissed;}
+  // Unread alerts about background work: the number on the Background work entry, which must agree with the bell and the chat badges.
+  function workUnread(items){return items.filter(i=>i.unread&&(i.taskId||i.routineId||i.id.startsWith('routine-group:')||i.id.startsWith('scheduler:'))).length;}
   function unreadCounts(items){return {needs:items.filter(i=>i.kind==='needs'&&i.unread).length,finished:items.filter(i=>i.kind==='finished'&&i.unread).length};}
-  const api={collect,splitChats,describe,markRead,unreadCounts};root.BuddyActivity=api;if(typeof module!=='undefined')module.exports=api;if(typeof document==='undefined')return;
+  const api={collect,splitChats,describe,markRead,dismiss,unreadCounts,workUnread};root.BuddyActivity=api;if(typeof module!=='undefined')module.exports=api;if(typeof document==='undefined')return;
   let worker={},team={},workerError='',tab='needs';
+  // Marks alerts read, unread or dismissed. The page copy changes at once; the app's copy is the shared one and answers with the full state.
+  function setState(ids,patch){
+    state.activitySeen||={};state.activityDismissed||={};worker.notifications||={};
+    for(const id of ids){
+      if('read' in patch)state.activitySeen[id]=patch.read;
+      if('dismissed' in patch)state.activityDismissed[id]=patch.dismissed;
+      worker.notifications[id]={read:state.activitySeen[id]===true,dismissed:state.activityDismissed[id]===true,...(worker.notifications[id]||{}),...patch};
+    }
+    save();changed();
+    if(!window.BuddyDesktop?.worker||worker.workspace!==state.conversationWorkspace)return;
+    for(let i=0;i<ids.length;i+=400)Promise.resolve(window.BuddyDesktop.worker({operation:'notify',ids:ids.slice(i,i+400),...patch})).then(r=>{if(r?.notifications){worker.notifications=r.notifications;changed();}}).catch(()=>{});
+  }
   const all=()=>collect(state,worker,team),counts=()=>unreadCounts(all());
   const date=value=>value&&Number.isFinite(Date.parse(value))?new Date(value).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'';
   const hidden=id=>(state.hiddenAgents||[]).includes(id);
   api.nav=()=>`<button type="button" class="icon-button activity-nav" data-activity-open aria-label="Notifications" title="Notifications">${icon('bell')}<span data-activity-count hidden></span></button>`;
   api.chatBadge=id=>`<span class="chat-activity-badge" data-chat-activity="${esc(id)}"></span>`;
   api.hideMenu=id=>`<button type="button" class="menu-row" data-hide-agent="${esc(id)}">${icon(hidden(id)?'eye':'eye-off')}<span>${hidden(id)?'Show agent in chat list':'Hide agent'}<small>${hidden(id)?'Move back above the Hidden section.':'Keep their work running in the Hidden section.'}</small></span>${icon('chevron')}</button>`;
-  api.chats=(entries,row)=>{const parts=splitChats(state,entries);return parts.visible.map(row).join('')+(parts.hidden.length?`<details class="hidden-agents" ${state.hiddenAgentsOpen||ui.chatFilter?'open':''}><summary>Hidden <span>${parts.hidden.length}</span><span data-hidden-attention></span>${icon('down')}</summary>${parts.hidden.map(row).join('')}</details>`:'');};
+  api.chats=(entries,row)=>{const parts=splitChats(state,entries);return parts.visible.map(row).join('')+(parts.hidden.length?`<details class="hidden-agents" ${state.hiddenAgentsOpen||ui.chatFilter?'open':''}><summary title="${parts.hidden.length} hidden agents" aria-label="${parts.hidden.length} hidden agents"><span class="hidden-agents-label">Hidden</span><span class="hidden-agents-count">${parts.hidden.length}</span><span data-hidden-attention></span>${icon('down')}</summary>${parts.hidden.map(row).join('')}</details>`:'');};
   function paint(){
     const list=all(),count=counts();
     document.querySelectorAll('[data-activity-count]').forEach(el=>{el.textContent=count.needs+count.finished;el.hidden=!(count.needs+count.finished);el.classList.toggle('has-needs',count.needs>0);el.parentElement.setAttribute('aria-label',`Notifications: ${count.needs} need you, ${count.finished} finished`);});
     document.querySelectorAll('[data-chat-activity]').forEach(el=>{const id=el.dataset.chatActivity,n=list.filter(i=>(i.agentId===id||i.groupId===id)&&i.kind==='needs'&&i.unread).length,f=list.filter(i=>(i.agentId===id||i.groupId===id)&&i.kind==='finished'&&i.unread).length;el.innerHTML=n?`<span class="activity-dot needs" title="${n} unread alerts" aria-label="${n} unread alerts">${n}</span>`:f?`<span class="activity-dot finished" title="${f} finished" aria-label="${f} finished">${icon('check')}</span>`:'';});
     const hiddenCount=list.filter(i=>hidden(i.agentId)&&i.kind==='needs'&&i.unread).length;document.querySelectorAll('[data-hidden-attention]').forEach(el=>el.textContent=hiddenCount?`${hiddenCount} unread`:'');
-    const workCount=list.filter(i=>i.unread&&(i.taskId||i.routineId||i.id.startsWith('routine-group:')||i.id.startsWith('scheduler:'))).length;document.querySelectorAll('[data-worker-badge]').forEach(el=>{el.textContent=workCount||'';el.hidden=!workCount;});
+    const workCount=workUnread(list);document.querySelectorAll('[data-worker-badge]').forEach(el=>{el.textContent=workCount||'';el.hidden=!workCount;});
   }
   api.paint=paint;
   function draw(){
     const panel=document.querySelector('[data-activity-panel]');if(!panel)return;
     const focus=document.activeElement?.dataset?.activityToggle,list=all(),count=counts(),shown=list.filter(i=>i.kind===tab);
-    panel.innerHTML=`<div class="activity-tabs" role="tablist" aria-label="Notifications"><button type="button" id="activity-needs" role="tab" aria-controls="activity-list" aria-selected="${tab==='needs'}" data-activity-tab="needs">Needs you${count.needs?` <span>${count.needs}</span>`:''}</button><button type="button" id="activity-finished" role="tab" aria-controls="activity-list" aria-selected="${tab==='finished'}" data-activity-tab="finished">Finished${count.finished?` <span>${count.finished}</span>`:''}</button></div><div class="activity-toolbar"><p>Badges count unread updates. Reading an alert keeps the issue here.</p>${count.needs+count.finished?'<button type="button" class="small-link" data-activity-read-all>Mark all as read</button>':''}</div>${workerError?`<p class="field-error" role="status">Couldn’t refresh background work. Showing saved updates. <button type="button" class="small-link" data-activity-refresh>Try again</button></p>`:''}<div class="activity-list" id="activity-list" role="tabpanel" aria-labelledby="activity-${tab}">${shown.map(i=>`<section class="activity-entry ${i.unread?'unread':''}"><button type="button" class="activity-item ${i.unread?'unread':''}" data-activity-id="${esc(i.id)}" ${i.taskId?`data-worker-task="${esc(i.taskId)}"`:i.routineId?`data-worker-routine="${esc(i.routineId)}"`:i.planId?`data-team-plan="${esc(i.planId)}"`:i.checkId?`data-team-open-check="${esc(i.checkId)}"`:`data-action="${esc(i.action)}" ${i.target?`data-id="${esc(i.target)}"`:''}`}><span>${i.agentId&&findAgent(i.agentId)?avatar(i.agentId,true):i.groupId?groupAvatar(i.groupId,true):icon(i.kind==='needs'?'info':'check')}</span><span><strong>${esc(i.title)}</strong><span class="activity-description">${esc(i.description)}</span><small>${esc(i.agentId?agentName(i.agentId):i.groupId?'Team':'Buddy')}${i.at?` · ${esc(date(i.at))}`:''}</small><span class="activity-caption ${i.kind}">${esc(i.actionLabel||(i.kind==='needs'?'Review':'View result'))}</span></span>${icon('chevron')}</button><div class="activity-entry-footer"><span>${i.unread?'Unread':'Read'}${!i.unread&&i.kind==='needs'?' · Still needs attention':''}</span><button type="button" class="small-link" data-activity-toggle="${esc(i.id)}">Mark as ${i.unread?'read':'unread'}</button></div></section>`).join('')||`<div class="agent-messages-empty"><h3>${tab==='needs'?'Nothing needs you':'No finished work yet'}</h3><p>${tab==='needs'?'Decisions, sign-ins and work that needs attention will appear here.':'Completed tasks and team work will appear here.'}</p></div>`}</div>`;
+    const tabButton=(id,label,n)=>`<button type="button" id="activity-${id}" role="tab" aria-controls="activity-list" aria-selected="${tab===id}" data-activity-tab="${id}">${label}${n?` <span>${n}</span>`:''}</button>`;
+    const emptyText={needs:['Nothing needs you','Decisions, sign-ins and work that needs attention will appear here.'],working:['Nothing is running','Work in progress will appear here while it runs.'],finished:['No finished work yet','Completed tasks and team work will appear here.']}[tab]||['Nothing here',''];
+    panel.innerHTML=`<div class="activity-tabs" role="tablist" aria-label="Notifications">${tabButton('needs','Needs you',count.needs)}${tabButton('working','Working',list.filter(i=>i.kind==='working').length)}${tabButton('finished','Finished',count.finished)}</div><div class="activity-toolbar"><p>Badges count unread updates. Reading or dismissing an alert never approves anything, and work that still needs you stays in its task.</p>${tab!=='working'&&shown.length?`<span class="activity-toolbar-actions">${shown.some(i=>i.unread)?'<button type="button" class="small-link" data-activity-read-all>Mark all as read</button>':''}<button type="button" class="small-link" data-activity-dismiss-all>Dismiss all</button></span>`:''}</div>${workerError?`<p class="field-error" role="status">Couldn’t refresh background work. Showing saved updates. <button type="button" class="small-link" data-activity-refresh>Try again</button></p>`:''}<div class="activity-list" id="activity-list" role="tabpanel" aria-labelledby="activity-${tab}">${shown.map(i=>`<section class="activity-entry ${i.unread?'unread':''}"><button type="button" class="activity-item ${i.unread?'unread':''}" data-activity-id="${esc(i.id)}" ${i.taskId?`data-worker-task="${esc(i.taskId)}"`:i.routineId?`data-worker-routine="${esc(i.routineId)}"`:i.planId?`data-team-plan="${esc(i.planId)}"`:i.checkId?`data-team-open-check="${esc(i.checkId)}"`:`data-action="${esc(i.action)}" ${i.target?`data-id="${esc(i.target)}"`:''}`}><span>${i.agentId&&findAgent(i.agentId)?avatar(i.agentId,true):i.groupId?groupAvatar(i.groupId,true):icon(i.kind==='needs'?'info':i.kind==='working'?'clock':'check')}</span><span><strong>${esc(i.title)}</strong><span class="activity-description">${esc(i.description)}</span><small>${esc(i.agentId?agentName(i.agentId):i.groupId?'Team':'Buddy')}${i.at?` · ${esc(date(i.at))}`:''}</small><span class="activity-caption ${i.kind}">${esc(i.actionLabel||(i.kind==='needs'?'Review':'View result'))}</span></span>${icon('chevron')}</button>${i.kind==='working'?'':`<div class="activity-entry-footer"><span>${i.unread?'Unread':'Read'}${!i.unread&&i.kind==='needs'?' · Still needs attention':''}</span><span class="activity-entry-actions"><button type="button" class="small-link" data-activity-toggle="${esc(i.id)}">Mark as ${i.unread?'read':'unread'}</button><button type="button" class="small-link" data-activity-dismiss="${esc(i.id)}">Dismiss</button></span></div>`}</section>`).join('')||`<div class="agent-messages-empty"><h3>${emptyText[0]}</h3><p>${emptyText[1]}</p></div>`}</div>`;
     if(focus)panel.querySelector(`[data-activity-toggle="${CSS.escape(focus)}"]`)?.focus();
   }
   function changed(){paint();draw();}
-  api.acceptWorker=value=>{if(value.workspace!==state.conversationWorkspace)return;worker=value;workerError='';changed();};
+  // The page keeps its own copy of the app's answer, so marking something read here never edits what the caller handed in.
+  api.acceptWorker=value=>{if(value.workspace!==state.conversationWorkspace)return;worker={...value,notifications:{...(value.notifications||{})}};workerError='';changed();};
   api.acceptTeam=value=>{if(value.workspace!==state.conversationWorkspace)return;team=value;changed();};
   api.workerError=error=>{workerError=String(error||'');changed();};
-  api.open=()=>{tab=all().some(i=>i.kind==='needs')?'needs':'finished';openDrawer('Notifications','<div data-activity-panel></div>');draw();};
+  api.open=()=>{const kinds=new Set(all().map(i=>i.kind));tab=kinds.has('needs')?'needs':kinds.has('working')?'working':'finished';openDrawer('Notifications','<div data-activity-panel></div>');draw();};
   function repaintSidebar(){const old=document.querySelector('.sidebar');if(!old)return;old.outerHTML=sidebar();bindSidebarSearch();paint();}
   document.addEventListener('click',e=>{
     if(e.target.closest('[data-activity-open]')){api.open();return;}
     const choice=e.target.closest('[data-activity-tab]');if(choice){tab=choice.dataset.activityTab;draw();document.querySelector(`[data-activity-tab="${tab}"]`)?.focus();return;}
-    const toggle=e.target.closest('[data-activity-toggle]');if(toggle){const item=all().find(i=>i.id===toggle.dataset.activityToggle);if(item){markRead(state,[item.id],item.unread);save();changed();}return;}
-    if(e.target.closest('[data-activity-read-all]')){markRead(state,all().map(i=>i.id));save();changed();return;}
+    const toggle=e.target.closest('[data-activity-toggle]');if(toggle){const item=all().find(i=>i.id===toggle.dataset.activityToggle);if(item)setState([item.id],{read:item.unread});return;}
+    if(e.target.closest('[data-activity-read-all]')){setState(all().filter(i=>i.kind===tab).map(i=>i.id),{read:true});return;}
+    const dismissOne=e.target.closest('[data-activity-dismiss]');if(dismissOne){setState([dismissOne.dataset.activityDismiss],{dismissed:true});return;}
+    if(e.target.closest('[data-activity-dismiss-all]')){setState(all().filter(i=>i.kind===tab).map(i=>i.id),{dismissed:true});return;}
     const hide=e.target.closest('[data-hide-agent]');if(hide){const id=hide.dataset.hideAgent;if(!findAgent(id))return;state.hiddenAgents=hidden(id)?state.hiddenAgents.filter(x=>x!==id):[...(state.hiddenAgents||[]),id];save();if(hide.closest('#bot-settings'))hide.outerHTML=api.hideMenu(id);else closeModal();repaintSidebar();showToast(hidden(id)?`${agentName(id)} moved to Hidden.`:`${agentName(id)} is back in your chats.`);return;}
-    const item=e.target.closest('[data-activity-id]');if(item){markRead(state,[item.dataset.activityId]);save();paint();}
-    const chat=e.target.closest('[data-action="chat"]');if(chat){markRead(state,all().filter(i=>i.kind==='finished'&&(i.target===chat.dataset.id||i.agentId===chat.dataset.id)).map(i=>i.id));save();paint();}
+    const item=e.target.closest('[data-activity-id]');if(item&&!item.dataset.activityId.startsWith('working:'))setState([item.dataset.activityId],{read:true});
+    const chat=e.target.closest('[data-action="chat"]');if(chat){const ids=all().filter(i=>i.kind==='finished'&&i.unread&&(i.target===chat.dataset.id||i.agentId===chat.dataset.id)).map(i=>i.id);if(ids.length)setState(ids,{read:true});}
     if(e.target.closest('[data-activity-refresh]'))window.BuddyWorkerUI?.refresh();
   });
-  document.addEventListener('keydown',e=>{if(!e.target.matches('[data-activity-tab]')||!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();tab=e.key==='Home'?'needs':e.key==='End'?'finished':tab==='needs'?'finished':'needs';draw();document.querySelector(`[data-activity-tab="${tab}"]`)?.focus();});
+  document.addEventListener('keydown',e=>{if(!e.target.matches('[data-activity-tab]')||!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();const order=['needs','working','finished'],at=order.indexOf(tab);tab=e.key==='Home'?'needs':e.key==='End'?'finished':order[(at+(e.key==='ArrowRight'?1:order.length-1))%order.length];draw();document.querySelector(`[data-activity-tab="${tab}"]`)?.focus();});
   document.addEventListener('toggle',e=>{if(e.target.matches?.('.hidden-agents')&&!ui.chatFilter){state.hiddenAgentsOpen=e.target.open;save();}},true);
   window.addEventListener('buddy-view-updated',paint);window.addEventListener('buddy-conversation',()=>setTimeout(changed,0));repaintSidebar();paint();
 })(typeof globalThis!=='undefined'?globalThis:this);

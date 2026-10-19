@@ -177,6 +177,7 @@ struct BuddyAttempt {
         if jobs.count > Self.archiveTrigger { try? archiveFinished(keeping: Self.archiveKeep) }
         try recordBaseline()
         try recordBudgetBaseline()
+        try reconcileDecisions()
         try backfillActions()
         var interrupted: [(old: [String: Any], new: [String: Any])] = []
         for i in jobs.indices where Self.interrupted.contains(jobs[i]["status"] as? String ?? "") {
@@ -297,7 +298,7 @@ struct BuddyAttempt {
     /// Past this many events, those of archived tasks are dropped oldest first (never one a consumer has still to receive).
     static var eventLimit = 100_000
 
-    private static func stamp() -> String { ISO8601DateFormatter().string(from: Date()) }
+    private static func stamp(_ date: Date = Date()) -> String { ISO8601DateFormatter().string(from: date) }
 
     /// Adds one entry to a task's history, and one outbox row for every registered consumer. The caller's transaction holds both.
     static func appendEvent(_ type: String, task: [String: Any], attempt: Int?, cause: String = "", payload: [String: Any] = [:], in db: BuddyOperationsDB) throws {
@@ -329,6 +330,7 @@ struct BuddyAttempt {
         }
         try syncActions(new, from: old, cause: cause, in: db)
         try syncBudget(new, from: old, cause: cause, in: db)
+        try syncDecisions(new, in: db)
     }
 
     /// Tasks that were already there when history began (a first start after the update) get one starting entry, so every task's
@@ -625,6 +627,96 @@ struct BuddyAttempt {
     /// A worker that has just started has no live holders: whatever the last one held is free.
     @discardableResult func breakAllLeases() throws -> Int { try db.run("UPDATE leases SET holder = '', task_id = '', expires_at = 0 WHERE holder <> ''") }
 
+    // MARK: what needs you
+
+    struct DecisionSpec { let id: String, kind: String, title: String, question: String, label: String, payload: [String: Any] }
+    /// The blockers a task's state implies right now, each with the identity that makes it the same blocker next time. One sign-in problem is one
+    /// entry, however many places show it. An allowance beats a plain "stopped", because choosing the allowance is what ends it.
+    static func desiredDecisions(_ job: [String: Any]) -> [DecisionSpec] {
+        let id = job["id"] as? String ?? "", status = job["status"] as? String ?? "", attempt = job["attempt"] as? Int ?? 0, title = job["title"] as? String ?? "Background task"
+        let progress = String((job["progress"] as? String ?? "").prefix(300))
+        var out: [DecisionSpec] = []
+        for review in job["reviews"] as? [[String: Any]] ?? [] {
+            guard let reviewID = review["id"] as? String else { continue }
+            let tool = (review["tool"] as? [String: Any])?["name"] as? String ?? "an action", auth = review["kind"] as? String == "authentication"
+            switch review["status"] as? String ?? "" {
+            case "pending":
+                out.append(DecisionSpec(id: "review:" + reviewID, kind: auth ? "signin" : "review", title: auth ? "Sign-in needs your choice" : "Review: \(tool)",
+                                        question: auth ? "Choose how to sign in to \(review["origin"] as? String ?? "this site")." : "Allow this exact operation?", label: "Review", payload: ["taskId": id, "reviewId": reviewID]))
+            case "uncertain":
+                out.append(DecisionSpec(id: "action:" + reviewID + ":unconfirmed", kind: "unconfirmed", title: "Check whether “\(tool)” went through",
+                                        question: "Buddy stopped before it could confirm this. Look at the site or service, then say whether it went through.", label: "Check action", payload: ["taskId": id, "reviewId": reviewID]))
+            default: break
+            }
+        }
+        let needsAllowance = job["provider"] as? String == "claude" && ["paused", "failed", "interrupted", "waiting_user"].contains(status) && number(job["remainingBudgetUSD"] ?? job["budgetUSD"]) <= 0
+        if status == "waiting_user" {
+            out.append(DecisionSpec(id: "waiting:\(id):\(attempt)", kind: "waiting", title: title, question: progress.isEmpty ? "This task is waiting for you." : progress, label: "Open task", payload: ["taskId": id]))
+        }
+        if needsAllowance {
+            out.append(DecisionSpec(id: "allowance:\(id):\(attempt)", kind: "allowance", title: "Choose an allowance to continue", question: "\(title): the last attempt used its allowance or its cost is unconfirmed. Choose an additional Claude allowance to continue.", label: "Choose allowance", payload: ["taskId": id]))
+        } else if status == "failed" || status == "interrupted" {
+            out.append(DecisionSpec(id: "stopped:\(id):\(attempt):\(status)", kind: "stopped", title: title, question: progress.isEmpty ? "This task stopped before finishing." : progress, label: "Open task", payload: ["taskId": id]))
+        }
+        if status == "paused", job["blockedBy"] as? String == "limit" {
+            out.append(DecisionSpec(id: "limit:\(id):\(job["blockedAt"] as? String ?? "")", kind: "limit", title: "Daily limit reached", question: progress, label: "Open task", payload: ["taskId": id]))
+        }
+        return out
+    }
+    private static let derivedKinds = "('review', 'signin', 'waiting', 'allowance', 'stopped', 'unconfirmed', 'limit')"
+    /// Keeps the open blockers of one task equal to what its state implies, in the transaction that saves it: new ones are opened, ones whose cause
+    /// has ended are resolved, and each is an event, so a consumer can follow them.
+    private static func syncDecisions(_ task: [String: Any], in db: BuddyOperationsDB) throws {
+        let taskID = task["id"] as? String ?? "", desired = Dictionary(desiredDecisions(task).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var open = Set<String>()
+        for row in try db.rows("SELECT id FROM decisions WHERE task_id = ? AND status = 'open' AND kind IN \(derivedKinds)", [.text(taskID)]) { if let id = row[0].string { open.insert(id) } }
+        for (id, spec) in desired where !open.contains(id) {
+            let added = try db.run("INSERT OR IGNORE INTO decisions(id, workspace, agent_id, task_id, kind, title, question, label, payload, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                   [.text(id), .text(task["workspace"] as? String ?? ""), .text(task["agentId"] as? String ?? ""), .text(taskID), .text(spec.kind), .text(spec.title), .text(spec.question), .text(spec.label), .text((try? BuddyOperationsDB.encode(spec.payload)) ?? "{}"), .text(stamp())])
+            if added > 0 { try appendEvent("decision.opened", task: task, attempt: task["attempt"] as? Int, cause: spec.kind, payload: ["id": id, "kind": spec.kind], in: db) }
+        }
+        for id in open where desired[id] == nil {
+            try db.run("UPDATE decisions SET status = 'resolved', resolution = 'state_changed', resolved_at = ? WHERE id = ?", [.text(stamp()), .text(id)])
+            try appendEvent("decision.resolved", task: task, attempt: task["attempt"] as? Int, cause: "state_changed", payload: ["id": id], in: db)
+        }
+    }
+    /// Brings every live task's blockers up to date: once at start (tasks that were already waiting get their entry) and after any change.
+    private func reconcileDecisions() throws {
+        try db.transaction { for job in jobs { try Self.syncDecisions(job, in: db) } }
+    }
+    /// What needs the person now, for one workspace, oldest first.
+    func openDecisions(workspace: String) throws -> [[String: Any]] {
+        var out: [[String: Any]] = []
+        for row in try db.rows("SELECT id, agent_id, task_id, kind, title, question, label, payload, created_at FROM decisions WHERE workspace = ? AND status = 'open' ORDER BY created_at, id", [.text(workspace)]) {
+            var item: [String: Any] = [:]
+            item["id"] = row[0].string ?? ""; item["agentId"] = row[1].string ?? ""; item["taskId"] = row[2].string ?? ""; item["kind"] = row[3].string ?? ""
+            item["title"] = row[4].string ?? ""; item["question"] = row[5].string ?? ""; item["actionLabel"] = row[6].string ?? ""
+            item["payload"] = (try? BuddyOperationsDB.decode(row[7].string ?? "{}")) ?? [String: Any]()
+            item["createdAt"] = row[8].string ?? ""
+            out.append(item)
+        }
+        return out
+    }
+    /// Marks alerts read or unread, dismissed or not, by id. Neither changes anything about the work itself.
+    func setNotifications(workspace: String, ids: [String], read: Bool? = nil, dismissed: Bool? = nil) throws {
+        guard !ids.isEmpty, ids.count <= 500, ids.allSatisfy({ !$0.isEmpty && $0.count <= 300 }), UUID(uuidString: workspace) != nil else { throw BuddyWorkerFailure(message: "Choose the alerts to change.") }
+        guard read != nil || dismissed != nil else { return }
+        try db.transaction {
+            for id in ids {
+                try db.run("INSERT INTO notification_state(workspace, id, read, dismissed, updated_at) VALUES(?, ?, 0, 0, ?) ON CONFLICT(workspace, id) DO NOTHING", [.text(workspace), .text(id), .text(Self.stamp())])
+                if let read { try db.run("UPDATE notification_state SET read = ?, updated_at = ? WHERE workspace = ? AND id = ?", [.int(read ? 1 : 0), .text(Self.stamp()), .text(workspace), .text(id)]) }
+                if let dismissed { try db.run("UPDATE notification_state SET dismissed = ?, updated_at = ? WHERE workspace = ? AND id = ?", [.int(dismissed ? 1 : 0), .text(Self.stamp()), .text(workspace), .text(id)]) }
+            }
+            // Alerts for work that is long gone no longer need remembering.
+            try db.run("DELETE FROM notification_state WHERE updated_at < ?", [.text(Self.stamp(Date().addingTimeInterval(-90 * 86400)))])
+        }
+    }
+    func notificationState(workspace: String) throws -> [String: [String: Any]] {
+        var out: [String: [String: Any]] = [:]
+        for row in try db.rows("SELECT id, read, dismissed FROM notification_state WHERE workspace = ?", [.text(workspace)]) { if let id = row[0].string { out[id] = ["read": row[1].int == 1, "dismissed": row[2].int == 1] } }
+        return out
+    }
+
     // MARK: money
 
     private static func number(_ value: Any?) -> Double { (value as? Double) ?? (value as? NSNumber)?.doubleValue ?? 0 }
@@ -711,7 +803,7 @@ struct BuddyAttempt {
         let whose = scope == "agent" ? "this agent" : "the workspace"
         let message = "Today’s limit for \(whose) (\(dollars(limit))) would be passed: \(dollars(exposure.total)) is already spent or set aside, and this task needs up to \(dollars(wanted)). Raise the limit or wait until tomorrow, then resume."
         let job = try self.job(id)
-        try update(id, ["status": "paused", "progress": message], cause: "budget.limit")
+        try update(id, ["status": "paused", "progress": message, "blockedBy": "limit", "blockedAt": Self.stamp()], cause: "budget.limit")
         try db.transaction { try Self.appendEvent("budget.refused", task: job, attempt: job["attempt"] as? Int, cause: "budget.limit", payload: ["limitUSD": limit, "scope": scope, "usedUSD": exposure.total, "wantedUSD": wanted], in: db) }
     }
 
@@ -720,7 +812,7 @@ struct BuddyAttempt {
         let authorizations=job["budgetAuthorizations"] as? [[String:Any]] ?? []
         if let authorizationID,let prior=authorizations.first(where:{$0["id"] as? String==authorizationID}) {guard prior["amountUSD"] as? Double==additionalBudgetUSD else{throw BuddyWorkerFailure(message:"The saved allowance differs from this request. Reopen the task to check it before continuing.")};return job}
         guard ["paused", "failed", "interrupted", "waiting_user"].contains(job["status"] as? String ?? "") || (continuingCoding && job["kind"] as? String=="coding" && job["status"] as? String=="completed") else { throw BuddyWorkerFailure(message: "This task can’t be resumed in its current state.") }
-        var fields:[String:Any] = ["status": "queued", "progress": "Queued to continue from saved progress. Check existing external state before any send or submission."]
+        var fields:[String:Any] = ["status": "queued", "progress": "Queued to continue from saved progress. Check existing external state before any send or submission.", "blockedBy": ""]
         if let amount=additionalBudgetUSD {
             guard job["provider"] as? String=="claude",amount.isFinite,(0.1...10).contains(amount),(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0,let authorizationID,UUID(uuidString:authorizationID) != nil,authorizations.count<100 else{throw BuddyWorkerFailure(message:"Choose an additional Claude allowance from $0.10 to $10 for this paused task.")}
             fields["budgetAuthorizations"]=authorizations+[["id":authorizationID,"amountUSD":amount,"at":ISO8601DateFormatter().string(from:Date())]]

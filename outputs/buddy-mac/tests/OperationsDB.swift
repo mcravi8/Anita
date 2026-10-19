@@ -105,7 +105,7 @@ import CryptoKit
         require(mode == 0o600, "the database is private to the user")
         let probe = try BuddyOperationsDB(directory: fresh, existing: true)
         require(try probe.rows("PRAGMA journal_mode").first?.first?.string == "wal", "changes are journaled so a crash cannot leave half of one")
-        require(try probe.rows("PRAGMA user_version").first?.first?.int == 4, "the schema carries a version")
+        require(try probe.rows("PRAGMA user_version").first?.first?.int == 5, "the schema carries a version")
         require(!names(fresh).contains { $0.hasSuffix(".migrated") } && !names(fresh).contains("Backups"), "nothing is backed up or renamed when there was nothing to migrate")
 
         // 2. A full old history: live tasks, two archive files, routines and a paused queue.
@@ -262,13 +262,13 @@ import CryptoKit
         let firstTask = tale.jobs[0], firstID = firstTask["id"] as! String
         let aside = try tale.archivedJobs()[0]["id"] as! String
         let firstHistory = try tale.history(of: firstID)
-        require(firstHistory.map(\.type) == ["task.created", "task.status", "attempt.started", "attempt.ended", "task.status", "task.status", "task.status", "attempt.started", "attempt.ended", "task.status"], "a task's history lists what happened in order: \(firstHistory.map(\.type))")
-        require(firstHistory.map(\.seq) == Array(1...10), "a task's entries are numbered one after another without a gap")
+        require(firstHistory.map(\.type) == ["task.created", "task.status", "attempt.started", "attempt.ended", "task.status", "decision.opened", "task.status", "decision.resolved", "task.status", "attempt.started", "attempt.ended", "task.status"], "a task's history lists what happened in order, including the blocker that opened when it needed an allowance and ended when it got one: \(firstHistory.map(\.type))")
+        require(firstHistory.map(\.seq) == Array(1...12), "a task's entries are numbered one after another without a gap")
         require(firstHistory[0].cause == "request" && firstHistory[0].correlation == "first", "an entry says what caused it and which request it belongs to")
-        require(firstHistory[5].cause == "resume" && (firstHistory[5].payload["from"] as? String) == "paused" && (firstHistory[5].payload["to"] as? String) == "queued", "resuming is recorded as a move from paused to queued")
+        require(firstHistory[6].cause == "resume" && (firstHistory[6].payload["from"] as? String) == "paused" && (firstHistory[6].payload["to"] as? String) == "queued", "resuming is recorded as a move from paused to queued")
         require(firstHistory.map(\.id) == firstHistory.map(\.id).sorted(), "entries are ordered across the whole log as well")
         require(try tale.history(of: aside).map(\.type) == ["task.created", "task.status", "task.archived"], "a task that is archived says so in its history")
-        require(try tale.history(of: firstID, after: 8).map(\.seq) == [9, 10], "history can be read from just after a point")
+        require(try tale.history(of: firstID, after: 10).map(\.seq) == [11, 12], "history can be read from just after a point")
         let tries = try tale.attempts(of: firstID)
         require(tries.map(\.number) == [1, 2] && tries.map(\.outcome) == ["paused", "completed"] && tries.map(\.runID) == ["run-1", "run-2"] && tries.allSatisfy { $0.provider == "claude" && $0.endedAt != nil }, "attempts record their run, provider and how each ended")
         let storyProblems = try historyProblems(story)
@@ -288,7 +288,8 @@ import CryptoKit
         }
         let restarted = try BuddyWorkerStore(directory: crashed), interruptedID = restarted.jobs[0]["id"] as! String
         let restartHistory = try restarted.history(of: interruptedID)
-        require(restartHistory.map(\.type) == ["task.created", "task.status", "attempt.started", "attempt.ended", "task.status"] && restartHistory.last?.cause == "worker.restart" && restartHistory.last?.payload["to"] as? String == "interrupted", "a restart records that it interrupted the running task")
+        let restartStatus = restartHistory.last { $0.type == "task.status" }
+        require(restartHistory.map(\.type) == ["task.created", "task.status", "attempt.started", "attempt.ended", "task.status", "decision.opened"] && restartStatus?.cause == "worker.restart" && restartStatus?.payload["to"] as? String == "interrupted", "a restart records that it interrupted the running task, and that this needs the person")
         require(try restarted.attempts(of: interruptedID).first?.outcome == "interrupted", "and ends the attempt as interrupted")
         let reopenedAgain = try BuddyWorkerStore(directory: crashed)
         require(reopenedAgain.eventCount == restarted.eventCount, "starting again adds nothing")
@@ -305,7 +306,7 @@ import CryptoKit
             try raw.run("PRAGMA user_version = 1")
         }
         let moved = try BuddyWorkerStore(directory: upgraded)
-        require(try BuddyOperationsDB(directory: upgraded, existing: true).rows("PRAGMA user_version").first?.first?.int == 4, "a database from slice 1 is brought up to the current version")
+        require(try BuddyOperationsDB(directory: upgraded, existing: true).rows("PRAGMA user_version").first?.first?.int == 5, "a database from slice 1 is brought up to the current version")
         let movedTypes = try moved.history(of: moved.jobs[0]["id"] as! String).map(\.type)
         require(moved.jobs.count == 2 && moved.eventCount == 2 && movedTypes == ["task.imported"], "each task it already held gets a starting entry")
 

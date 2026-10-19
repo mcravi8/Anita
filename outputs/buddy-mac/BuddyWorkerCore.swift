@@ -31,6 +31,13 @@ enum BuddyWorkerLiveness {
         // Waiting for an actual human review or private sign-in is not a stalled model.
         ["starting","running"].contains(status) && now.timeIntervalSince(lastActivity)>timeout
     }
+    /// The host ticks every second, so a gap far longer than that means the Mac was asleep (or this process was frozen) between two ticks.
+    /// Returns how long, or 0 for an ordinary tick.
+    static func asleep(since previous:Date,now:Date,tolerance:TimeInterval=20)->TimeInterval {
+        let gap=now.timeIntervalSince(previous);return gap>tolerance ? gap : 0
+    }
+    /// Moves a start or activity time forward by the time spent asleep, never past `now`, so that sleeping is not counted as silence.
+    static func creditingSleep(_ moment:Date,gap:TimeInterval,now:Date)->Date { min(moment.addingTimeInterval(gap),now) }
 }
 
 enum BuddyWorkerMailCompletion {

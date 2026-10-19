@@ -40,3 +40,13 @@ test('task blockers stay brief and keep diagnostic logs or partial results out o
  assert.equal(worker.deliverResult(s,t),true);assert.ok(s.messages.a[0].body.length<150);assert.match(s.messages.a[0].body,/Open the task for details/);assert.equal(s.messages.a[0].body.includes('Verbose partial'),false);
 });
 test('sign-in transitions keep one actionable message and preserve the final result',()=>{const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}},t={id:'job',workspace:'w',agentId:'a',title:'Create inbox',attempt:1,status:'waiting_review',attentionKey:'auth',updatedAt:'2026-10-18T05:44:00Z',reviews:[{status:'pending',kind:'authentication',mode:'signin'}]};worker.deliverResult(s,t);assert.equal(s.messages.a[0].body,'Please sign in to continue.');worker.deliverResult(s,{...t,status:'waiting_user',attentionKey:'private',updatedAt:'2026-10-18T05:45:00Z',progress:'Private Chrome is open. Finish sign-in in Buddy when ready.'});assert.equal(s.messages.a.length,1);assert.match(s.messages.a[0].body,/Finish private sign-in/);worker.deliverResult(s,{...t,status:'completed',result:'Created chief@example.test.',updatedAt:'2026-10-18T05:46:00Z'});assert.equal(worker.presentation(s,s.messages.a[0]).hidden,true);assert.equal(worker.presentation(s,s.messages.a[1]).body,'Created chief@example.test.');});
+
+test('an interrupted or paused coding session offers a fresh allowance, because starting an attempt zeroes the one it had',()=>{
+ const coding={id:'code',kind:'coding',provider:'claude',status:'interrupted',budgetUSD:2,remainingBudgetUSD:0,reservedBudgetUSD:2};
+ for(const status of ['paused','failed','interrupted','waiting_user'])assert.equal(worker.needsAllowance({...coding,status}),true,status+' coding work needs an allowance to continue');
+ assert.equal(worker.canResume('interrupted','coding'),true);
+ assert.equal(worker.needsAllowance({...coding,remainingBudgetUSD:1.5}),false,'a session that still has an allowance does not ask for another');
+ assert.equal(worker.needsAllowance({...coding,status:'completed'}),false);
+ assert.equal(worker.needsAllowance({...coding,provider:'chatgpt'}),false,'ChatGPT work is not metered here');
+ assert.equal(worker.needsAllowance({...coding,kind:'research'}),true,'ordinary Claude tasks keep asking, as before');
+});

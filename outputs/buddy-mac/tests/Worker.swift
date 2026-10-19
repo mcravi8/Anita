@@ -8,6 +8,18 @@ import Foundation
         require(BuddyWorkerLiveness.stalled(status:"running",lastActivity:old,now:now),"unresponsive running work is interrupted after three minutes")
         require(!BuddyWorkerLiveness.stalled(status:"running",lastActivity:now,now:now),"active work is not interrupted")
         for status in ["waiting_review","waiting_user","queued","completed","paused"] {require(!BuddyWorkerLiveness.stalled(status:status,lastActivity:old,now:now),"human and inactive states are not mistaken for stalled work")}
+        // Sleeping is not silence: the host's one-second ticks show the gap, and the stall clock does not count it.
+        let before=now.addingTimeInterval(-3600),lastSeen=before.addingTimeInterval(-10)
+        require(BuddyWorkerLiveness.asleep(since:now.addingTimeInterval(-1),now:now)==0,"an ordinary tick is not sleep")
+        require(BuddyWorkerLiveness.asleep(since:now.addingTimeInterval(-15),now:now)==0,"a busy moment is not sleep")
+        let slept=BuddyWorkerLiveness.asleep(since:before,now:now)
+        require(slept==3600,"an hour between ticks is reported as the time asleep")
+        require(BuddyWorkerLiveness.stalled(status:"running",lastActivity:lastSeen,now:now),"without the credit, an hour asleep would read as a stalled model")
+        let credited=BuddyWorkerLiveness.creditingSleep(lastSeen,gap:slept,now:now)
+        require(!BuddyWorkerLiveness.stalled(status:"running",lastActivity:credited,now:now),"with the credit, work that slept is not interrupted on waking")
+        require(BuddyWorkerLiveness.stalled(status:"running",lastActivity:credited,now:now.addingTimeInterval(181)),"a connection that stays silent for three awake minutes is still caught")
+        require(BuddyWorkerLiveness.creditingSleep(now.addingTimeInterval(-1),gap:3600,now:now)==now,"the credit never moves a time into the future")
+        require(BuddyWorkerLiveness.asleep(since:now,now:now.addingTimeInterval(-600))==0,"a clock set backwards is not sleep")
         let workspace = UUID().uuidString, agent = UUID().uuidString
         let loginJob:[String:Any] = ["workspace":workspace,"agentId":agent]
         let googlePlan:[String:Any] = ["mode":"signin","googleAvailable":true,"origin":"https://console.agentmail.to"]

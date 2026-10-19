@@ -29,6 +29,7 @@ import Darwin
     private var delegatedResult: ((Result<[String: Any], Error>) -> Void)?
     private var startedAt = Date()
     private var lastActivityAt = Date()
+    private var lastTickAt = Date()
     private var authorization = Data()
     private var providerRevision = "initial"
     private var lastProgressSave = Date.distantPast
@@ -396,6 +397,10 @@ import Darwin
         return data + sourceData + ((try? Data(contentsOf: support.appendingPathComponent("connection-access.json"))) ?? Data())
     }
     private func tick() async {
+        // Time the Mac spends asleep says nothing about whether the model or the connection stopped, so it counts toward neither the
+        // three-minute stall limit nor the one-hour pause. A connection that really died is still caught after three awake minutes.
+        let now=Date(),slept=BuddyWorkerLiveness.asleep(since:lastTickAt,now:now);lastTickAt=now
+        if slept>0 {lastActivityAt=BuddyWorkerLiveness.creditingSleep(lastActivityAt,gap:slept,now:now);startedAt=BuddyWorkerLiveness.creditingSleep(startedAt,gap:slept,now:now)}
         if let current=try? state(){await monitor.tick(state:current,jobs:store.jobs,paused:store.paused || privateAgent != nil)}
         if let id = active, let job = try? store.job(id) {
             if !codingCommandBusy,BuddyWorkerLiveness.stalled(status:job["status"] as? String ?? "",lastActivity:lastActivityAt) {

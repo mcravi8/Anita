@@ -277,3 +277,11 @@ Background tasks are saved in `Worker/tasks.json`. Past 900 tasks, or a 24 MB fi
 The approval journal (`connected-actions.json`) works the same way: past 9,000 records the oldest settled ones move to `connected-actions-archive-<time>.json`. Records that are waiting, answered or uncertain always stay, because they are what stops an action being repeated. In memory, finished conversation runs, Claude runs and group jobs are dropped oldest first once there are more than 300, and a run that is still going is never dropped.
 
 If a worker helper (the private browser, the Claude bridge or the coding shell) exits abnormally, its last error output is saved to `Worker/crash-<helper>.log` (owner-only, replaced by the next crash) and the task message gives the exit status. The raw output is not put in the message, which is stored with the task.
+
+## Sleep and coding resumes
+
+The worker checks a running task every second. If two checks are far apart (more than 20 seconds), the Mac was asleep or the process was frozen, and that time is not counted toward the three-minute "no response" limit or the one-hour pause. A task that was working when the lid closed carries on after waking. A connection that really died is still caught after three awake minutes of silence, and its earlier spend stays reserved as before.
+
+A coding session zeroes its allowance when an attempt starts, so one that is paused, interrupted or failed has none left. The task now offers the same "Additional Claude allowance" field as other Claude tasks (it was hidden for coding, which left Resume with no way to continue). Earlier unconfirmed usage stays recorded, and the model cannot grant itself an allowance: only this button can.
+
+A saved routine whose last run was interrupted, failed or paused still waits until that run is reviewed. That stop is deliberate, because an interrupted run may have left an action unconfirmed. It clears when the run is resumed or finished.

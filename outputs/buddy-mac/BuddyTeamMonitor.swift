@@ -16,6 +16,11 @@ import Foundation
     }
     private func rawState()throws->[String:Any] {let data=try Data(contentsOf:support.appendingPathComponent("workspace.json"));guard let s=try JSONSerialization.jsonObject(with:data) as? [String:Any] else{throw BuddyWorkerFailure(message:"The workspace is unavailable.")};return s}
     private func state()throws->[String:Any] {try BuddyAgentMemory.overlay(rawState(),support:support)}
+    /// The model a check-in or team summary runs on: the small default on Claude whatever model the agent chats with, the agent's own on ChatGPT.
+    private func oversight(_ a:[String:Any],workspace:String,policy:[String:Any])throws->BuddyAgentModelSelection {
+        let chosen=try selected(a,workspace:workspace)
+        return chosen.provider=="claude" ? .init(provider:"claude",model:store.checkInModel(policy)):chosen
+    }
     private func selected(_ a:[String:Any],workspace:String)throws->BuddyAgentModelSelection {try BuddyAgentModels(support:support).selection(workspace:workspace,agent:a["id"] as! String) ?? .initial(BuddyAISettings(support:support).current(workspace).provider)}
     func status(_ raw:[String:Any])throws->[String:Any] {
         try memory.synchronize(raw);_ = try store.policy(raw);let state=try BuddyAgentMemory.overlay(raw,support:support);var result=store.status(state:state),profiles=state["agents"] as? [[String:Any]] ?? []
@@ -62,7 +67,7 @@ import Foundation
             for observation in observations where target==nil || observation["agentId"] as? String==target {
                 guard let a=agents.first(where:{$0["id"] as? String==observation["agentId"] as? String}),let id=a["id"] as? String,(target != nil || id != (policy["supervisorId"] as? String)),store.configuration(policy,agent:id)["participates"] as? Bool != false else{continue}
                 var input=observation;input["agent"]=["id":id,"name":BuddyAgentMemory.privateText(a["name"] as? String ?? "Buddy")];input["requesterId"]=actor ?? policy["supervisorId"] ?? "";input["question"]=String((args["question"] as? String ?? "What changed, what is blocked, and does the user need to decide anything?").prefix(1500))
-                let job=try store.enqueue(kind:"checkin",workspace:w,agent:id,input:input,fingerprint:observation["fingerprint"] as! String,policy:policy,selection:selected(a,workspace:w),now:now,force:true);ids.append(job["id"] as! String)
+                let job=try store.enqueue(kind:"checkin",workspace:w,agent:id,input:input,fingerprint:observation["fingerprint"] as! String,policy:policy,selection:oversight(a,workspace:w,policy:policy),now:now,force:true);ids.append(job["id"] as! String)
             }
             var result=try response(raw,jobs:jobs,actor:actor,target:target,now:now);result["queuedCheckIds"]=ids;result["accepted"]=true;return result
         } else if action != "status" {throw BuddyWorkerFailure(message:"Choose status, check_in or a supported team setting.")}
@@ -100,7 +105,7 @@ import Foundation
         // Prior attempts and their usage receipts remain in the journal.
         for a in agents {
             guard let id=a["id"] as? String,let old=store.checks.last(where:{$0["workspace"] as? String==w && $0["agentId"] as? String==id && $0["kind"] as? String=="overview"}),old["status"] as? String=="failed",old["compatibilityRetry"] as? Bool != true,old["error"] as? String=="A team update referenced work outside its actual check-in.",let input=old["input"] as? [String:Any],old["policyRevision"] as? Int==policy["revision"] as? Int else{continue}
-            let next=try store.enqueue(kind:"overview",workspace:w,agent:id,input:input,fingerprint:old["fingerprint"] as? String ?? "",policy:policy,selection:selected(a,workspace:w),now:now,force:true)
+            let next=try store.enqueue(kind:"overview",workspace:w,agent:id,input:input,fingerprint:old["fingerprint"] as? String ?? "",policy:policy,selection:oversight(a,workspace:w,policy:policy),now:now,force:true)
             try store.update(next["id"] as! String,["compatibilityRetry":true])
             try store.update(old["id"] as! String,["status":"cancelled","error":"Retried after the team source-reference fix."])
         }
@@ -112,17 +117,17 @@ import Foundation
             // its DM. Chief must not narrate those same lifecycle records again.
             if id==chief {
                 let sources=(observation["sources"] as? [[String:Any]] ?? []).filter{$0["kind"] as? String != "worker"}
-                observation["sources"]=sources;observation["fingerprint"]=BuddyTeamMonitorStore.hash(sources)
+                observation["sources"]=sources;observation["fingerprint"]=observation["chiefFingerprint"] ?? BuddyTeamMonitorStore.hash(sources);observation["meaningful"]=observation["chiefMeaningful"] ?? true
                 observation["urgent"]=sources.contains{["waiting_user","needs_attention","blocked","failed"].contains($0["status"] as? String ?? "")}
             }
-            guard (id != chief && supervisor != nil && p["participates"] as? Bool != false || p["proactive"] as? Bool==true),!(observation["sources"] as? [Any] ?? []).isEmpty,!store.checks.contains(where:{$0["workspace"] as? String==w && $0["agentId"] as? String==id && $0["kind"] as? String=="checkin" && ["queued","running","budget"].contains($0["status"] as? String ?? "")}),let a=agents.first(where:{$0["id"] as? String==id}) else{continue}
+            guard (id != chief && supervisor != nil && p["participates"] as? Bool != false || p["proactive"] as? Bool==true),!(observation["sources"] as? [Any] ?? []).isEmpty,observation["meaningful"] as? Bool != false,!store.checks.contains(where:{$0["workspace"] as? String==w && $0["agentId"] as? String==id && $0["kind"] as? String=="checkin" && ["queued","running","budget"].contains($0["status"] as? String ?? "")}),let a=agents.first(where:{$0["id"] as? String==id}) else{continue}
             let prior=store.checks.last{$0["workspace"] as? String==w && $0["agentId"] as? String==id && $0["kind"] as? String=="checkin"}
             if prior?["fingerprint"] as? String==observation["fingerprint"] as? String,prior?["status"] as? String != "cancelled",prior?["policyRevision"] as? Int==policy["revision"] as? Int {continue}
             let last=(prior?["createdAt"] as? String).flatMap{ISO8601DateFormatter().date(from:$0)} ?? .distantPast
             let interval=observation["urgent"] as? Bool==true ? 60.0:Double(policy["intervalMinutes"] as? Int ?? 15)*60
             guard now.timeIntervalSince(last)>=interval else{continue}
             var input=observation;input["agent"]=["id":id,"name":BuddyAgentMemory.privateText(a["name"] as? String ?? "Buddy")];input["requesterId"]=chief ?? "";input["priorReport"]=prior?["output"] ?? NSNull()
-            _ = try store.enqueue(kind:"checkin",workspace:w,agent:id,input:input,fingerprint:observation["fingerprint"] as! String,policy:policy,selection:selected(a,workspace:w),now:now)
+            _ = try store.enqueue(kind:"checkin",workspace:w,agent:id,input:input,fingerprint:observation["fingerprint"] as! String,policy:policy,selection:oversight(a,workspace:w,policy:policy),now:now)
         }
         if let supervisor,let chief,!store.checks.contains(where:{$0["workspace"] as? String==w && $0["kind"] as? String=="overview" && ["queued","running","budget"].contains($0["status"] as? String ?? "")}) {
             let reported=Set(store.checks.filter{$0["workspace"] as? String==w && $0["kind"] as? String=="overview" && $0["status"] as? String=="completed"}.flatMap{($0["input"] as? [String:Any])?["checkinIds"] as? [String] ?? []})
@@ -133,7 +138,7 @@ import Foundation
             if validResponses.contains(where:{($0["output"] as? [String:Any])?["notify"] as? Bool==true || $0["force"] as? Bool==true}) {
                 let chosen=Array(validResponses.suffix(30)),ids=chosen.compactMap{$0["id"] as? String}
                 let input:[String:Any]=["agent":["id":chief,"name":BuddyAgentMemory.privateText(supervisor["name"] as? String ?? "Buddy")],"checkinIds":ids,"reports":chosen.map{["id":$0["id"]!,"agentId":$0["agentId"]!,"name":(($0["input"] as? [String:Any])?["agent"] as? [String:Any])?["name"] ?? "Buddy","report":$0["output"] ?? [:],"checkedAt":$0["startedAt"] ?? "","sources":($0["input"] as? [String:Any])?["sources"] ?? []]},"pendingOrFailed":store.checks.filter{$0["workspace"] as? String==w && $0["kind"] as? String=="checkin" && ["queued","running","failed","interrupted","budget"].contains($0["status"] as? String ?? "")}.suffix(20).map{["agentId":$0["agentId"] ?? "","status":$0["status"] ?? "","error":$0["error"] ?? ""]}]
-                _ = try store.enqueue(kind:"overview",workspace:w,agent:chief,input:input,fingerprint:BuddyTeamMonitorStore.hash(ids),policy:policy,selection:selected(supervisor,workspace:w),now:now)
+                _ = try store.enqueue(kind:"overview",workspace:w,agent:chief,input:input,fingerprint:BuddyTeamMonitorStore.hash(ids),policy:policy,selection:oversight(supervisor,workspace:w,policy:policy),now:now)
             }
         }
     }
@@ -177,11 +182,18 @@ import Foundation
             if kind=="memory" {try memory.commit(output,input:input,workspace:w,agent:id,state:try rawState(),now:now)}
             else {
                 output=try Self.checkedOutput(output,input:input,kind:kind)
-                let notify=output["notify"] as! Bool,body=output["body"] as! String,priority=output["priority"] as! Int,ids=output["sourceIds"] as! [String],sources=input["sources"] as? [[String:Any]] ?? []
+                var notify=output["notify"] as! Bool;let body=output["body"] as! String,priority=output["priority"] as! Int,ids=output["sourceIds"] as! [String],sources=input["sources"] as? [[String:Any]] ?? []
+                // A report that only says again what this agent's last one said is not sent up, whatever the model decided. A check the user
+                // asked for is always answered.
+                if notify,kind=="checkin",job["force"] as? Bool != true,BuddyTeamMonitorStore.repeats(body,priority:priority,prior:store.lastReport(agent:id,workspace:w,excluding:job["id"] as! String),now:now) {
+                    notify=false;output["notify"]=false;output["suppressed"]="repeat"
+                }
                 if notify && store.configuration(policy,agent:id)["proactive"] as? Bool==true {
                     let evidence=kind=="overview" ? (input["reports"] as? [[String:Any]] ?? []).filter{ids.contains($0["id"] as? String ?? "")}.flatMap{$0["sources"] as? [[String:Any]] ?? []}:sources.filter{ids.contains($0["id"] as? String ?? "")}
                     let ownWorkerOnly=kind=="checkin" && !evidence.isEmpty && evidence.allSatisfy{$0["kind"] as? String=="worker" && $0["agentId"] as? String==id}
-                    if !ownWorkerOnly {try store.publish(agent:id,job:job,body:body,sources:evidence,priority:priority,now:now,detail:output["detail"] as? String)}
+                    if ownWorkerOnly {}
+                    else if job["force"] as? Bool != true,BuddyTeamMonitorStore.repeats(BuddyTeamMonitorStore.brief(body),priority:priority,prior:store.lastUpdate(agent:id,workspace:w),now:now) {output["suppressed"]="repeat"}
+                    else {try store.publish(agent:id,job:job,body:body,sources:evidence,priority:priority,now:now,detail:output["detail"] as? String)}
                 }
             }
             try store.update(job["id"] as! String,["status":"completed","output":output,"finishedAt":BuddyTeamMonitorStore.stamp(now),"error":""])

@@ -8,6 +8,21 @@ import Foundation
   var foreignOutput=output;foreignOutput["sourceIds"]=["worker:foreign"]
   do{_ = try BuddyTeamMonitor.checkedOutput(foreignOutput,input:known,kind:"overview");require(false,"unknown summary sources must remain rejected")}catch{}
   require(try BuddyTeamMonitor.checkedOutput(["notify":false,"body":"","priority":0,"sourceIds":[String]()],input:["urgent":true],kind:"checkin")["notify"] as? Bool==false,"already surfaced blockers may remain quiet without manufacturing a check-in failure")
+  // Saying the same thing again is recognised however it is worded; anything new is not.
+  let said="Your Acme online assessment looks due about Oct 21, 1:15 PM PDT, and Beta's about Oct 24–25."
+  require(BuddyTeamMonitorStore.restates("Your Acme assessment is likely due Oct 21 around 1:15 PM PT, and Beta's around Oct 24–25.",said),"the same facts, reworded, are a restatement")
+  require(BuddyTeamMonitorStore.restates(said,said),"identical text is a restatement")
+  require(!BuddyTeamMonitorStore.restates("Your Acme online assessment looks due about Oct 22, 1:15 PM PDT, and Beta's about Oct 24–25.",said),"a changed date is new information")
+  require(!BuddyTeamMonitorStore.restates("Your Acme online assessment looks due about Oct 21, 1:15 PM PDT, and Beta's about Oct 24–25. Gamma wants 3 references.",said),"a new number is new information")
+  require(!BuddyTeamMonitorStore.restates("Your Acme online assessment is not due Oct 21, 1:15 PM PDT, and Beta's about Oct 24–25.",said),"a negation is new information even when every other word is the same")
+  require(!BuddyTeamMonitorStore.restates("Your Acme online assessment was cancelled; Beta's is still about Oct 24–25.",said),"a change word is new information")
+  require(!BuddyTeamMonitorStore.restates("Gamma replied about the reference letters.",said),"an unrelated update is not a restatement")
+  require(!BuddyTeamMonitorStore.restates("",said) && !BuddyTeamMonitorStore.restates(said,"") && !BuddyTeamMonitorStore.restates("12 34 56","12 34 56"),"empty text, and text with no words, are never restatements")
+  let reported=Date()
+  require(BuddyTeamMonitorStore.repeats(said,priority:1,prior:(said,reported.addingTimeInterval(-20*3600)),now:reported),"an ordinary update is a repeat for a day")
+  require(!BuddyTeamMonitorStore.repeats(said,priority:1,prior:(said,reported.addingTimeInterval(-25*3600)),now:reported),"and is reminded after that")
+  require(BuddyTeamMonitorStore.repeats(said,priority:0,prior:(said,reported.addingTimeInterval(-2*3600)),now:reported) && !BuddyTeamMonitorStore.repeats(said,priority:0,prior:(said,reported.addingTimeInterval(-4*3600)),now:reported),"a blocker is repeated after three hours")
+  require(!BuddyTeamMonitorStore.repeats(said,priority:1,prior:nil,now:reported),"nothing is a repeat of nothing")
   let root=FileManager.default.temporaryDirectory.appendingPathComponent("buddy-monitor-"+UUID().uuidString+".noindex")
   try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
   let w=UUID().uuidString,chief=UUID().uuidString,maze=UUID().uuidString,task=UUID().uuidString
@@ -57,11 +72,107 @@ import Foundation
   require((try historyStore.messages(state:foreignHistory)["messages"] as! [[String:Any]]).isEmpty,"foreign workspace history stays inaccessible")
   let learned=(try BuddyAgentMemory.overlay(state,support:root)["agents"] as! [[String:Any]])[1]
   require((learned["description"] as? String)?.contains("concise")==true && (learned["learnedRules"] as? [[String:Any]])?.first?["messageId"] as? String=="user-pref","ongoing explicit preferences update effective instructions with exact user-message evidence")
+  // What wakes oversight: things ending or needing the user, never bookkeeping.
+  let watchRoot=root.appendingPathComponent("Watching");try FileManager.default.createDirectory(at:watchRoot.appendingPathComponent("Worker"),withIntermediateDirectories:true)
+  let watchStore=try BuddyTeamMonitorStore(support:watchRoot),rid=UUID().uuidString
+  func lone(_ chat:[[String:Any]]=[])->[String:Any]{["version":1,"conversationWorkspace":w,"agents":[["id":maze,"name":"Maze","role":"Researcher","description":"x","setupStatus":"ready","profileRevision":1]],"messages":[maze:chat]]}
+  func routineFile(next:String,status:String="active",error:String="")throws{try JSONSerialization.data(withJSONObject:["version":1,"routines":[["id":rid,"workspace":w,"agentId":maze,"title":"Check mail","status":status,"nextRun":next,"lastError":error]]]).write(to:watchRoot.appendingPathComponent("Worker/routines.json"))}
+  func watched(_ work:[[String:Any]],chat:[[String:Any]]=[])throws->(fingerprint:String,meaningful:Bool){let r=try watchStore.observed(lone(chat),jobs:work,now:Date()).first!;return (r["fingerprint"] as! String,r["meaningful"] as! Bool)}
+  func routineRun(_ n:Int,_ status:String,result:String="",progress:String="",updated:String="2026-10-18T10:00:00Z")->[String:Any]{["id":"run-\(n)","workspace":w,"agentId":maze,"title":"Check mail","status":status,"progress":progress,"result":result,"routineID":rid,"createdAt":"2026-10-18T0\(n):00:00Z","updatedAt":updated]}
+  let nothingNew="Nothing new needs attention in either mailbox."
+  try routineFile(next:"2026-10-19T16:00:00Z")
+  let one=routineRun(1,"completed",result:nothingNew),base=try watched([one]).fingerprint
+  let runningPrint=try watched([one,routineRun(2,"running")]).fingerprint,queuedPrint=try watched([one,routineRun(2,"queued")]).fingerprint
+  require(runningPrint==base && queuedPrint==base,"a run being queued or worked on is not news")
+  require(try watched([routineRun(1,"completed",result:nothingNew,updated:"2026-10-18T23:00:00Z")]).fingerprint==base,"a changed timestamp is not news")
+  try routineFile(next:"2026-10-20T16:00:00Z")
+  require(try watched([one]).fingerprint==base,"a routine's next-run time moving on is not news")
+  require(try watched([one,routineRun(2,"completed",result:"Nothing new needs attention in either mailbox right now.")]).fingerprint==base,"a routine run that only says again what the run before it said is not news")
+  require(try watched([one,routineRun(2,"completed",result:"Acme assessment due Oct 24 at 1:15 PM.")]).fingerprint != base,"a routine run with a new result is news")
+  let blockedRun=try watched([one,routineRun(2,"waiting_user",progress:"Please sign in.")]).fingerprint
+  let changedNeed=try watched([one,routineRun(2,"waiting_user",progress:"Please verify your email.")]).fingerprint
+  require(blockedRun != base && changedNeed != blockedRun,"a run that needs the user is news, and so is a change in what it needs")
+  let pausedA=try watched([one,routineRun(2,"paused",progress:"Paused for now.")]).fingerprint,pausedB=try watched([one,routineRun(2,"paused",progress:"Paused a while ago.")]).fingerprint
+  require(pausedA==pausedB,"progress text of work that is not blocked is not news")
+  try routineFile(next:"2026-10-20T16:00:00Z",status:"needs_attention",error:"The previous run needs attention.")
+  require(try watched([one]).fingerprint != base,"a routine needing attention is news")
+  try routineFile(next:"2026-10-20T16:00:00Z")
+  require(try watched([one],chat:[["id":"c1","who":"you","body":"Hello","createdAt":"2026-10-18T09:00:00Z"]]).fingerprint != base,"a new message is news")
+  try? FileManager.default.removeItem(at:watchRoot.appendingPathComponent("Worker/routines.json"))
+  let onlyBusy=try watched([routineRun(1,"running"),routineRun(2,"queued")]),nothing=try watched([])
+  require(!onlyBusy.meaningful && !nothing.meaningful && onlyBusy.fingerprint==nothing.fingerprint,"an agent whose only work is in progress has nothing to check")
   let callsURL=root.appendingPathComponent("TeamMonitor/fixture-calls.jsonl")
   let calls=try String(contentsOf:callsURL,encoding:.utf8).split(separator:"\n").map{try JSONSerialization.jsonObject(with:Data($0.utf8)) as! [String:Any]}
-  require(calls.contains{$0["kind"] as? String=="checkin" && $0["model"] as? String=="fixture-maze"} && calls.contains{$0["kind"] as? String=="overview" && $0["model"] as? String=="fixture-chief"},"each check-in uses that agent's selected model")
+  let oversightCalls=calls.filter{$0["kind"] as? String != "memory"}
+  require(calls.contains{$0["kind"] as? String=="checkin"} && calls.contains{$0["kind"] as? String=="overview"} && oversightCalls.allSatisfy{$0["model"] as? String==BuddyTeamMonitorStore.defaultCheckInModel},"check-ins and team summaries run on the small default model, not the model each agent chats with (Chief and Maze are set to other models)")
   for _ in 0..<8 {await step()}
   require(try String(contentsOf:callsURL,encoding:.utf8).split(separator:"\n").count==calls.count,"unchanged work and saved preferences do not trigger repeat model calls")
+  // The same report about another blocker is not sent up again; a different one is; a check the user asks for is always answered.
+  func mazeCheckins()throws->[[String:Any]]{(try monitor.status(state)["checks"] as! [[String:Any]]).filter{$0["kind"] as? String=="checkin" && $0["agentId"] as? String==maze}}
+  func overviewCount()throws->Int{(try monitor.status(state)["checks"] as! [[String:Any]]).filter{$0["kind"] as? String=="overview"}.count}
+  func chiefUpdates()throws->[[String:Any]]{(try monitor.status(state)["updates"] as! [[String:Any]]).filter{$0["agentId"] as? String==chief}}
+  func blockers(_ extra:Int)->[[String:Any]]{jobs+(0..<extra).map{["id":"extra-\($0)","workspace":w,"agentId":maze,"title":"Another brief \($0)","status":"waiting_user","progress":"Choose which source to prioritize next \($0).","updatedAt":"2026-10-17T13:00:00Z"]}}
+  func settle(_ work:[[String:Any]],_ rounds:Int=12) async {now=now.addingTimeInterval(1000);for _ in 0..<rounds {await step(nil,work)}}
+  let sayCheckin=root.appendingPathComponent("TeamMonitor/fixture-checkin-body.txt"),sayOverview=root.appendingPathComponent("TeamMonitor/fixture-overview-body.txt")
+  let overviewsBefore=try overviewCount(),updatesBefore=try chiefUpdates().count,checkinsBefore=try mazeCheckins().count
+  await settle(blockers(1))
+  var latest=try mazeCheckins().last!,checked=latest["output"] as? [String:Any] ?? [:]
+  var counted=try mazeCheckins().count
+  require(counted==checkinsBefore+1 && latest["status"] as? String=="completed" && checked["suppressed"] as? String=="repeat" && checked["notify"] as? Bool==false,"a check-in that only repeats its last report is not sent up")
+  var summaries=try overviewCount(),posted=try chiefUpdates().count
+  require(summaries==overviewsBefore && posted==updatesBefore,"so no team summary is spent on it and nothing is added to Chief's chat")
+  try "I still need a decision from you before continuing.".write(to:sayCheckin,atomically:true,encoding:.utf8)
+  await settle(blockers(2))
+  latest=try mazeCheckins().last!;checked=latest["output"] as? [String:Any] ?? [:]
+  counted=try mazeCheckins().count;summaries=try overviewCount()
+  require(counted==checkinsBefore+2 && checked["suppressed"] as? String=="repeat" && summaries==overviewsBefore,"the same report in other words is still a repeat")
+  try "Maze finished the research: 3 sources need your approval.".write(to:sayCheckin,atomically:true,encoding:.utf8)
+  try "Maze finished the research and needs 3 sources approved.".write(to:sayOverview,atomically:true,encoding:.utf8)
+  await settle(blockers(3))
+  latest=try mazeCheckins().last!;checked=latest["output"] as? [String:Any] ?? [:]
+  counted=try mazeCheckins().count
+  require(counted==checkinsBefore+3 && checked["suppressed"]==nil && checked["notify"] as? Bool==true,"a report with something new is sent up")
+  summaries=try overviewCount();let postedNow=try chiefUpdates();let lastBody=postedNow.last?["body"] as? String ?? ""
+  require(summaries==overviewsBefore+1 && postedNow.count==updatesBefore+1 && lastBody.contains("3 sources"),"and reaches Chief's chat once")
+  try "Maze finished the research: 4 sources need your approval.".write(to:sayCheckin,atomically:true,encoding:.utf8)
+  await settle(blockers(4))
+  let overviews=(try monitor.status(state)["checks"] as! [[String:Any]]).filter{$0["kind"] as? String=="overview" && $0["status"] as? String=="completed"}
+  summaries=try overviewCount();posted=try chiefUpdates().count
+  require(summaries==overviewsBefore+2 && (overviews.last?["output"] as? [String:Any])?["suppressed"] as? String=="repeat" && posted==updatesBefore+1,"a summary that only repeats Chief's last message is not posted")
+  _ = try monitor.handle(["action":"check_in","agentId":maze],state:state,jobs:blockers(4))
+  await settle(blockers(4))
+  latest=try mazeCheckins().last!;checked=latest["output"] as? [String:Any] ?? [:]
+  require(latest["force"] as? Bool==true && checked["notify"] as? Bool==true && checked["suppressed"]==nil,"a check-in the user asks for is always answered, even with the same words")
+  await settle(blockers(4),8)
+  try? FileManager.default.removeItem(at:sayCheckin);try? FileManager.default.removeItem(at:sayOverview)
+  // The model for check-ins can be chosen; the default is the small one.
+  let asked=try monitor.handle(["action":"check_in","agentId":maze],state:state,jobs:jobs)
+  require(monitor.store.checks.first{$0["id"] as? String==(asked["queuedCheckIds"] as! [String])[0]}?["model"] as? String==BuddyTeamMonitorStore.defaultCheckInModel,"a requested check-in also uses the small default model")
+  _ = try monitor.handle(["action":"configure","checkInModel":"fixture-custom"],state:state,jobs:jobs)
+  let custom=try monitor.handle(["action":"check_in","agentId":maze],state:state,jobs:jobs)
+  let shownModel=try monitor.status(state)["checkInModel"] as? String
+  require(monitor.store.checks.first{$0["id"] as? String==(custom["queuedCheckIds"] as! [String])[0]}?["model"] as? String=="fixture-custom" && shownModel=="fixture-custom","a chosen check-in model is used and shown")
+  do{_ = try monitor.handle(["action":"configure","checkInModel":"bad model!"],state:state,jobs:jobs);require(false,"an invalid check-in model name is rejected")}catch{}
+  _ = try monitor.handle(["action":"configure","checkInModel":""],state:state,jobs:jobs)
+  let restoredModel=try monitor.status(state)["checkInModel"] as? String
+  require(restoredModel==BuddyTeamMonitorStore.defaultCheckInModel,"an empty name restores the default")
+  // An agent whose only work is in progress has nothing to check; the moment it needs the user, it does.
+  let quietRoot=root.appendingPathComponent("Quiet");try FileManager.default.createDirectory(at:quietRoot,withIntermediateDirectories:true)
+  let solo=UUID().uuidString,quietChief=UUID().uuidString
+  let quietState:[String:Any]=["version":1,"conversationWorkspace":w,"agents":[["id":quietChief,"name":"Chief","role":"Chief of staff","description":"Oversee.","setupStatus":"ready","profileRevision":1],["id":solo,"name":"Solo","role":"Researcher","description":"Research.","setupStatus":"ready","profileRevision":1]],"messages":[String:Any]()]
+  try JSONSerialization.data(withJSONObject:quietState).write(to:quietRoot.appendingPathComponent("workspace.json"),options:.atomic)
+  _ = try BuddyAISettings(support:quietRoot).update(w,provider:"claude",enabled:("claude",true),budget:0.5)
+  let quietMonitor=try BuddyTeamMonitor(support:quietRoot,makeClaude:factory,keyReader:{_ in "fixture-key"})
+  func quietCalls()->Int{((try? String(contentsOf:quietRoot.appendingPathComponent("TeamMonitor/fixture-calls.jsonl"),encoding:.utf8)) ?? "").split(separator:"\n").filter{$0.contains("\"checkin\"")}.count}
+  var quietNow=Date()
+  func quietStep(_ work:[[String:Any]]) async {quietNow=quietNow.addingTimeInterval(11);await quietMonitor.tick(state:quietState,jobs:work,paused:false,now:quietNow);try? await Task.sleep(nanoseconds:120_000_000)}
+  let busyWork:[[String:Any]]=[["id":"busy","workspace":w,"agentId":solo,"title":"Research","status":"running","progress":"Reading sources","updatedAt":"2026-10-18T10:00:00Z"]]
+  for _ in 0..<8 {await quietStep(busyWork)}
+  require(quietCalls()==0,"work that is simply in progress is not checked")
+  var needed=busyWork;needed[0]["status"]="waiting_user";needed[0]["progress"]="Choose a source."
+  for _ in 0..<10 {await quietStep(needed)}
+  require(quietCalls()==1,"work that needs the user is checked at once")
+  quietMonitor.shutdown()
   do{_ = try monitor.handle(["action":"set_proactive","enabled":true,"quote":"keep me updated"],state:state,jobs:jobs,actor:maze,authorizedText:"A different task.");require(false,"invented authorization rejected")}catch{}
   let enabled=try monitor.handle(["action":"set_proactive","enabled":true,"quote":"keep me updated"],state:state,jobs:jobs,actor:maze,authorizedText:"Please keep me updated.")
   require(enabled["saved"] as? Bool==true && enabled["agentId"] as? String==maze && enabled["proactive"] as? Bool==true,"an explicit request saves this agent's proactive mode with a real receipt")

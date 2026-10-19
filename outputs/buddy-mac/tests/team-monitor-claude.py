@@ -17,7 +17,11 @@ for line in sys.stdin:
  elif kind=='checkin':
   sources=p.get('sources',[]);blocking=next((s for s in sources if s.get('status') in ['waiting_user','waiting_review','failed']),None);completed=next((s for s in sources if s.get('status')=='completed'),None);s=blocking or completed
   r={'notify':bool(s),'body':'I need your decision before continuing.' if blocking else 'The requested work finished.' if completed else '', 'priority':0 if blocking else 1,'sourceIds':[s['id']] if s else []}
+  say=folder/'fixture-checkin-body.txt'
+  if r['notify'] and say.exists():r['body']=say.read_text().strip()
  else:
   reports=p['reports'];chosen=[x for x in reports if x['report']['notify']]
   r={'notify':bool(chosen),'body':'**Maze needs you:** review the pending decision.' if chosen else '', 'priority':0 if any(x['report']['priority']==0 for x in chosen) else 1,'sourceIds':[x['sources'][0]['id'] if x.get('sources') else x['id'] for x in chosen]}
+  say=folder/'fixture-overview-body.txt'
+  if r['notify'] and say.exists():r['body']=say.read_text().strip()
  print(json.dumps({'type':'result','runId':c['runId'],'text':json.dumps(r),'cost':0.02}),flush=True)

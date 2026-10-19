@@ -19,6 +19,82 @@ import CryptoKit
     }
     private func save()throws {let data=try JSONSerialization.data(withJSONObject:value,options:.sortedKeys);guard data.count<24*1024*1024 else{throw BuddyWorkerFailure(message:"Team check-in history is full. Review old check-ins before continuing.")};try data.write(to:url,options:.atomic);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)}
     private func mutate(_ operation:()throws->Void)throws {let old=value;do{try operation();value["journalRevision"]=(old["journalRevision"] as? Int ?? 0)+1;try save()}catch{value=old;throw error}}
+    /// Check-ins and team summaries are short and frequent, so on Claude they run on a small model whatever model the agent chats with.
+    static let defaultCheckInModel="claude-haiku-5-5"
+    func checkInModel(_ policy:[String:Any])->String {(policy["checkInModel"] as? String).flatMap{$0.isEmpty ? nil:$0} ?? Self.defaultCheckInModel}
+
+    // MARK: what counts as news
+
+    static let urgentStatuses:Set<String>=["waiting_review","waiting_user","failed","interrupted","needs_attention","blocked"]
+    /// Work that is simply being done. It is not news until it ends or needs something.
+    static let activeStatuses:Set<String>=["queued","running","starting","stopping"]
+    private static let filler:Set<String>=["the","and","for","are","was","were","has","have","had","will","would","your","you","with","this","that","about","around","likely","looks","look","appears","seems","from","into","there","been","being","still","also","just","its","they","them","their","then","than","only","any","all","can","could","should","may","might","but","out","our","own","per","via","who","how","what","when","where","which","while","some","more","most","very","much","please","roughly","approximately","probably","maybe","here","does","did","get","got"]
+    /// A word like these that the earlier text lacked means something changed, even when everything else is the same.
+    private static let signal:Set<String>=["not","never","cancel","cancelled","canceled","failed","failure","error","rejected","declined","denied","accepted","approved","passed","missed","overdue","expired","postponed","rescheduled","moved","extended","changed","urgent","blocked","verify","verification","signin","login","reply","replied","received","completed","finished","done"]
+    private static let digitPattern=try! NSRegularExpression(pattern:"[0-9]+"),wordPattern=try! NSRegularExpression(pattern:"[a-z]{3,}")
+    private static func facts(_ text:String)->(numbers:Set<String>,words:Set<String>) {
+        let lower=text.lowercased(),range=NSRange(lower.startIndex...,in:lower)
+        func tokens(_ expression:NSRegularExpression)->[String] {expression.matches(in:lower,range:range).compactMap{Range($0.range,in:lower).map{String(lower[$0])}}}
+        return (Set(tokens(digitPattern).map{$0.drop{$0=="0"}.isEmpty ? "0":String($0.drop{$0=="0"})}),Set(tokens(wordPattern).filter{!filler.contains($0)}))
+    }
+    /// Whether `text` only says again what `prior` already said, however it is reworded: no number (a date, a time, an amount) that the earlier
+    /// text lacked, no word like "not" or "cancelled" that it lacked, and enough of the same words. A changed date or amount is always new.
+    static func restates(_ text:String,_ prior:String,minimumOverlap:Double=0.65)->Bool {
+        let a=facts(text),b=facts(prior)
+        guard !a.words.isEmpty,!b.words.isEmpty,a.numbers.isSubset(of:b.numbers),a.words.subtracting(b.words).isDisjoint(with:signal) else{return false}
+        return Double(a.words.intersection(b.words).count)/Double(a.words.union(b.words).count)>=minimumOverlap
+    }
+    /// Completed runs of a routine whose result only says again what the run before it said. They stay in the evidence the model is shown, but
+    /// they do not count as a change.
+    private static func quietRuns(_ owned:[[String:Any]])->Set<String> {
+        var quiet=Set<String>(),lastResult=[String:String]()
+        let runs=owned.filter{$0["status"] as? String=="completed" && ($0["routineSeriesID"] ?? $0["routineID"]) != nil}.sorted{let a=date($0["createdAt"]),b=date($1["createdAt"]);return a==b ? ($0["id"] as? String ?? "")<($1["id"] as? String ?? ""):a<b}
+        for job in runs {
+            let series=(job["routineSeriesID"] ?? job["routineID"]) as? String ?? "",result=job["result"] as? String ?? ""
+            if let prior=lastResult[series],restates(result,prior,minimumOverlap:0.3) {quiet.insert(job["id"] as? String ?? "")}
+            lastResult[series]=result
+        }
+        return quiet
+    }
+    /// What oversight actually watches for, as a small list that is hashed into the fingerprint. Anything that changes on every ordinary run
+    /// is left out: next-run times, timestamps, progress text, a run being queued or started, and a routine run that only repeats the one
+    /// before it. A task ending or needing the user, a new message, and a new kind of result still change it.
+    static func watching(sources:[[String:Any]],owned:[[String:Any]],quiet:Set<String>)->[[String:Any]] {
+        var out=[[String:Any]]()
+        for job in owned {
+            let id=job["id"] as? String ?? "",status=job["status"] as? String ?? ""
+            if activeStatuses.contains(status) || quiet.contains(id) {continue}
+            var item:[String:Any]=["id":"worker:"+id,"status":status]
+            if urgentStatuses.contains(status) {item["progress"]=String((job["progress"] as? String ?? "").prefix(600))}
+            out.append(item)
+        }
+        for source in sources {
+            switch source["kind"] as? String ?? "" {
+            case "worker": continue
+            case "routine": out.append(["id":source["id"] ?? "","status":source["status"] ?? "","lastError":source["lastError"] ?? ""])
+            case "group": if !["queued","working"].contains(source["status"] as? String ?? "") {out.append(["id":source["id"] ?? "","status":source["status"] ?? "","task":source["task"] ?? ""])}
+            case "shared-task": out.append(["id":source["id"] ?? "","status":source["status"] ?? ""])
+            default: out.append(source)
+            }
+        }
+        return out
+    }
+    /// How long a report counts as "already said": a blocker is repeated after a few hours, anything else after a day.
+    static func repeatWindow(priority:Int)->TimeInterval {priority==0 ? 3*3600:24*3600}
+    /// The last report this agent's check-in sent up asking for attention, to compare a new one against.
+    func lastReport(agent:String,workspace:String,excluding id:String)->(body:String,at:Date)? {
+        guard let job=checks.last(where:{$0["workspace"] as? String==workspace && $0["agentId"] as? String==agent && $0["kind"] as? String=="checkin" && $0["status"] as? String=="completed" && $0["id"] as? String != id && ($0["output"] as? [String:Any])?["notify"] as? Bool==true}),let body=(job["output"] as? [String:Any])?["body"] as? String,!body.isEmpty else{return nil}
+        return (body,Self.date(job["finishedAt"] ?? job["createdAt"]))
+    }
+    func lastUpdate(agent:String,workspace:String)->(body:String,at:Date)? {
+        guard let update=updates.last(where:{$0["workspace"] as? String==workspace && $0["agentId"] as? String==agent}),let body=update["body"] as? String else{return nil}
+        return (body,Self.date(update["at"]))
+    }
+    /// Whether `text` only repeats an earlier report that is still recent enough to count.
+    static func repeats(_ text:String,priority:Int,prior:(body:String,at:Date)?,now:Date)->Bool {
+        guard let prior,now.timeIntervalSince(prior.at)<=repeatWindow(priority:priority) else{return false}
+        return restates(text,prior.body)
+    }
     static func stamp(_ now:Date)->String {ISO8601DateFormatter().string(from:now)}
     static func day(_ now:Date)->String {let f=DateFormatter();f.locale=Locale(identifier:"en_US_POSIX");f.timeZone = .current;f.dateFormat="yyyy-MM-dd";return f.string(from:now)}
     private static func date(_ value:Any?)->Date {guard let text=value as? String else{return .distantPast};let f=ISO8601DateFormatter();if let d=f.date(from:text){return d};f.formatOptions=[.withInternetDateTime,.withFractionalSeconds];return f.date(from:text) ?? .distantPast}
@@ -41,6 +117,7 @@ import CryptoKit
         if let enabled=args["enabled"] as? Bool {policy["enabled"]=enabled}
         if args["supervisorId"] != nil {let id=args["supervisorId"] as? String ?? "";guard id.isEmpty || ids.contains(id) else{throw BuddyWorkerFailure(message:"Choose a current agent to oversee the team.")};if !id.isEmpty && id != policy["supervisorId"] as? String {var agents=policy["agents"] as? [String:[String:Any]] ?? [:],selected=agents[id] ?? [:];selected["proactive"]=true;agents[id]=selected;policy["agents"]=agents};policy["supervisorId"]=id.isEmpty ? NSNull():id as Any;policy["supervisorChosen"]=true}
         if let interval=args["intervalMinutes"] as? Int {guard [5,15,30,60].contains(interval) else{throw BuddyWorkerFailure(message:"Choose 5, 15, 30 or 60 minutes.")};policy["intervalMinutes"]=interval}
+        if let model=args["checkInModel"] as? String {guard model.isEmpty || model.range(of:#"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"#,options:.regularExpression) != nil else{throw BuddyWorkerFailure(message:"Choose a valid model name, or leave it empty for the default.")};if model.isEmpty {policy.removeValue(forKey:"checkInModel")}else{policy["checkInModel"]=model}}
         if let budget=args["dailyLimitUSD"] as? Double {guard budget.isFinite,budget>=0.1 else{throw BuddyWorkerFailure(message:"Choose a daily estimated limit of at least $0.10.")};policy["dailyLimitUSD"]=budget}
         if let id=args["agentId"] as? String {guard ids.contains(id) else{throw BuddyWorkerFailure(message:"This agent is no longer here.")};var agents=policy["agents"] as? [String:[String:Any]] ?? [:],p=agents[id] ?? [:];if let mode=args["proactive"] as? Bool {p["proactive"]=mode};if let sharing=args["participates"] as? Bool {p["participates"]=sharing};agents[id]=p;policy["agents"]=agents}
         policy["revision"]=(policy["revision"] as? Int ?? 0)+1;all[w]=policy
@@ -100,8 +177,9 @@ import CryptoKit
             if omitted>0 {sources.append(["id":"coverage:"+id,"agentId":id,"kind":"coverage","status":"waiting_user","text":"\(omitted) unfinished work records exceed this check-in's input limits. Coverage is incomplete. Inspect the task list; do not claim all work has been reviewed."])}
             for r in savedRoutines.filter({$0["workspace"] as? String==w && $0["agentId"] as? String==id}) {sources.append(["id":"routine:"+(r["id"] as? String ?? ""),"agentId":id,"kind":"routine","title":r["title"] ?? "","status":r["status"] ?? "","nextRun":r["nextRun"] ?? "","lastError":r["lastError"] ?? ""])}
             sources=BuddyAgentMemory.privateValue(sources) as! [[String:Any]]
-            let fingerprint=Self.hash(sources),key=w+":"+id,previous=old[key]
-            var record:[String:Any] = ["workspace":w,"agentId":id,"name":BuddyAgentMemory.privateText(a["name"] as? String ?? "Buddy"),"sources":sources,"fingerprint":fingerprint,"scope":["recentChatLimit":8,"unfinishedTasks":unfinished.count,"includedUnfinishedTasks":min(40,unfinished.count),"recentCompletedTasks":recent.count,"unfinishedGroups":activeGroups.count,"omittedUnfinished":omitted],"observedAt":Self.stamp(now),"changedAt":previous?["changedAt"] ?? Self.stamp(now)]
+            let watch=BuddyAgentMemory.privateValue(Self.watching(sources:sources,owned:owned,quiet:Self.quietRuns(owned))) as! [[String:Any]],ownWatch=watch.filter{!(($0["id"] as? String ?? "").hasPrefix("worker:"))}
+            let fingerprint=Self.hash(watch),key=w+":"+id,previous=old[key]
+            var record:[String:Any] = ["workspace":w,"agentId":id,"name":BuddyAgentMemory.privateText(a["name"] as? String ?? "Buddy"),"sources":sources,"fingerprint":fingerprint,"meaningful":!watch.isEmpty,"chiefFingerprint":Self.hash(ownWatch),"chiefMeaningful":!ownWatch.isEmpty,"scope":["recentChatLimit":8,"unfinishedTasks":unfinished.count,"includedUnfinishedTasks":min(40,unfinished.count),"recentCompletedTasks":recent.count,"unfinishedGroups":activeGroups.count,"omittedUnfinished":omitted],"observedAt":Self.stamp(now),"changedAt":previous?["changedAt"] ?? Self.stamp(now)]
             if previous?["fingerprint"] as? String != fingerprint {record["changedAt"]=Self.stamp(now)}
             record["urgent"]=sources.contains{["waiting_review","waiting_user","failed","interrupted","needs_attention","blocked"].contains($0["status"] as? String ?? "")}
             seen[key]=record;out.append(record)
@@ -148,7 +226,7 @@ import CryptoKit
         let w=state["conversationWorkspace"] as? String ?? "",ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
         var out=(value["settings"] as? [String:[String:Any]])?[w] ?? [:]
         out["agents"]=Dictionary(uniqueKeysWithValues:ids.map{($0,configuration(out,agent:$0))})
-        out["workspace"]=w;out["checks"]=checks.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}.suffix(80).map{var j=$0;j.removeValue(forKey:"input");return j}
+        out["workspace"]=w;out["checkInModel"]=checkInModel(out);out["checks"]=checks.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}.suffix(80).map{var j=$0;j.removeValue(forKey:"input");return j}
         out["journalRevision"]=value["journalRevision"] as? Int ?? 0
         out["updates"]=updates.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}
         out["observed"]=(value["observed"] as? [String:[String:Any]] ?? [:]).values.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}.map{r in r.filter{$0.key != "sources"}}

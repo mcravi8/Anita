@@ -2,6 +2,25 @@ import Foundation
 @main struct TeamMonitorTests {
  @MainActor static func require(_ value:Bool,_ message:String){if !value{fputs("FAILED: \(message)\n",stderr);exit(1)}}
  @MainActor static func main() async throws {
+  do {
+    let stamp=ISO8601DateFormatter(),at=Date(),agentRows:[[String:Any]]=[["id":"forge","name":"Forge"],["id":"chief","name":"Chief"]]
+    let outcomes=BuddyTeamMonitor.recentOutcomes([["agentId":"chief","title":"Omori VIX pipeline re-run","status":"completed","updatedAt":stamp.string(from:at.addingTimeInterval(-600)),"result":"The 34 events reproduce."],["agentId":"forge","title":"Old task","status":"completed","updatedAt":stamp.string(from:at.addingTimeInterval(-3*86400)),"result":"Too old."],["agentId":"forge","title":"Still going","status":"running","updatedAt":stamp.string(from:at)]],agents:agentRows,now:at)
+    require(outcomes.count==1 && outcomes[0]["agent"] as? String=="Chief" && (outcomes[0]["result"] as? String)?.contains("34 events")==true,"the team summary is told what finished in the last day, by whom, and nothing older or unfinished: \(outcomes)")
+    let reports:[[String:Any]]=[["id":"c1"],["id":"c2"]]
+    require(BuddyTeamMonitor.alreadyTold(reports:reports,cited:["c1"],told:["c1"]) && !BuddyTeamMonitor.alreadyTold(reports:reports,cited:["c1","c2"],told:["c1"]) && !BuddyTeamMonitor.alreadyTold(reports:reports,cited:["nope"],told:["c1"]),"a summary is dropped only when every check-in it covers already reached the person")
+    require(BuddyTeamMonitor.instructions(kind:"overview").contains("recentOutcomes"),"the summary is told that a newer outcome replaces an older report's status")
+  }
+  do {
+    let base=Date(timeIntervalSince1970:1792400000),stamp=ISO8601DateFormatter()
+    func check(_ id:String,_ status:String,hours:Double,pacing:String?=nil,progress:String="Finished",routine:Bool=true)->[String:Any] {
+      var j:[String:Any]=["id":id,"kind":"email","status":status,"createdAt":stamp.string(from:base.addingTimeInterval(hours*3600)),"progress":progress]
+      if routine {j["routineID"]="r1"};if let pacing {j["emailPacing"]=pacing};return j
+    }
+    let silent=BuddyEmailPacing.quietJobs([check("a","completed",hours:0,pacing:"news"),check("b","completed",hours:2,pacing:"quiet"),check("c","completed",hours:4,pacing:"reminder"),
+      check("d","failed",hours:6,progress:"Reached maximum budget ($0.5)"),check("e","failed",hours:8,progress:"Reached maximum budget ($0.50)"),check("f","failed",hours:10,progress:"Something else broke"),
+      check("g","failed",hours:30,progress:"Reached maximum budget ($0.5)"),check("h","completed",hours:12,pacing:"quiet",routine:false)])
+    require(silent==["b","e"],"a scheduled check with nothing new is silent, a repeat of the failure just reported is silent, and news, a daily nudge, a different failure, the same failure a day later and a check the person asked for are all said: \(silent.sorted())")
+  }
   let known:[String:Any] = ["checkinIds":["report"],"reports":[["id":"report","sources":[["id":"worker:known-task"]]]]]
   let output:[String:Any] = ["notify":true,"body":"Inbox needs sign-in.","priority":0,"sourceIds":["worker:known-task"]]
   require(try BuddyTeamMonitor.checkedOutput(output,input:known,kind:"overview")["sourceIds"] as? [String]==["report"],"an exact supplied nested source resolves to its real enclosing report")

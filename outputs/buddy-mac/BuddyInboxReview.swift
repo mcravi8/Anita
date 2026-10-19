@@ -133,6 +133,17 @@ struct BuddyInboxFailure: LocalizedError {
             try commitReceipt(file)
         }
     }
+    /// How often what is still open is brought up when nothing is new.
+    static let reminderInterval:TimeInterval=20*3600
+    /// What the checks of one run decided to say: "news" if any of them found something new or changed, otherwise "reminder" if open items are due a nudge,
+    /// otherwise "quiet". Nil when the run did no routine email check.
+    func pacing(runID:String)->String? {
+        guard UUID(uuidString:runID) != nil else {return nil}
+        let files=(try? FileManager.default.contentsOfDirectory(at:root,includingPropertiesForKeys:nil)) ?? []
+        let values=files.filter{$0.lastPathComponent.hasPrefix(runID+"-")}.compactMap{file->String? in ((try? JSONSerialization.jsonObject(with:Data(contentsOf:file))) as? [String:Any])?["pacing"] as? String}
+        if values.isEmpty {return nil}
+        return values.contains("news") ? "news":values.contains("reminder") ? "reminder":"quiet"
+    }
     private func commitReceipt(_ file:URL) throws {
         guard var receipt=try JSONSerialization.jsonObject(with:Data(contentsOf:file)) as? [String:Any],receipt["committed"] as? Bool != true,let ledgerName=receipt["ledger"] as? String,ledgerName.range(of:#"^seen-[a-f0-9]{64}\.json$"#,options:.regularExpression) != nil else { return }
         let full=receipt["readIDs"] as? [String] ?? []
@@ -170,6 +181,16 @@ struct BuddyInboxFailure: LocalizedError {
         guard ids.count<=100000 else { throw BuddyInboxFailure(message:"This routine's email memory is full. Start a new review window rather than silently forgetting old messages.") }
         guard findings.count<=200 else {throw BuddyInboxFailure(message:"This routine has more than 200 unresolved findings. Review or narrow it before advancing memory; nothing was silently dropped.")}
         var updated=oldState;updated["ids"]=ids.sorted();updated["findings"]=findings
+        // What the person should hear about this scan. A scan that only finds what they were already told is silent; what is still open is brought up once
+        // a day (a nudge, so nothing is forgotten), and anything new or changed is said at once. The checks themselves still run and are all in Background work.
+        if receipt["routineMemory"] as? Bool==true {
+            let hasNews=(receipt["findings"] as? [[String:Any]] ?? []).contains{!["irrelevant","uncertain"].contains($0["status"] as? String ?? "")} || !(receipt["findingUpdates"] as? [[String:Any]] ?? []).isEmpty
+            let lastDigest=(oldState["digestAt"] as? String).flatMap{ISO8601DateFormatter().date(from:$0)} ?? .distantPast
+            var pacing="quiet"
+            if hasNews {pacing="news";updated["digestAt"]=ISO8601DateFormatter().string(from:Date())}
+            else if !findings.isEmpty,Date().timeIntervalSince(lastDigest)>=Self.reminderInterval {pacing="reminder";updated["digestAt"]=ISO8601DateFormatter().string(from:Date())}
+            receipt["pacing"]=pacing
+        }
         if attempts.isEmpty {updated.removeValue(forKey:"attempts")} else {updated["attempts"]=attempts}
         var scans=oldState["scans"] as? [String:[String:Any]] ?? [:]
         for key in Array(scans.keys) {let remaining=(scans[key]?["pendingIDs"] as? [String] ?? []).filter{!ids.contains($0)};scans[key]?["pendingIDs"]=remaining}

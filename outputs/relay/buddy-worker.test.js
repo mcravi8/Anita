@@ -56,3 +56,11 @@ test('actions that may or may not have gone through are listed for the user to c
  assert.deepEqual(worker.unconfirmed(task).map(r=>r.id),['2','6']);
  assert.deepEqual(worker.unconfirmed({}),[]);assert.deepEqual(worker.pending(task).map(r=>r.id),['1'],'checking an action is separate from approving one');
 });
+
+test('a scheduled check the app marked quiet says nothing: no message in the DM',()=>{
+ const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}},t={id:'scan',routineID:'r',workspace:'w',agentId:'a',status:'completed',attempt:1,result:'Nothing new since the last check. The Bank of America assessment is still open.',updatedAt:'2026-10-19T15:00:00Z'};
+ const UI=require('./buddy-worker');
+ assert.equal(UI.deliverResult(s,{...t,quiet:true}),false,'nothing new, nothing said');assert.equal((s.messages.a||[]).length,0);
+ assert.equal(UI.deliverResult(s,{...t,id:'scan2',quiet:false}),true,'a check with something to say still arrives');
+ assert.equal(UI.deliverResult(s,{...t,id:'scan3',status:'failed',progress:'Reached maximum budget',quiet:true}),false,'and so does not the same failure again');
+});

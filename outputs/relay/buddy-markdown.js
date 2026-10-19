@@ -29,9 +29,17 @@
       return html;
     }catch{return escape(text).replace(/\n/g,'<br>');}
   }
+  // Group messages saved earlier start with the speaker's name twice ("**Chief** **Chief:** ..."), which read as "ChiefChief:" in the sidebar. The chat already shows who is
+  // speaking, so a preview keeps the name once.
+  function speakerOnce(value){
+    let text=String(value??'').replace(/^\s*\*\*([^*\n:]{1,40})\*\*\s*\*{0,2}\1\s*:\s*\*{0,2}\s*/u,'$1: ');
+    if((text.match(/\*\*/g)||[]).length%2===1)text=text.replace(/\*\*(?!.*\*\*)/su,'');
+    return text;
+  }
   function preview(value){
-    if(!root.document)return String(value??'');
-    const el=root.document.createElement('div');el.innerHTML=render(value);
+    const text=speakerOnce(value);
+    if(!root.document)return text;
+    const el=root.document.createElement('div');el.innerHTML=render(text);
     return el.textContent.replace(/\s+/g,' ').trim();
   }
   root.BuddyMarkdown={render,preview};

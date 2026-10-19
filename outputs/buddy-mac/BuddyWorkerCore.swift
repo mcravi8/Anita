@@ -28,6 +28,30 @@ enum BuddyRoutineAuthorization {
     }
 }
 
+/// Which scheduled email checks have nothing to tell the person. A check that found nothing new, while the open items were already brought up today, is silent: it
+/// is still saved in Background work, but it sends no message, no notification and is not news to the team's oversight. A check that fails the same way it just
+/// did (the same wall every time) is said once, then again only after the reminder interval.
+enum BuddyEmailPacing {
+    static func quietJobs(_ jobs:[[String:Any]])->Set<String> {
+        let stamp=ISO8601DateFormatter()
+        func date(_ value:Any?)->Date {(value as? String).flatMap{stamp.date(from:$0)} ?? .distantPast}
+        func gist(_ text:String)->String {text.lowercased().filter{$0.isLetter || $0==" "}.split(separator:" ").joined(separator:" ")}
+        var quiet=Set<String>(),told=[String:Date]()
+        let runs=jobs.filter{$0["kind"] as? String=="email" && ($0["routineSeriesID"] ?? $0["routineID"]) != nil}.sorted{date($0["createdAt"])<date($1["createdAt"])}
+        for job in runs {
+            let id=job["id"] as? String ?? "",series=(job["routineSeriesID"] ?? job["routineID"]) as? String ?? ""
+            switch job["status"] as? String ?? "" {
+            case "completed": if job["emailPacing"] as? String=="quiet" {quiet.insert(id)}
+            case "failed":
+                let key=series+"|"+gist(job["progress"] as? String ?? ""),at=date(job["createdAt"])
+                if let last=told[key],at.timeIntervalSince(last)<20*3600 {quiet.insert(id)} else {told[key]=at}
+            default: break
+            }
+        }
+        return quiet
+    }
+}
+
 enum BuddyWorkerLiveness {
     static func stalled(status:String,lastActivity:Date,now:Date=Date(),timeout:TimeInterval=180)->Bool {
         // Waiting for an actual human review or private sign-in is not a stalled model.

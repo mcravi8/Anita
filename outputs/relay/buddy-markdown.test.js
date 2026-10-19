@@ -12,3 +12,12 @@ test('a message already rendered is not rendered again, and the parser is built 
  const md=context.BuddyMarkdown,first=md.render('A **clear** summary.'),second=md.render('A **clear** summary.');md.render('Another message');
  assert.equal(first,second);assert.equal(parsed,2,'two different messages are parsed once each');assert.equal(built,1,'one parser serves every message');
 });
+
+test('a preview of an older group message keeps the speaker\'s name once',()=>{
+ const md=formatter();
+ assert.equal(md.preview('**Chief** **Chief:** Start at the first microstage.'),'Chief: Start at the first microstage.');
+ assert.equal(md.preview('**Lyra** **Lyra: Research-track action plan (draft)**\n\nStatus labels: nothing is verified.').startsWith('Lyra: Research-track action plan (draft)'),true);
+ assert.equal(md.preview('**Lyra** **Lyra: Research-track action plan (draft)**\n\nBody').includes('**'),false,'no stray bold markers are left');
+ assert.equal(md.preview('Chief: Start at the first microstage.'),'Chief: Start at the first microstage.','a message that is already clean is left alone');
+ assert.equal(md.preview('**Important** note about Chief'),'**Important** note about Chief','a bold word that is not a doubled speaker is left alone');
+});

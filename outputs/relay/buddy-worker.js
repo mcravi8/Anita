@@ -9,7 +9,8 @@
   // Actions that may or may not have gone through: Buddy stopped after handing them over and before it could confirm the result.
   const unconfirmed=task=>(task.reviews||[]).filter(r=>r.status==='uncertain');
   const authTitle=mode=>mode==='signup'?'Create an account':mode==='verification'?'Verify your email':'Sign in privately';
-  const deliverable=t=>['completed','failed','interrupted','waiting_review','waiting_user'].includes(t?.status);
+  // A scheduled email check that found nothing the person has not been told (the native side decides: `quiet`) stays in Background work and says nothing.
+  const deliverable=t=>['completed','failed','interrupted','waiting_review','waiting_user'].includes(t?.status)&&t?.quiet!==true;
   const deliveryID=t=>`worker-${t.id}-${Number(t.attempt)||0}-${t.status}${['waiting_review','waiting_user'].includes(t.status)?'-'+encodeURIComponent(t.attentionKey||t.progress||''):''}`;
   const attention=status=>['waiting_review','waiting_user'].includes(status);
   function taskMessage(t){

@@ -163,7 +163,8 @@ import Darwin
             _ = try store.update(id,["updates":updates]);let result=try store.resume(id,continuingCoding:true);return ["task":result]
         }
         if operation == "status" {
-            let jobs = store.jobs.filter { $0["workspace"] as? String == current }.map { job -> [String: Any] in var out = job; out["attentionKey"]=attentionKey(job); out["unconfirmedCount"]=(job["reviews"] as? [[String: Any]] ?? []).filter { $0["status"] as? String == "uncertain" }.count; out.removeValue(forKey: "goal"); out.removeValue(forKey: "events"); out.removeValue(forKey: "reviews"); out.removeValue(forKey: "result"); return out }
+            let quietChecks = BuddyEmailPacing.quietJobs(store.jobs)
+            let jobs = store.jobs.filter { $0["workspace"] as? String == current }.map { job -> [String: Any] in var out = job; out["quiet"] = quietChecks.contains(job["id"] as? String ?? ""); out["attentionKey"]=attentionKey(job); out["unconfirmedCount"]=(job["reviews"] as? [[String: Any]] ?? []).filter { $0["status"] as? String == "uncertain" }.count; out.removeValue(forKey: "goal"); out.removeValue(forKey: "events"); out.removeValue(forKey: "reviews"); out.removeValue(forKey: "result"); return out }
             return ["workspace":current,"online": true, "paused": store.paused, "tasks": jobs, "routines":routines.routines.filter{$0["workspace"] as? String==current}, "scheduleError":(try? String(contentsOf:root.appendingPathComponent("schedule-error.txt"),encoding:.utf8)) ?? "", "privateBrowser": privateAgent.map { ["agentId": $0, "taskId": privateTask as Any? ?? NSNull()] } as Any? ?? NSNull(), "claudeConnected": try providerSettings.current(current).claudeEnabled && BuddyClaudeKey.read(current) != nil, "defaultProvider": try providerSettings.current(current).provider, "agentModels":try agentModels.ensure(workspace:current,agents:((try state())["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String},provider:providerSettings.current(current).provider).mapValues(\.payload), "claudeBudgetUSD": try providerSettings.current(current).claudeBudgetUSD, "nodeAvailable": BuddyWorkerProcess.runtime != nil, "computer": "This Mac · private browser and files", "decisions": (try? store.openDecisions(workspace: current)) ?? [], "notifications": (try? store.notificationState(workspace: current)) ?? [:], "budget": (try? store.budgetStatus(workspace: current, agents: ((try state())["agents"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })) ?? [:]]
         }
         // Reading or dismissing an alert changes only the alert: it never approves, declines or resumes anything.
@@ -691,6 +692,7 @@ import Darwin
                 values["status"] = privateTask == id ? "waiting_user" : status == "stopped" ? "paused" : status; values["progress"] = privateTask == id ? "Private Chrome is open. Finish sign-in in Buddy when ready." : (event["error"] as? String) ?? (status == "completed" ? "Finished" : "Stopped")
                 if status=="completed",privateTask != id,let issue=emailCompletionIssue(job) {values["status"]="failed";values["progress"]=issue}
                 if status=="completed",let runID { do { try service?.inboxReviews.commit(runID:runID) } catch { values["status"]="failed";values["progress"]=error.localizedDescription } }
+                if values["status"] as? String=="completed",let pacing=emailPacing(job,runID:runID) {values["emailPacing"]=pacing}
                 try? store.update(id, values); cleanup()
             } else if Date().timeIntervalSince(lastProgressSave) > 0.5 { lastProgressSave = Date(); _ = try? store.update(id, values) }
         }
@@ -761,8 +763,32 @@ import Darwin
             }
             if event["error"] as? String == nil,let runID { do { try service?.inboxReviews.commit(runID:runID) } catch { memoryError=error.localizedDescription } }
             let needsInput=taskNeedsInput || coding && codingNeedsInput
-            try? store.update(id, ["status": privateTask == id || needsInput ? "waiting_user" : event["error"] as? String == nil && memoryError == nil ? "completed" : "failed", "progress": privateTask == id ? "Private Chrome is open. Finish sign-in in Buddy when ready." : needsInput ? (try? store.job(id)["progress"] as? String) ?? "Coding needs your input" : memoryError ?? (event["error"] as? String) ?? "Finished", "spentUSD": spent + cost, "remainingBudgetUSD": max(0, reserved-cost), "reservedBudgetUSD": 0]); cleanup()
+            let failedOrWaiting = event["error"] as? String != nil || memoryError != nil || needsInput || privateTask == id
+            let finalStatus: String = privateTask == id || needsInput ? "waiting_user" : (failedOrWaiting ? "failed" : "completed")
+            let finalProgress: String
+            if privateTask == id { finalProgress = "Private Chrome is open. Finish sign-in in Buddy when ready." }
+            else if needsInput { finalProgress = (try? store.job(id)["progress"] as? String) ?? "Coding needs your input" }
+            else { finalProgress = memoryError ?? (event["error"] as? String) ?? "Finished" }
+            var finalValues: [String: Any] = ["status": finalStatus, "progress": finalProgress, "spentUSD": spent + cost, "remainingBudgetUSD": max(0, reserved - cost), "reservedBudgetUSD": 0]
+            if !failedOrWaiting, let pacing = emailPacing(job, runID: runID) { finalValues["emailPacing"] = pacing }
+            try? store.update(id, finalValues); cleanup()
         } else if ["error", "closed"].contains(event["type"] as? String ?? "") { try? store.settleActions(of: id, pending: "cancelled", cause: "run.ended"); refundIfNothingHappened(id); try? store.update(id, ["status": "failed", "progress": (event["error"] as? String) ?? "Claude stopped without confirming a result. Its reserved budget remains unavailable for retry."]); cleanup() }
+    }
+    /// What a finished routine email check has to say to the person: "news", "reminder" (open items due their daily nudge) or "quiet". Not set for checks the
+    /// person asked for themselves.
+    private func emailPacing(_ job:[String:Any],runID:String?)->String? {
+        guard job["kind"] as? String=="email",(job["routineSeriesID"] ?? job["routineID"]) != nil else {return nil}
+        let gmail=runID.flatMap{service?.inboxReviews.pacing(runID:$0)}
+        if gmail=="news" || gmail=="reminder" {return gmail}
+        var heard=gmail != nil
+        if job["browserOrigin"] as? String=="https://console.agentmail.to",permitted(job,tool:"projectFiles") {
+            // A message in the AgentMail inbox is news. If the mailbox receipt can't be read, say so rather than stay silent.
+            let f=files(job)
+            guard let scope=try? f.scope(job["workspace"] as! String),let read=try? f.read(scope,path:"agentmail-review.json"),let text=read["content"] as? String,let ledger=(try? JSONSerialization.jsonObject(with:Data(text.utf8))) as? [String:Any] else {return "news"}
+            if !(ledger["messages"] as? [Any] ?? []).isEmpty {return "news"}
+            heard=true
+        }
+        return heard ? "quiet":"news"
     }
     private func emailCompletionIssue(_ job:[String:Any])->String? {
         let current=(try? store.job(job["id"] as! String)) ?? job

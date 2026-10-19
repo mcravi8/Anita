@@ -96,3 +96,10 @@ test('a change waiting for the person’s OK is a card that asks for it, and a r
  const dismissed=A.collect(state,{workspace:'w',tasks:[],decisions:[notice],notifications:{'decision:graduated:r1:3':{read:false,dismissed:true}}});assert.equal(dismissed.length,0,'the notice can be dismissed');
  const answered=A.collect(state,{workspace:'w',tasks:[],decisions:[]});assert.equal(answered.length,0,'once answered, the card is gone');
 });
+
+test('a quiet scheduled check raises no notification, while the same kind of check with news does',()=>{
+ const t={id:'scan',workspace:'w',agentId:'inbox',title:'Check AgentMail and Gmail',status:'completed',updatedAt:'2026-10-19T15:00:00Z'};
+ assert.equal(A.collect(state,{workspace:'w',tasks:[{...t,quiet:true}]}).length,0);
+ assert.equal(A.collect(state,{workspace:'w',tasks:[{...t,quiet:false}]}).length,1);
+ assert.equal(A.collect(state,{workspace:'w',tasks:[{...t,status:'failed',progress:'Reached maximum budget',quiet:true}]}).length,0);
+});

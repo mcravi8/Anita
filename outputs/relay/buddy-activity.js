@@ -27,6 +27,7 @@
     // Once the app reports its blockers (one per cause), they are the "needs you" list for background work; before that, task states stand in.
     const useDecisions=worker.workspace===state.conversationWorkspace&&Array.isArray(worker.decisions);
     for(const t of tasks){
+      if(t.quiet===true&&!working.has(t.status))continue;
       // An action that may or may not have gone through is something to check, whatever state the task is in.
       if(useDecisions&&agents.has(t.agentId)&&(!t.workspace||t.workspace===state.conversationWorkspace)){
         if(t.status==='completed')add({id:`task:${t.id}:${t.attempt||0}:${t.status}:${t.attentionKey||''}`,kind:'finished',title:t.title||'Agent task',description:'The task finished. Open it to see the result.',agentId:t.agentId,at:t.updatedAt||t.createdAt,taskId:t.id,actionLabel:'View result'});

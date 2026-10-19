@@ -50,6 +50,7 @@ function pages(){return createServer((req,res)=>{res.setHeader('Content-Type','t
 const redirectTest=ROUTES=>async()=>{
  const inside=[];   // what reached the "internal" service
  const internal=createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;inside.push(req.method+' '+req.url+' '+body);res.setHeader('Content-Type','text/html');res.end('<title>INTERNAL</title><p>internal secret</p>');});
+ internal.on('upgrade',(req,socket)=>{inside.push('UPGRADE '+req.url);socket.on('error',()=>{});socket.destroy();});
  await new Promise(r=>internal.listen(0,'127.0.0.1',r));const target=`http://127.0.0.1:${internal.address().port}/reboot`;
  const site=createServer((req,res)=>{
   res.setHeader('Content-Type','text/html');
@@ -59,6 +60,8 @@ const redirectTest=ROUTES=>async()=>{
   if(req.url==='/form'){res.end('<title>form</title><form id=f method=post action=/r307><input name=cmd value=factory-reset></form><script>document.getElementById("f").submit()</script>');return;}
   if(req.url==='/r307'){res.statusCode=307;res.setHeader('Location',target);res.end();return;}
   if(req.url==='/legit'){res.statusCode=302;res.setHeader('Location','/ok');res.end();return;}
+  if(['/img302','/frame302','/xhr302','/script302'].includes(req.url)){res.statusCode=302;res.setHeader('Location',target);res.end();return;}
+  if(req.url==='/sub'){res.end(`<title>sub</title><img src="/img302"><iframe src="/frame302"></iframe><script src="/script302"></script><script>fetch('/xhr302',{mode:'no-cors'}).catch(()=>{});try{new WebSocket('ws://127.0.0.1:${internal.address().port}/socket')}catch(e){}try{new WebSocket('ws://127.0.0.1:${internal.address().port}/socket2')}catch(e){}</script>`);return;}
   res.end('<title>fine</title><h1>All good</h1>');
  });
  await new Promise(r=>site.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${site.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-redirect-test-'));
@@ -70,9 +73,14 @@ const redirectTest=ROUTES=>async()=>{
  }finally{await b.close().catch(()=>{});site.close();internal.close();await rm(root,{recursive:true,force:true});}
 };
 test('a redirect from a public page cannot send the browser, or a form POST, on to the private network',{timeout:90000},redirectTest(['/go','/form']));
-// Playwright does not route the hops after the first one, so a chain (public, then public, then private) is still followed by Chrome unchecked.
-// This is the known limit of checking the first hop; closing it takes a checking proxy for all browser traffic. It is listed so it cannot be forgotten.
-test('a chain of redirects that ends in the private network is refused',{todo:'needs a checking proxy for all browser traffic',timeout:90000},redirectTest(['/chain']));
+// Every request Chrome makes goes through the checking proxy, so later hops of a chain and everything a page loads are checked as well.
+test('a chain of redirects that ends in the private network is refused',{timeout:90000},redirectTest(['/chain']));
+test('images, frames, scripts, fetches and sockets that point at the private network are refused too',{timeout:90000},redirectTest(['/sub']));
+test('Chrome is launched through the checking proxy with its localhost exemption removed',async()=>{
+ const {readFile}=await import('node:fs/promises');const source=await readFile(here('browser.mjs'),'utf8');
+ assert.match(source,/proxy:\{server:this\.netGuard\.server,username:this\.netGuard\.username,password:this\.netGuard\.password,bypass:'<-loopback>'\}/,'the proxy and the loopback bypass override are both set');
+ assert.match(source,/--force-webrtc-ip-handling-policy=disable_non_proxied_udp/,'WebRTC cannot send UDP around the proxy');
+});
 test('a page that never yields cannot block the private browser for good',{timeout:60000},async()=>{
  const server=pages();await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-spin-test-'));
  const b=new PrivateBrowser(join(root,'profile'),{testOrigin:origin,commandDeadlineMs:2000});

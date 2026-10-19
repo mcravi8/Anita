@@ -1,6 +1,7 @@
 import {chromium} from 'playwright-core';
 import {lookup} from 'node:dns/promises';
 import {isIP} from 'node:net';
+import {startGuardProxy,publicAddress} from './network-guard.mjs';
 import {randomUUID, createHash} from 'node:crypto';
 import {mkdir, chmod, lstat, readlink, unlink} from 'node:fs/promises';
 import {hostname} from 'node:os';
@@ -11,14 +12,7 @@ import {realpathSync} from 'node:fs';
 import {spawn,execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 
-export function publicAddress(ip) {
-  if (isIP(ip) === 4) {
-    const [a,b,c] = ip.split('.').map(Number);
-    return !(a===0||a===10||a===127||a>=224||a===169&&b===254||a===172&&b>=16&&b<=31||a===192&&(b===168||b===0&&[0,2].includes(c))||a===100&&b>=64&&b<=127||a===198&&([18,19].includes(b)||b===51&&c===100)||a===203&&b===0&&c===113);
-  }
-  if(isIP(ip)===6) return /^2[0-9a-f]{3}:/i.test(ip)&&!ip.toLowerCase().startsWith('2001:db8:');
-  return false;
-}
+export {publicAddress};
 export async function publicURL(raw, resolver=lookup, testOrigin='') {
   const url=new URL(raw);
   if(!['https:','http:'].includes(url.protocol)||url.username||url.password) throw Error('Only public HTTP and HTTPS pages are supported.');
@@ -43,7 +37,7 @@ const runFile=promisify(execFile);
 // request waits for its timeout). Replace any lone surrogate before a frame is written.
 const frame=value=>JSON.stringify(value,(key,item)=>typeof item==='string'?item.toWellFormed():item)+'\n';
 export class PrivateBrowser {
-  constructor(profile,{testOrigin='',testGooglePath='',sharedOrigin='',commandDeadlineMs=40000,manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'}={}) {this.commandDeadlineMs=commandDeadlineMs;this.profile=resolve(profile);this.sharedOrigin=sharedOrigin;this.testOrigin=testOrigin;this.testGooglePath=testOrigin?testGooglePath:'';this.manualExecutable=manualExecutable;this.context=null;this.page=null;this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.manualProcess=null;this.lastURL=null;this.secrets=new Set();this.secretOrigins=new Map();this.googleFlow=null;}
+  constructor(profile,{testOrigin='',testGooglePath='',sharedOrigin='',commandDeadlineMs=40000,resolver=lookup,guardOptions={},manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'}={}) {this.commandDeadlineMs=commandDeadlineMs;this.resolver=resolver;this.guardOptions=guardOptions;this.profile=resolve(profile);this.sharedOrigin=sharedOrigin;this.testOrigin=testOrigin;this.testGooglePath=testOrigin?testGooglePath:'';this.manualExecutable=manualExecutable;this.context=null;this.page=null;this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.manualProcess=null;this.lastURL=null;this.secrets=new Set();this.secretOrigins=new Map();this.googleFlow=null;}
   async profileLock(){
     const path=resolve(this.profile,'SingletonLock');let meta;
     try{meta=await lstat(path);}catch(error){if(error.code==='ENOENT')return null;throw error;}
@@ -70,32 +64,27 @@ export class PrivateBrowser {
   async launch(headed=false) {
     if(this.manualProcess&&this.manualProcess.exitCode===null&&this.manualProcess.signalCode===null)throw Error('Private sign-in is open. Finish it in Buddy before resuming automated work.');
     await this.closeAutomation(); await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);await this.profileLock();
+    // Every request Chrome makes goes through a proxy that checks the real destination as it connects (see network-guard.mjs). The bypass
+    // list switches off Chrome's built-in exemption for localhost and loopback, which would otherwise skip the proxy entirely.
+    if(!this.netGuard)this.netGuard=await startGuardProxy({resolver:this.resolver,allow:this.testOrigin?[new URL(this.testOrigin).host]:[],onBlocked:()=>{this.proxyBlocked=true;},...this.guardOptions});
     // Use Chrome's real encrypted profile, never Playwright's mock Keychain/basic password store.
-    this.context=await chromium.launchPersistentContext(this.profile,{channel:'chrome',headless:!headed,chromiumSandbox:true,acceptDownloads:false,permissions:[],serviceWorkers:'block',ignoreDefaultArgs:['--password-store=basic','--use-mock-keychain','--disable-sync'],args:['--disable-extensions','--disable-background-networking']});
+    this.context=await chromium.launchPersistentContext(this.profile,{channel:'chrome',headless:!headed,chromiumSandbox:true,acceptDownloads:false,permissions:[],serviceWorkers:'block',proxy:{server:this.netGuard.server,username:this.netGuard.username,password:this.netGuard.password,bypass:'<-loopback>'},ignoreDefaultArgs:['--password-store=basic','--use-mock-keychain','--disable-sync'],args:['--disable-extensions','--disable-background-networking','--force-webrtc-ip-handling-policy=disable_non_proxied_udp']});
     await this.context.route('**/*',async route=>{
       const request=route.request();
-      const pageLoad=request.isNavigationRequest();   // a page or frame being loaded, which is where a redirect is checked below
-      let navigation=pageLoad;
+      let navigation=request.isNavigationRequest();
       if(navigation){try{navigation=!request.frame().parentFrame();}catch{/* A popup's first request precedes its frame. Treat it as top-level. */}}
       try{
-        const url=new URL(await publicURL(request.url(),lookup,this.testOrigin)),payload=request.url()+' '+(request.postData()||'');
+        const url=new URL(await publicURL(request.url(),this.resolver,this.testOrigin)),payload=request.url()+' '+(request.postData()||'');
         if(this.sharedOrigin&&navigation&&!this.googleFlow&&url.origin!==this.sharedOrigin&&!(this.sessionRefresh&&sessionRefreshDestination(this.sharedOrigin,url.href)))throw Error('Outside shared website session.');
         for(const [secret,origin] of this.secretOrigins)if(url.origin!==origin&&(payload.includes(secret)||payload.includes(encodeURIComponent(secret))))throw Error('Private sign-in data cannot be sent to another origin.');
-        // Chrome follows redirects inside its own network stack without asking again, so a public page could send the browser (and a
-        // form's POST body) on to an address inside this Mac or its network. Page loads are therefore fetched without following
-        // redirects: each Location is checked here first, and then Chrome follows it as a new request that is checked again. (Google
-        // sign-in is left to Chrome itself, as before.)
-        if(pageLoad&&!this.googleFlow){
+        if(this.sharedOrigin&&navigation&&!this.googleFlow){
           const response=await route.fetch({maxRedirects:0}),location=response.headers().location;
           if(location&&response.status()>=300&&response.status()<400){
             const destination=new URL(location,request.url());
-            await publicURL(destination.href,lookup,this.testOrigin);
-            if(this.sharedOrigin&&navigation){
-              if(destination.origin!==this.sharedOrigin){
-                if(url.origin!==this.sharedOrigin||!sessionRefreshDestination(this.sharedOrigin,destination.href)||(this.sessionRefreshes||0)>=2)throw Error('Website redirected outside the delegated session to '+destination.origin);
-                this.sessionRefresh=true;this.sessionRefreshes=(this.sessionRefreshes||0)+1;
-              }else if(url.origin!==this.sharedOrigin)this.sessionRefresh=false;
-            }
+            if(destination.origin!==this.sharedOrigin){
+              if(url.origin!==this.sharedOrigin||!sessionRefreshDestination(this.sharedOrigin,destination.href)||(this.sessionRefreshes||0)>=2)throw Error('Website redirected outside the delegated session to '+destination.origin);
+              this.sessionRefresh=true;this.sessionRefreshes=(this.sessionRefreshes||0)+1;
+            }else if(url.origin!==this.sharedOrigin)this.sessionRefresh=false;
           }
           await route.fulfill({response});
         }else await route.continue();
@@ -141,7 +130,7 @@ export class PrivateBrowser {
   }
   read(){return this.guard(()=>this.readPage());}
   async readPage(){
-    await this.ready();this.assertScope();if(this.page.url()!=='about:blank')await publicURL(this.page.url(),lookup,this.testOrigin);this.refs=[];this.prepared=null;
+    await this.ready();this.assertScope();if(this.page.url()!=='about:blank')await publicURL(this.page.url(),this.resolver,this.testOrigin);this.refs=[];this.prepared=null;
     this.lastURL=this.page.url();const privacy=await this.privacy();
     if(privacy.private){this.snapshot=null;return {url:new URL(this.page.url()).origin,title:'Private sign-in',text:'Sign-in and verification contents are private. Use buddy_browser_signin; never request passwords in chat.',controls:[],authentication:{kind:privacy.kind,private:true}};}
     const elements=await this.page.$$('a[href],button,input:not([type=hidden]),textarea,select,[role=button]');const controls=[];
@@ -154,7 +143,7 @@ export class PrivateBrowser {
     return this.scrub({snapshotId:this.snapshot.id,url:this.safeURL(),title:await this.page.title(),text:(await this.page.locator('body').innerText().catch(()=>'' )).slice(0,26000),controls});
   }
   navigate(url){return this.guard(()=>this.navigatePage(url));}
-  async navigatePage(url){this.assertScope(url);await this.ready();this.blockedNavigation=null;try{await this.page.goto(await publicURL(url,lookup,this.testOrigin),{waitUntil:'domcontentloaded',timeout:30000});}catch(error){if(this.blockedNavigation)throw Error('Website navigation blocked: '+this.blockedNavigation);throw error;}return this.read();}
+  async navigatePage(url){this.assertScope(url);await this.ready();this.blockedNavigation=null;this.proxyBlocked=false;try{await this.page.goto(await publicURL(url,this.resolver,this.testOrigin),{waitUntil:'domcontentloaded',timeout:30000});}catch(error){if(this.blockedNavigation)throw Error('Website navigation blocked: '+this.blockedNavigation);if(this.proxyBlocked)throw Error('Website navigation blocked: Local and private network pages are unavailable in Buddy’s browser.');throw error;}return this.read();}
   prepare(args){return this.guard(()=>this.preparePage(args));}
   async preparePage(args){
     await this.ready();this.assertScope();
@@ -174,7 +163,7 @@ export class PrivateBrowser {
       if(args.action==='upload'&&target.type!=='file')throw Error('Choose a file upload control.');
       if(args.action==='select'&&target.tag!=='select')throw Error('Choose a select control.');
       if(change.value!=null&&(typeof change.value!=='string'||change.value.length>12000))throw Error('Field content is too large.');
-      if(target.href)await publicURL(target.href,lookup,this.testOrigin);
+      if(target.href)await publicURL(target.href,this.resolver,this.testOrigin);
       targets.push({...target,ref:String(change.ref),value:change.value??''});
     }
     const formValues=args.action==='click'?await this.refs[Number(changes[0].ref)].evaluate(e=>[...(e.closest('form')?.querySelectorAll('input:not([type=hidden]),textarea,select')||[])].slice(0,100).map(f=>({field:f.labels?.[0]?.textContent?.trim()||f.getAttribute('aria-label')||f.name||f.type,value:f.type==='password'?'[hidden]':f.type==='file'?[...f.files].map(x=>x.name):['checkbox','radio'].includes(f.type)?f.checked:f.value}))):undefined;
@@ -202,7 +191,7 @@ export class PrivateBrowser {
     }catch(error){throw Error(`The browser operation did not return a confirmed result. Check the page before retrying: ${error.message}`);}
   }
   async prepareSignIn(mode='signin'){
-    await this.ready();this.assertScope();const url=new URL(await publicURL(this.page.url(),lookup,this.testOrigin));
+    await this.ready();this.assertScope();const url=new URL(await publicURL(this.page.url(),this.resolver,this.testOrigin));
     if(url.protocol!=='https:'&&url.origin!==this.testOrigin)throw Error('Sign-in requires HTTPS.');
     if(!['signin','signup','verification'].includes(mode))throw Error('Choose sign-in, account creation, or email verification.');
     const privacy=await this.privacy();if(privacy.kind==='security')throw Error('Account recovery and security changes need you in private Chrome.');
@@ -319,7 +308,7 @@ export class PrivateBrowser {
     const existing=this.manualProcess&&this.manualProcess.exitCode===null&&this.manualProcess.signalCode===null;
     if(existing&&destination!=='google')return {opened:true,private:true};
     let url=destination==='google'?'chrome://settings/people':this.page?.url()||this.lastURL||'about:blank';
-    if(!['about:blank','chrome://settings/people'].includes(url))url=await publicURL(url,lookup,this.testOrigin);
+    if(!['about:blank','chrome://settings/people'].includes(url))url=await publicURL(url,this.resolver,this.testOrigin);
     if(!existing)this.lastURL=url;await this.closeAutomation();await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);await this.profileLock();
     // No debugging connection, automation flags, page scripts, screenshots, or password reads during the handoff.
     const child=spawn(this.manualExecutable,[`--user-data-dir=${this.profile}`,'--no-first-run','--no-default-browser-check','--disable-background-mode','--new-window',url],{stdio:'ignore'});
@@ -331,7 +320,7 @@ export class PrivateBrowser {
   }
   async finishManual(){const p=this.manualProcess;if(p&&p.exitCode===null&&p.signalCode===null){p.kill('SIGTERM');await Promise.race([new Promise(resolve=>p.once('exit',resolve)),new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error('Close Buddy’s private Chrome window before finishing sign-in.')),8000);t.unref();})]);}this.manualProcess=null;await this.closeManualProfile();return {closed:true,url:this.lastURL?.startsWith('https:')?new URL(this.lastURL).origin:null};}
   async closeAutomation(){this.snapshot=null;this.prepared=null;this.authPlan=null;this.refs=[];if(this.context){const c=this.context;this.context=null;await Promise.race([c.close().catch(()=>{}),new Promise(r=>setTimeout(r,5000))]);}this.page=null;}
-  async close(){await this.closeAutomation();await this.finishManual();}
+  async close(){await this.closeAutomation();await this.finishManual();const guard=this.netGuard;this.netGuard=null;await guard?.close();}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(realpathSync(process.argv[1])).href){
   const browser=new PrivateBrowser(process.argv[2],{sharedOrigin:process.argv[3]||''});

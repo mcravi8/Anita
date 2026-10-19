@@ -409,6 +409,9 @@ final class BuddyOperationsDB {
 enum BuddyRunLimit {
     static let none = 1_000_000.0
     static func isNone(_ value: Double) -> Bool { value >= none / 2 }
+    /// What a run may spend. A task saved while runs had an allowance still carries one (for instance the $0.22 left of $0.50); it is not honoured, so a task
+    /// that was started then, and continued now, is not stopped by it.
+    static func allowance(provider: String, stored: Double) -> Double { provider == "claude" ? none : stored }
     /// What to hand the model bridge as the ceiling for one run: nothing, unless a daily limit leaves only so much room for it.
     static func bridge(_ allowance: Double, room: Double?) -> Any {
         let cap = isNone(allowance) ? room : min(allowance, room ?? allowance)

@@ -526,7 +526,7 @@ import Darwin
         guard try providerSettings.current(workspace).enabled(job["provider"] as? String ?? "") else { _ = try store.update(id, ["status": "paused", "progress": "This provider is disconnected. Reconnect it in Settings → AI provider, then resume."]); return }
         // Today's limit for this agent is checked before anything is set aside. A task that would pass it waits, resumable, with the reason.
         if job["provider"] as? String=="claude" {
-            var wanted=job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0
+            var wanted=BuddyRunLimit.allowance(provider:"claude",stored:job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)
             if BuddyRunLimit.isNone(wanted) {wanted=0.01}   // no limit of its own: it only needs today's limit, if there is one, to have some room left
             if let room=BuddyBudget.headroom(support:support,workspace:workspace,agent:agentID),room.room+1e-9<wanted {try store.refuseForLimit(id,limit:room.limit,scope:room.scope,exposure:room.exposure,wanted:wanted);return}
         }
@@ -576,8 +576,7 @@ import Darwin
         if !earlier.isEmpty { prompt += "\n\n" + earlier }
         if job["provider"] as? String == "claude" {
             guard let key = keyReader(workspace) else { throw BuddyWorkerFailure(message: "Reconnect Claude API credits.") }
-            var budget = job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0
-            if budget <= 0 { budget = BuddyRunLimit.none }   // a task from when runs had an allowance carries on without one
+            let budget = BuddyRunLimit.allowance(provider: job["provider"] as? String ?? "", stored: job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)
             try store.update(id, ["remainingBudgetUSD": 0, "reservedBudgetUSD": budget]); attemptHeard = false
             let p = makeClaude(); claude = p
             p.onEvent = { [weak self] event in self?.claudeEvent(event, job: job) }
@@ -595,8 +594,7 @@ import Darwin
     private func executeCoding(_ job:[String:Any],agent a:[String:Any]) throws {
         let workspace=job["workspace"] as! String,id=job["id"] as! String,folder=directory(job)
         guard permitted(job,tool:"projectFiles"),let key=keyReader(workspace),let runID else {throw BuddyWorkerFailure(message:"Reconnect Claude and enable file access for this coding session.")}
-        var budget=job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0
-        if budget<=0 {budget=BuddyRunLimit.none}
+        let budget=BuddyRunLimit.allowance(provider:"claude",stored:job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)
         let home=folder.appendingPathComponent("Claude",isDirectory:true),project=folder.appendingPathComponent("Files",isDirectory:true)
         try FileManager.default.createDirectory(at:home,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         codingNeedsInput=false

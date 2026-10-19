@@ -134,6 +134,7 @@ import Foundation
         let open = try store.create(workspace: w, agent: b, requestId: "open-ended", title: "Open", goal: "Do it", kind: "general", provider: "claude", budget: BuddyRunLimit.none)
         try store.update(open["id"] as! String, ["status": "running", "attempt": 1, "remainingBudgetUSD": 0, "reservedBudgetUSD": BuddyRunLimit.none])
         require(close(try store.exposure(workspace: w, agent: b).reserved, 0.5), "a task with no limit of its own sets nothing aside")
+        require(BuddyRunLimit.isNone(BuddyRunLimit.allowance(provider: "claude", stored: 0.217)) && close(BuddyRunLimit.allowance(provider: "chatgpt", stored: 0), 0), "a task saved with an allowance (the $0.22 left of $0.50) is not held to it when it is continued")
         require(BuddyRunLimit.bridge(BuddyRunLimit.none, room: nil) is NSNull, "with no run limit and no daily limit the model gets no ceiling")
         require(close(BuddyRunLimit.bridge(BuddyRunLimit.none, room: 3.2) as? Double ?? 0, 3.2) && close(BuddyRunLimit.bridge(BuddyRunLimit.none, room: 0) as? Double ?? 0, 0.01), "a daily limit is the only ceiling there is")
         // A limit on the whole workspace is spent by everyone in it.

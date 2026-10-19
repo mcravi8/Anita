@@ -32,8 +32,10 @@
   .shell.sidebar-compact .hidden-agents-label{display:inline-block;max-width:0;transition:max-width var(--glide) var(--curve),opacity calc(var(--glide)*.3) ease-out,visibility 0s calc(var(--glide)*.3)}
 
   /* Header band: the same box in both states (logo, then the search field), with the commands lifted out of it. */
-  /* overflow:hidden keeps the wide logo line from widening the rail; the commands (placed from the sidebar, not the header) are not clipped by it. */
-  .sidebar-header,.shell.sidebar-compact .sidebar-header{position:static;overflow:hidden;flex-direction:row;padding:20px 14px 14px;gap:8px}
+  /* The header must NOT clip (overflow stays visible): the commands are placed from the sidebar but live inside it, and the Mac app's web engine
+     clips them to the header, which hid the toggle in the rail. The wide logo line shrinks instead, so it cannot widen the rail. */
+  .sidebar-header,.shell.sidebar-compact .sidebar-header{position:static;overflow:visible;flex-direction:row;padding:20px 14px 14px;gap:8px}
+  .buddy-brand{min-width:0;overflow:hidden}
   .sidebar-header-actions,.shell.sidebar-compact .sidebar-header-actions{display:contents}
   .buddy-brand{transition:transform var(--glide) var(--curve)}
   .shell.sidebar-compact .buddy-brand{transform:translate(3px,-8px)}
@@ -42,6 +44,9 @@
     position:absolute;margin:0;width:36px;height:36px;
     transition:right var(--glide) var(--curve),top var(--glide) var(--curve),width var(--glide) var(--curve),height var(--glide) var(--curve),opacity calc(var(--glide)*.4) ease-in calc(var(--glide)*.5),visibility 0s;
   }
+  /* Above anything that overlaps the header band (the search field's hidden box sits there in the rail). */
+  .sidebar-header .icon-button:not(.mobile-sidebar-close),.sidebar .compact-chat-search{z-index:3}
+  .shell.sidebar-compact .sidebar .buddy-brand{cursor:pointer}
   .sidebar-header .sidebar-layout-toggle{right:14px;top:24px}
   .sidebar-header [data-action="new-chat"]{right:50px;top:24px}
   .sidebar-header .activity-nav,.sidebar-header .pending-suggestions-button{right:86px;top:24px}

@@ -262,6 +262,11 @@ import AppKit
         edit.addItem(item("Find in Buddy…", #selector(find), "k"))
         append(edit, to: menu)
 
+        // The sidebar can always be opened and closed from here, whatever the page is showing.
+        let view = NSMenu(title: "View")
+        view.addItem(item("Toggle Sidebar", #selector(toggleSidebar), "\\"))
+        append(view, to: menu)
+
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
         windowMenu.addItem(NSMenuItem(title: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: ""))
@@ -286,6 +291,7 @@ import AppKit
         showWindow()
         webView?.evaluateJavaScript("document.querySelector('[data-action=\"\(action)\"]')?.click()", completionHandler: nil)
     }
+    @objc private func toggleSidebar() { showWindow(); webView?.evaluateJavaScript("typeof setSidebarCompact==='function'&&typeof state!=='undefined'&&setSidebarCompact(state.sidebarCompact!==true)", completionHandler: nil) }
     @objc private func newChat() { command("new-chat") }
     @objc private func settings() { command("settings") }
     @objc private func find() { showWindow(); webView?.evaluateJavaScript("typeof searchModal === 'function' && searchModal()", completionHandler: nil) }

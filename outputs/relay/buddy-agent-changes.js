@@ -71,7 +71,7 @@
   async function act(op,args,message){
     try{await call({operation:op,arguments:args});showToast(message);}catch(e){showToast(String(e.message||e));}
     const agent=document.querySelector('[data-agent-rules]')?.dataset.agentRules;if(agent)load(agent);
-    window.BuddyWorkerUI?.refresh?.();adopt();
+    refreshNative();adopt();
   }
   document.addEventListener('click',e=>{
     const rule=e.target.closest('[data-rule-act]');
@@ -93,7 +93,14 @@
       openModal('Allow this change?',`<p class="modal-description">${esc(c.summary)}</p><p class="modal-description">You asked for this in chat. It gives more access or room to spend, so it waits for your OK.</p><div class="worker-toolbar"><button type="button" class="border-button" data-change-answer="deny" data-change-id="${esc(c.id)}">Not now</button><button type="button" class="primary-button" data-change-answer="allow" data-change-id="${esc(c.id)}">Allow</button></div>`);
     }catch(e){showToast(String(e.message||e));}
   }
-  window.addEventListener('buddy-conversation',e=>{if(e.detail?.type==='agent-settings-changed')adopt();});
+  // Settings the app holds itself (the model, limits, proactive updates, a card waiting for an OK) are shown from copies the page loaded earlier;
+  // when one is changed from chat, reload them, so the screen never says what is no longer true.
+  function refreshNative(){
+    try{window.BuddyModels?.refresh?.(true);}catch(e){}
+    try{window.BuddyWorkerUI?.refresh?.();}catch(e){}
+    try{window.BuddyTeamMonitorUI?.refresh?.();}catch(e){}
+  }
+  window.addEventListener('buddy-conversation',e=>{if(e.detail?.type==='agent-settings-changed'){adopt();refreshNative();}});
   window.addEventListener('buddy-view-updated',()=>setTimeout(paint,0));
   setInterval(()=>{adopt();paint();},5000);setTimeout(adopt,1500);
 })(typeof globalThis!=='undefined'?globalThis:this);

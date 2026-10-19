@@ -117,3 +117,24 @@ test('a check of the work shows what to look at, needs a reason to refuse, and a
   assert.deepEqual(await page.evaluate(()=>calls.filter(c=>c.operation==='review').map(c=>[c.id,c.accept,c.feedback])),[['cp1',false,'Use the shorter CV.']]);
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
 });
+
+test('a model changed from chat shows on screen without a reload',{skip,timeout:60000},async()=>{
+ const directory=await mkdtemp(path.join(tmpdir(),'buddy-rules-ui-'));let context,page;
+ try{
+  ({context,page}=await open(directory,()=>{
+   window.chosen='claude-sonnet-4-6';window.listCalls=0;
+   const models=[{provider:'claude',id:'claude-sonnet-4-6',name:'Sonnet 4.6',current:true},{provider:'claude',id:'claude-sonnet-5-5',name:'Sonnet 5.5',current:true}];
+   window.BuddyDesktop={saveState:async()=>({saved:true}),worker:async p=>({online:true,paused:false,tasks:[],routines:[],decisions:[],notifications:{}}),
+    agentModels:async p=>{listCalls++;return {models,agents:{chief:{provider:'claude',model:'claude-sonnet-4-6'},sage:{provider:'claude',model:chosen}},errors:{}};}};
+   ui.view={kind:'chat',target:'sage'};render();BuddyModels.mount();
+  }));
+  await page.waitForFunction(()=>BuddyModels.current('sage')?.model==='claude-sonnet-4-6',null,{timeout:8000});
+  assert.match(await page.locator('.agent-model-slot, [data-agent-model]').first().innerText().catch(()=>''),/Sonnet 4\.6|Claude/);
+  // The app changes the model (as it does for Chief's request), then tells the page.
+  await page.evaluate(()=>{window.chosen='claude-sonnet-5-5';window.dispatchEvent(new CustomEvent('buddy-conversation',{detail:{type:'agent-settings-changed'}}));});
+  await page.waitForFunction(()=>BuddyModels.current('sage')?.model==='claude-sonnet-5-5',null,{timeout:8000});
+  assert.ok(await page.evaluate(()=>BuddyModels.label(BuddyModels.__snapshot||{models:[{provider:'claude',id:'claude-sonnet-5-5',name:'Sonnet 5.5'}],agents:{sage:{provider:'claude',model:'claude-sonnet-5-5'}}},'sage'))==='Sonnet 5.5');
+  assert.ok(await page.evaluate(()=>listCalls)>=2,'the page asked the app again');
+  await page.waitForFunction(()=>/Sonnet 5\.5/.test(document.body.innerText),null,{timeout:8000});
+ }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
+});

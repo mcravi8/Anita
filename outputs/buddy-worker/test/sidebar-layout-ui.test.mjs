@@ -44,6 +44,11 @@ test('the wide sidebar and the rail keep every agent and footer item in the same
   // The commands sit in a grid inside the header band, above the first agent, and none overlaps another.
   const cmds=['bell','plus','search','toggle'].map(k=>rail[k]);
   for(const c of cmds){assert.ok(c.y>=52&&c.y+c.h<=rail.row0.y,`a command lies in the header band: ${JSON.stringify(c)}`);assert.ok(c.x>=0&&c.x+c.w<=rail.sidebar.w,'and inside the rail');}
+  // Some web engines (the one in the Mac app) clip a positioned child to ANY ancestor that clips, so nothing between a command and the sidebar may.
+  const clippers=await page.evaluate(()=>[...document.querySelectorAll('.sidebar-header .icon-button:not(.mobile-sidebar-close),.compact-chat-search')].flatMap(b=>{const out=[];for(let e=b.parentElement;e&&!e.classList.contains('sidebar');e=e.parentElement){const o=getComputedStyle(e);if(o.display!=='contents'&&(o.overflowX!=='visible'||o.overflowY!=='visible'||o.clipPath!=='none'||o.contain.includes('paint')))out.push((b.className||'button').toString().split(' ')[0]+' inside '+e.className);}return out;}));
+  assert.deepEqual(clippers,[],'no ancestor between a command and the sidebar clips it');
+  assert.equal(rail.sidebar.w,78);
+  assert.ok(await page.evaluate(()=>{const s=document.querySelector('.sidebar');return s.scrollWidth<=s.clientWidth;}),'and the wide logo line does not widen the rail');
   const overlap=(a,b)=>a.x<b.x+b.w&&b.x<a.x+a.w&&a.y<b.y+b.h&&b.y<a.y+a.h;
   for(let i=0;i<cmds.length;i++)for(let j=i+1;j<cmds.length;j++)assert.equal(overlap(cmds[i],cmds[j]),false,'no two commands overlap');
   await page.evaluate(()=>setSidebarCompact(false));await settle(page);
@@ -83,5 +88,23 @@ test('narrowing and widening glide: the sidebar is not rebuilt, pictures stay st
   assert.equal(await page.evaluate(()=>window.keep===document.querySelector('.sidebar')),true);
   await settle(page);
   assert.equal(await page.evaluate(()=>document.querySelector('.sidebar-layout-toggle').getAttribute('aria-label')),'Compact sidebar');
+ }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
+});
+
+test('the rail can always be opened again: the logo opens it, and the page records what it can see of the toggle',{skip,timeout:90000},async()=>{
+ const directory=await mkdtemp(path.join(tmpdir(),'buddy-layout-ui-'));let context,page;
+ try{
+  ({context,page}=await open(directory));
+  await page.evaluate(()=>setSidebarCompact(true));await settle(page);
+  const seen=await page.evaluate(()=>state.sidebarDiagnostics);
+  assert.ok(seen&&seen.compact===true&&seen.toggle&&seen.toggle.hitIsSelf===true&&seen.toggle.visibility==='visible'&&seen.sidebar.w===78,`the toggle is on screen and reachable in the rail, and the page says so: ${JSON.stringify(seen?.toggle)}`);
+  // The toggle must be what a person would click: nothing paints or sits over it.
+  const topmost=await page.evaluate(()=>{const t=document.querySelector('.sidebar-layout-toggle').getBoundingClientRect();return document.elementFromPoint(t.left+t.width/2,t.top+t.height/2).closest('.sidebar-layout-toggle')!==null;});
+  assert.equal(topmost,true);
+  await page.locator('.sidebar .buddy-brand').click();await settle(page);
+  assert.equal(await page.evaluate(()=>state.sidebarCompact),false,'clicking the logo in the rail opens the sidebar');
+  assert.equal((await probe(page)).sidebar.w,290);
+  await page.locator('.sidebar .buddy-brand').click();await page.waitForTimeout(300);
+  assert.equal(await page.evaluate(()=>state.sidebarCompact),false,'in the wide sidebar the logo does nothing');
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
 });

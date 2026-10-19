@@ -1124,7 +1124,7 @@ struct BuddyRule {
 /// kind that waits for the person; everything else applies at once, and each change keeps its old value so it can be undone.
 enum BuddyAgentChanges {
     static let agentFields: Set<String> = ["name", "role", "instructions", "avatarShape", "avatarColor", "hidden", "model", "dailyLimitUSD", "proactive", "tools.web", "tools.projectFiles", "tools.desktop"]
-    static let workspaceFields: Set<String> = ["dailyLimitUSD", "teamCheckInsEnabled", "teamCheckInIntervalMinutes", "teamCheckInModel", "teamDailyLimitUSD"]
+    static let workspaceFields: Set<String> = ["dailyLimitUSD", "teamSupervisor", "teamCheckInsEnabled", "teamCheckInIntervalMinutes", "teamCheckInModel", "teamDailyLimitUSD"]
     /// Fields the page keeps in its own state, so the page has to adopt a change to them.
     static let pageFields: Set<String> = ["name", "avatarShape", "avatarColor", "hidden", "tools.web", "tools.projectFiles", "tools.desktop"]
     /// Fields the app keeps in the agent’s saved profile (where the person’s own edits and the setup interview write them), so the app adopts them.
@@ -1195,6 +1195,9 @@ enum BuddyAgentChanges {
             return ["provider": provider, "model": name]
         case "dailyLimitUSD": return try money(value, field, allowNone: true)
         case "teamDailyLimitUSD": return try money(value, field, allowNone: false, minimum: 0.1)
+        case "teamSupervisor":
+            guard let id = value as? String, UUID(uuidString: id) != nil else { throw fail("Choose one of your agents by name.") }
+            return id
         case "teamCheckInIntervalMinutes":
             let minutes = (value as? Int) ?? (value as? Double).map { Int($0) } ?? (value as? String).flatMap(Int.init)
             guard let minutes, [5, 15, 30, 60].contains(minutes) else { throw fail("Choose 5, 15, 30 or 60 minutes.") }
@@ -1418,7 +1421,7 @@ enum BuddyRulesReader {
     private func fail(_ message: String) -> BuddyWorkerFailure { BuddyWorkerFailure(message: message) }
     static let labels: [String: String] = ["name": "name", "role": "role", "instructions": "instructions", "avatarShape": "figure", "avatarColor": "colour", "hidden": "visibility", "model": "model", "dailyLimitUSD": "daily spending limit",
         "proactive": "proactive updates", "tools.web": "web access", "tools.projectFiles": "file access", "tools.desktop": "browser access", "teamCheckInsEnabled": "team check-ins", "teamCheckInIntervalMinutes": "team check-in interval",
-        "teamCheckInModel": "team check-in model", "teamDailyLimitUSD": "team check-in limit"]
+        "teamCheckInModel": "team check-in model", "teamDailyLimitUSD": "team check-in limit", "teamSupervisor": "team supervisor"]
     private func name(of agent: String) -> String { ((try? agents())?.first { $0["id"] as? String == agent }?["name"] as? String) ?? "this agent" }
     func describe(_ field: String, _ value: Any?) -> String {
         guard let value, !(value is NSNull) else { return field.hasSuffix("LimitUSD") ? "no limit" : "the default" }
@@ -1427,6 +1430,7 @@ enum BuddyRulesReader {
         case "model": let m = value as? [String: Any]; return [m?["provider"] as? String, (m?["model"] as? String).flatMap { $0.isEmpty ? nil : $0 }].compactMap { $0 }.joined(separator: " · ")
         case "dailyLimitUSD", "teamDailyLimitUSD": let n = (value as? Double) ?? (value as? Int).map(Double.init) ?? 0; return String(format: "$%.2f a day", n)
         case "teamCheckInIntervalMinutes": return "every \(value) minutes"
+        case "teamSupervisor": return name(of: value as? String ?? "")
         case "instructions": return "“" + String((value as? String ?? "").prefix(140)) + ((value as? String ?? "").count > 140 ? "…" : "") + "”"
         default: if let flag = value as? Bool { return flag ? "on" : "off" }; return "“\(value)”"
         }
@@ -1470,7 +1474,15 @@ enum BuddyRulesReader {
         let target = try targetAgent(args, actor: actor, scope: scope), quote = args["quote"] as? String ?? ""
         try authorize(actor: actor, text: text, quote: quote, scope: scope, target: target)
         let field = args["field"] as? String ?? ""
-        let new = try BuddyAgentChanges.normalize(scope: scope, field: field, value: args["value"])
+        var wantedValue = args["value"]
+        if field == "teamSupervisor" {
+            // The person says who by name; the setting holds the agent's id.
+            let wanted = (wantedValue as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), all = try agents()
+            let matches = all.filter { ($0["id"] as? String ?? "").lowercased() == wanted || ($0["name"] as? String ?? "").lowercased() == wanted }
+            guard matches.count == 1, let id = matches[0]["id"] as? String else { throw fail("Name one of these agents: " + all.compactMap { $0["name"] as? String }.joined(separator: ", ") + ".") }
+            wantedValue = id
+        }
+        let new = try BuddyAgentChanges.normalize(scope: scope, field: field, value: wantedValue)
         if field == "name", let wanted = new as? String, try agents().contains(where: { $0["id"] as? String != target && ($0["name"] as? String)?.lowercased() == wanted.lowercased() }) { throw fail("Another agent already has that name. Choose a different one.") }
         let old = try current(scope, target, field)
         if same(old, new) { return ["saved": true, "unchanged": true, "message": "That is already the setting: " + line(scope, target, field, from: old, to: new)] }

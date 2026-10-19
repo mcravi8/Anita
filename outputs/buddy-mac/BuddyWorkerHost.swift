@@ -890,6 +890,7 @@ import Darwin
             let state = try self.state(), policy = try self.monitor.store.policy(state)
             if scope == "workspace" {
                 switch field {
+                case "teamSupervisor": return policy["supervisorId"] as? String
                 case "teamCheckInsEnabled": return policy["enabled"] as? Bool ?? true
                 case "teamCheckInIntervalMinutes": return policy["intervalMinutes"] as? Int ?? 15
                 case "teamCheckInModel": return (policy["checkInModel"] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -911,6 +912,7 @@ import Darwin
             let state = try self.state()
             if scope == "workspace" {
                 switch field {
+                case "teamSupervisor": _ = try self.monitor.store.setPolicy(["supervisorId": value as? String ?? ""], state: state)
                 case "teamCheckInsEnabled": _ = try self.monitor.store.setPolicy(["enabled": value as? Bool ?? true], state: state)
                 case "teamCheckInIntervalMinutes": _ = try self.monitor.store.setPolicy(["intervalMinutes": value as? Int ?? 15], state: state)
                 case "teamCheckInModel": _ = try self.monitor.store.setPolicy(["checkInModel": value as? String ?? ""], state: state)

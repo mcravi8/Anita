@@ -15,6 +15,7 @@ import Foundation
         var native: [String: Any] = [:]               // what the app itself holds: "agent:field" or "workspace:field"
         var writes: [String] = []
         var failWrites = false
+        var supervisorID = ""
         let store: BuddyWorkerStore
         let engine: BuddyAgentSettings
         let support: URL
@@ -26,9 +27,9 @@ import Foundation
                 page[id] = ["id": id, "name": name, "role": "Helper", "description": "Help.", "avatarShape": "sphere", "avatarColor": "blue", "tools": ["web": true, "projectFiles": true, "desktop": false]]
             }
             page[mia]?["managedBy"] = chief; page[rex]?["managedBy"] = sage
-            native["workspace:teamCheckInsEnabled"] = true; native["workspace:teamCheckInIntervalMinutes"] = 15; native["workspace:teamDailyLimitUSD"] = 2.0
+            supervisorID = chief; native["workspace:teamSupervisor"] = chief; native["workspace:teamCheckInsEnabled"] = true; native["workspace:teamCheckInIntervalMinutes"] = 15; native["workspace:teamDailyLimitUSD"] = 2.0
             engine.agents = { [unowned self] in [self.chief, self.sage, self.mia, self.rex].compactMap { self.page[$0] } }
-            engine.supervisor = { [unowned self] in self.chief }
+            engine.supervisor = { [unowned self] in self.supervisorID }
             engine.read = { [unowned self] scope, agent, field in
                 if scope == "workspace" { return self.native["workspace:" + field] }
                 if BuddyAgentChanges.pageFields.contains(field) || BuddyAgentChanges.appFields.contains(field) {
@@ -45,6 +46,7 @@ import Foundation
                 if self.failWrites { throw BuddyWorkerFailure(message: "The write failed.") }
                 self.writes.append("\(scope):\(agent.prefix(4)):\(field)")
                 self.native[scope == "workspace" ? "workspace:" + field : "agent:\(agent):\(field)"] = value
+                if scope == "workspace" && field == "teamSupervisor" { self.supervisorID = value as? String ?? "" }
             }
         }
         func say(_ actor: String?, _ message: String, _ args: [String: Any]) throws -> [String: Any] { try engine.change(actor: actor, text: message, args: args) }
@@ -282,6 +284,18 @@ import Foundation
         require(try !(store.rule(alwaysID)!.graduated) && store.autoApprovingRule(for: ["workspace": w, "agentId": sage, "kind": "applications", "checkpoints": [alwaysID]]) == nil, "a rule that asks every time never lets anything through")
         for n in 0..<30 { _ = try? world.engine.addRule(actor: nil, text: "", args: ["agentId": mia, "rule": "Rule number \(n) in words"]) }
         require(refuses("a thirty-first rule") { _ = try world.engine.addRule(actor: nil, text: "", args: ["agentId": mia, "rule": "One too many rules"]) }, "an agent has at most thirty rules")
+
+        // 16. Who oversees the team can be changed in plain words, by name, by the one who oversees it now.
+        let handOver = try world.say(chief, "Make Sage the team supervisor", ["scope": "workspace", "field": "teamSupervisor", "value": "sage", "quote": "Make Sage the team supervisor"])
+        require(handOver["saved"] as? Bool == true && world.supervisorID == sage, "the supervisor can be changed by naming an agent: \(handOver)")
+        require(try world.engine.snapshot(agent: nil, workspaceFields: true)["workspace"].flatMap { ($0 as? [String: Any])?["teamSupervisor"] as? String } == "Sage", "the settings read back the supervisor by name, never by id")
+        require(refuses("a former supervisor changing it") { _ = try world.say(chief, "Make me supervisor again", ["scope": "workspace", "field": "teamSupervisor", "value": "Chief", "quote": "Make me supervisor again"]) }, "only the current supervisor may hand it over")
+        require(refuses("an unknown agent") { _ = try world.say(sage, "Make Nobody the supervisor", ["scope": "workspace", "field": "teamSupervisor", "value": "Nobody", "quote": "Make Nobody the supervisor"]) }, "the supervisor must be one of the agents")
+        let handBack = try world.say(nil, "", ["scope": "workspace", "field": "teamSupervisor", "value": chief])
+        require(handBack["saved"] as? Bool == true && world.supervisorID == chief, "the person on screen can always choose, by id as well")
+        require(refuses("undoing an older hand-over") { _ = try world.engine.undo(actor: nil, text: "", args: ["changeId": handOver["changeId"] as Any]) }, "an earlier hand-over cannot be undone over a newer one")
+        let undoBack = try world.engine.undo(actor: nil, text: "", args: ["changeId": handBack["changeId"] as Any])
+        require(undoBack["saved"] as? Bool == true && world.supervisorID == sage, "the newest hand-over can be undone")
 
         print("PASS: settings change only on the person’s own quoted words and only by someone allowed to; each value is checked; every change keeps old and new and can be undone newest-first; access and spending increases wait for one tap; readers see changes before they are carried home; interrupted changes are sorted out; standing rules count only the person’s approvals, once each, earn their freedom at the number asked, apply to the right agent, kind and workspace, and can be paused, restarted or removed")
     }

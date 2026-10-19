@@ -48,7 +48,7 @@ import Foundation
         let savedProactive=try send("SAVE_PROACTIVE",proactiveOptions);await wait{terminal(savedProactive)}
         require(events.contains{$0["runId"] as? String==savedProactive && $0["status"] as? String=="completed"},"Claude's real native saved-setting receipt satisfies the proactive acknowledgement guard")
         let inGroup=Set(BuddyWorkerClient.groupTools.compactMap{$0["name"] as? String})
-        require(inGroup==["buddy_team","buddy_start_background_task","buddy_computer_task","buddy_coding_session"],"agents in a group chat can run code and use websites, but cannot change settings, rules or schedules from there: \(inGroup)")
+        require(inGroup==Set(BuddyWorkerClient.tools.compactMap{$0["name"] as? String}) && inGroup.isSuperset(of:["buddy_coding_session","buddy_computer_task","buddy_agent_settings","buddy_agent_rules","buddy_manage_routine","buddy_team"]),"an agent in a group chat has everything it has in a direct chat, so a request is never answered with 'ask me in my own chat': \(inGroup)")
         var ruleOptions=options;ruleOptions.requiresRule=true
         let unsavedRule=try send("Keep it in mind.",ruleOptions);await wait{terminal(unsavedRule)}
         require(events.contains{$0["runId"] as? String==unsavedRule && $0["status"] as? String=="failed" && ($0["error"] as? String)?.contains("rule wasn’t saved")==true},"Claude cannot finish a stated rule without a native saved-rule receipt")

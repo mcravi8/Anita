@@ -131,6 +131,16 @@ enum BuddyWorkerWire {
     }
 }
 
+/// One entry in a task's history. `id` orders events across all tasks; `seq` orders one task's events and never skips a number.
+struct BuddyTaskEvent {
+    let id: Int64, taskID: String, seq: Int, type: String, cause: String, correlation: String, attempt: Int?, payload: [String: Any], at: String
+}
+
+/// One try at a task. `outcome` is nil while the attempt is still going.
+struct BuddyAttempt {
+    let taskID: String, number: Int, runID: String, provider: String, model: String, startedAt: String, endedAt: String?, outcome: String?
+}
+
 @MainActor final class BuddyWorkerStore {
     let directory: URL
     private let db: BuddyOperationsDB
@@ -152,15 +162,18 @@ enum BuddyWorkerWire {
         guard tasks.count <= 1000, tasks.allSatisfy({ ($0["id"] as? String).flatMap(UUID.init(uuidString:)) != nil && ($0["workspace"] as? String).flatMap(UUID.init(uuidString:)) != nil }), Set(tasks.compactMap { $0["id"] as? String }).count == tasks.count else { throw BuddyWorkerFailure(message: "Buddy couldn’t verify its saved background tasks. Restore them from the newest ZIP in Worker/Backups before starting the worker.") }
         jobs = tasks; paused = try db.meta("paused") == "1"
         if jobs.count > Self.archiveTrigger { try? archiveFinished(keeping: Self.archiveKeep) }
-        var interrupted: [[String: Any]] = []
+        try recordBaseline()
+        var interrupted: [(old: [String: Any], new: [String: Any])] = []
         for i in jobs.indices where Self.interrupted.contains(jobs[i]["status"] as? String ?? "") {
+            let before = jobs[i]
             var reviews = jobs[i]["reviews"] as? [[String: Any]] ?? []
             for r in reviews.indices { if reviews[r]["status"] as? String == "pending" { reviews[r]["status"] = "expired" } else if reviews[r]["status"] as? String == "answered" { reviews[r]["status"] = "uncertain" } }
             jobs[i]["reviews"] = reviews
             jobs[i]["status"] = "interrupted"; jobs[i]["progress"] = "The worker restarted. Review the last result and any external action before continuing. Nothing was automatically retried."
-            interrupted.append(jobs[i])
+            interrupted.append((before, jobs[i]))
         }
-        if !interrupted.isEmpty { try db.transaction { for job in interrupted { try Self.save(job, in: db) } } }
+        if !interrupted.isEmpty { try db.transaction { for change in interrupted { try Self.commit(change.new, from: change.old, cause: "worker.restart", in: db) } } }
+        try pruneEvents()
     }
     /// Sets the oldest completed or cancelled tasks aside, leaving `keep` tasks in the list. Nothing is deleted: they stay in the database,
     /// marked as archived, and come back with `archivedJobs()`. A task that needs attention stays in the list, and so does the newest task of
@@ -178,7 +191,12 @@ enum BuddyWorkerWire {
             if excess > 0, Self.terminal.contains(job["status"] as? String ?? ""), !newest.contains(job["id"] as? String ?? "") { moved.append(job); excess -= 1 } else { kept.append(job) }
         }
         guard !moved.isEmpty else { return 0 }
-        try db.transaction { for job in moved { try db.run("UPDATE tasks SET archived = 1, version = version + 1 WHERE id = ?", [.text(job["id"] as? String ?? "")]) } }
+        try db.transaction {
+            for job in moved {
+                try db.run("UPDATE tasks SET archived = 1, version = version + 1 WHERE id = ?", [.text(job["id"] as? String ?? "")])
+                try Self.appendEvent("task.archived", task: job, attempt: job["attempt"] as? Int, cause: "history.limit", payload: ["status": job["status"] as? String ?? ""], in: db)
+            }
+        }
         jobs = kept
         return moved.count
     }
@@ -216,11 +234,11 @@ enum BuddyWorkerWire {
         for key in amounts { if let whole = out[key] as? Int { out[key] = Double(whole) } }
         return out
     }
-    @discardableResult func update(_ id: String, _ values: [String: Any]) throws -> [String: Any] {
+    @discardableResult func update(_ id: String, _ values: [String: Any], cause: String = "") throws -> [String: Any] {
         guard let i = jobs.firstIndex(where: { $0["id"] as? String == id }) else { throw BuddyWorkerFailure(message: "This task is unavailable.") }
         let old = jobs[i]; jobs[i].merge(Self.decimals(values)) { _, new in new }; jobs[i]["updatedAt"] = ISO8601DateFormatter().string(from: Date())
         let saved = jobs[i]
-        do { try db.transaction { try Self.save(saved, in: db) } } catch { jobs[i] = old; throw error }; return jobs[i]
+        do { try db.transaction { try Self.commit(saved, from: old, cause: cause, in: db) } } catch { jobs[i] = old; throw error }; return jobs[i]
     }
     func create(workspace: String, agent: String, requestId: String, title: String, goal: String, kind: String, provider: String, budget: Double, model:String?=nil) throws -> [String: Any] {
         guard UUID(uuidString: workspace) != nil, UUID(uuidString: agent) != nil, !requestId.isEmpty, requestId.count <= 200,
@@ -235,11 +253,121 @@ enum BuddyWorkerWire {
         var job: [String: Any] = ["id": UUID().uuidString, "workspace": workspace, "agentId": agent, "requestId": requestId, "title": title, "goal": goal, "kind": kind, "provider": provider, "budgetUSD": budget, "status": "queued", "progress": "Queued", "createdAt": now, "updatedAt": now, "attempt": 0, "events": [[String: Any]](), "result": "", "files": [[String: Any]]()]
         if let model,!model.isEmpty {guard model.range(of:#"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"#,options:.regularExpression) != nil else{throw BuddyWorkerFailure(message:"Invalid task model.")};job["model"]=model}
         let created = job
-        jobs.append(job); do { try db.transaction { try Self.insert(created, archived: false, in: db) } } catch { jobs.removeLast(); throw error }; return job
+        jobs.append(job)
+        do {
+            try db.transaction {
+                try Self.insert(created, archived: false, in: db)
+                try Self.appendEvent("task.created", task: created, attempt: nil, cause: "request", payload: ["kind": kind, "provider": provider, "status": "queued"], in: db)
+            }
+        } catch { jobs.removeLast(); throw error }
+        return job
     }
     func setPaused(_ value: Bool) throws {
         let old = paused; paused = value
         do { try db.transaction { try db.setMeta("paused", value ? "1" : "0") } } catch { paused = old; throw error }
+    }
+
+    // MARK: history
+
+    /// Statuses that end an attempt. `waiting_review` does not: the attempt is still going and is only waiting for an answer.
+    static let attemptEnds: Set<String> = ["completed", "failed", "interrupted", "paused", "cancelled", "waiting_user"]
+    /// Past this many events, those of archived tasks are dropped oldest first (never one a consumer has still to receive).
+    static var eventLimit = 100_000
+
+    private static func stamp() -> String { ISO8601DateFormatter().string(from: Date()) }
+
+    /// Adds one entry to a task's history, and one outbox row for every registered consumer. The caller's transaction holds both.
+    static func appendEvent(_ type: String, task: [String: Any], attempt: Int?, cause: String = "", payload: [String: Any] = [:], in db: BuddyOperationsDB) throws {
+        let id = task["id"] as? String ?? ""
+        let next = try db.rows("SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE task_id = ?", [.text(id)]).first?.first?.int ?? 1
+        let attemptColumn: BuddyOperationsDB.Bind
+        if let attempt { attemptColumn = .int(Int64(attempt)) } else { attemptColumn = .null }
+        try db.run("INSERT INTO events(task_id, seq, type, cause, correlation, attempt, payload, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                   [.text(id), .int(next), .text(type), .text(cause), .text(task["requestId"] as? String ?? ""), attemptColumn, .text(try BuddyOperationsDB.encode(payload)), .text(stamp())])
+        try db.run("INSERT INTO outbox(event_id, consumer) SELECT ?, name FROM consumers", [.int(db.lastInsertID)])
+    }
+
+    /// Saves a changed task and, in the same transaction, writes what the change meant: an attempt that ended, the new status, an attempt that
+    /// began. A change that touches none of those (progress text, a result being built up) writes the row and nothing else.
+    private static func commit(_ new: [String: Any], from old: [String: Any], cause: String, in db: BuddyOperationsDB) throws {
+        try save(new, in: db)
+        let id = new["id"] as? String ?? "", before = old["status"] as? String ?? "", after = new["status"] as? String ?? ""
+        let oldAttempt = old["attempt"] as? Int ?? 0, newAttempt = new["attempt"] as? Int ?? 0
+        if before != after, attemptEnds.contains(after) {
+            let closed = try db.run("UPDATE attempts SET ended_at = ?, outcome = ? WHERE task_id = ? AND outcome IS NULL", [.text(stamp()), .text(after), .text(id)])
+            if closed > 0 { try appendEvent("attempt.ended", task: new, attempt: oldAttempt, cause: cause, payload: ["n": oldAttempt, "outcome": after], in: db) }
+        }
+        if before != after { try appendEvent("task.status", task: new, attempt: newAttempt, cause: cause, payload: ["from": before, "to": after], in: db) }
+        if newAttempt > oldAttempt {
+            let run = new["executionRunID"] as? String ?? ""
+            let opened = try db.run("INSERT OR IGNORE INTO attempts(task_id, n, run_id, provider, model, started_at) VALUES(?, ?, ?, ?, ?, ?)",
+                                    [.text(id), .int(Int64(newAttempt)), .text(run), .text(new["provider"] as? String ?? ""), .text(new["model"] as? String ?? ""), .text(stamp())])
+            if opened > 0 { try appendEvent("attempt.started", task: new, attempt: newAttempt, cause: cause, payload: ["n": newAttempt, "runID": run], in: db) }
+        }
+    }
+
+    /// Tasks that were already there when history began (a first start after the update) get one starting entry, so every task's
+    /// history says where it began.
+    private func recordBaseline() throws {
+        let missing = try db.rows("SELECT id FROM tasks WHERE archived = 0 AND NOT EXISTS (SELECT 1 FROM events WHERE events.task_id = tasks.id)").compactMap { $0.first?.string }
+        guard !missing.isEmpty else { return }
+        let byID = Dictionary(jobs.compactMap { job in (job["id"] as? String).map { ($0, job) } }, uniquingKeysWith: { first, _ in first })
+        try db.transaction {
+            for id in missing { if let job = byID[id] { try Self.appendEvent("task.imported", task: job, attempt: job["attempt"] as? Int, cause: "history.begins", payload: ["status": job["status"] as? String ?? ""], in: db) } }
+        }
+    }
+
+    private func pruneEvents() throws {
+        let total = Int(try db.rows("SELECT COUNT(*) FROM events").first?.first?.int ?? 0)
+        guard total > Self.eventLimit else { return }
+        try db.transaction {
+            let doomed = try db.rows("SELECT e.id FROM events e JOIN tasks t ON t.id = e.task_id WHERE t.archived = 1 AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.event_id = e.id AND o.delivered_at IS NULL) ORDER BY e.id LIMIT ?", [.int(Int64(total - Self.eventLimit))]).compactMap { $0.first?.int }
+            for id in doomed { try db.run("DELETE FROM outbox WHERE event_id = ?", [.int(id)]); try db.run("DELETE FROM events WHERE id = ?", [.int(id)]) }
+        }
+    }
+
+    private static let eventColumns = "e.id, e.task_id, e.seq, e.type, e.cause, e.correlation, e.attempt, e.payload, e.created_at"
+    private static func event(_ row: [BuddyOperationsDB.Column]) -> BuddyTaskEvent? {
+        guard row.count == 9, let id = row[0].int, let task = row[1].string, let seq = row[2].int, let type = row[3].string else { return nil }
+        return BuddyTaskEvent(id: id, taskID: task, seq: Int(seq), type: type, cause: row[4].string ?? "", correlation: row[5].string ?? "", attempt: row[6].int.map { Int($0) },
+                              payload: (try? BuddyOperationsDB.decode(row[7].string ?? "{}")) ?? [:], at: row[8].string ?? "")
+    }
+    /// A task's history in order, from just after `seq`.
+    func history(of taskID: String, after seq: Int = 0) throws -> [BuddyTaskEvent] {
+        try db.rows("SELECT \(Self.eventColumns) FROM events e WHERE e.task_id = ? AND e.seq > ? ORDER BY e.seq", [.text(taskID), .int(Int64(seq))]).compactMap(Self.event)
+    }
+    func attempts(of taskID: String) throws -> [BuddyAttempt] {
+        try db.rows("SELECT n, run_id, provider, model, started_at, ended_at, outcome FROM attempts WHERE task_id = ? ORDER BY n", [.text(taskID)]).compactMap { row in
+            guard let n = row[0].int else { return nil }
+            return BuddyAttempt(taskID: taskID, number: Int(n), runID: row[1].string ?? "", provider: row[2].string ?? "", model: row[3].string ?? "", startedAt: row[4].string ?? "", endedAt: row[5].string, outcome: row[6].string)
+        }
+    }
+    var eventCount: Int { Int((try? db.rows("SELECT COUNT(*) FROM events").first?.first?.int) ?? 0) }
+
+    // MARK: outbox
+
+    /// Signs a consumer up for events. From then on every new event gets a row for it, written with the event. A consumer that is already
+    /// registered is left as it is; `replayHistory` also queues the events that already exist, for a consumer that needs all of them.
+    func register(consumer name: String, replayHistory: Bool = false) throws {
+        try db.transaction {
+            let added = try db.run("INSERT OR IGNORE INTO consumers(name, registered_at) VALUES(?, ?)", [.text(name), .text(Self.stamp())])
+            if added > 0, replayHistory { try db.run("INSERT OR IGNORE INTO outbox(event_id, consumer) SELECT id, ? FROM events", [.text(name)]) }
+        }
+    }
+    /// The events a consumer has not handled yet, oldest first.
+    func undelivered(for consumer: String, limit: Int = 100) throws -> [BuddyTaskEvent] {
+        try db.rows("SELECT \(Self.eventColumns) FROM outbox o JOIN events e ON e.id = o.event_id WHERE o.consumer = ? AND o.delivered_at IS NULL ORDER BY e.id LIMIT ?", [.text(consumer), .int(Int64(limit))]).compactMap(Self.event)
+    }
+    /// Records that a consumer handled an event. `effect` runs in the same transaction, so an effect on this database and the record that
+    /// it happened stand or fall together; if it throws, the event stays waiting. Handling the same event twice does nothing the second
+    /// time and returns false. An effect outside this database can still repeat after a crash, so it must treat the event's `id` as its key.
+    @discardableResult func deliver(_ event: BuddyTaskEvent, to consumer: String, effect: (BuddyOperationsDB) throws -> Void = { _ in }) throws -> Bool {
+        try db.transaction {
+            let marked = try db.run("UPDATE outbox SET delivered_at = ? WHERE event_id = ? AND consumer = ? AND delivered_at IS NULL", [.text(Self.stamp()), .int(event.id), .text(consumer)])
+            guard marked == 1 else { return false }
+            try effect(db)
+            return true
+        }
     }
     func resume(_ id: String, continuingCoding:Bool=false,additionalBudgetUSD:Double?=nil,authorizationID:String?=nil) throws -> [String: Any] {
         let job = try self.job(id)
@@ -253,7 +381,7 @@ enum BuddyWorkerWire {
             fields["uncertainBudgetUSD"]=(job["uncertainBudgetUSD"] as? Double ?? 0)+(job["reservedBudgetUSD"] as? Double ?? 0)
             fields["reservedBudgetUSD"]=0.0;fields["remainingBudgetUSD"]=amount
         } else if job["provider"] as? String=="claude",(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0 {throw BuddyWorkerFailure(message:"Choose an additional Claude allowance in this task before resuming. Previous unconfirmed usage stays recorded.")}
-        return try update(id,fields)
+        return try update(id,fields,cause:"resume")
     }
 }
 

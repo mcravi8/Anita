@@ -13,7 +13,7 @@ struct BuddyOperationsFailure: LocalizedError {
 /// original dictionary as JSON in `body`, so the code above the store sees exactly the shape it always saw.
 final class BuddyOperationsDB {
     static let fileName = "operations.sqlite"
-    static let schemaVersion: Int64 = 1
+    static let schemaVersion: Int64 = 2
     /// Called just before COMMIT and just after it. Only the crash tests set them, to end the process at each commit boundary.
     static var beforeCommit: (() -> Void)?
     static var afterCommit: (() -> Void)?
@@ -64,6 +64,11 @@ final class BuddyOperationsDB {
         let version = try rows("PRAGMA user_version").first?.first?.int ?? 0
         if version > Self.schemaVersion { throw BuddyOperationsFailure(message: "The task database was written by a newer version of Buddy. Update Buddy before starting the worker.") }
         guard version < Self.schemaVersion else { return }
+        // Each step is its own transaction, so a database left at version 1 by an earlier Buddy is brought up one version at a time.
+        if version < 1 { try createVersion1() }
+        if version < 2 { try createVersion2() }
+    }
+    private func createVersion1() throws {
         try transaction {
             try run("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             try run("""
@@ -94,7 +99,44 @@ final class BuddyOperationsDB {
                     version INTEGER NOT NULL DEFAULT 1,
                     body TEXT NOT NULL)
                 """)
-            try run("PRAGMA user_version = \(Self.schemaVersion)")
+            try run("PRAGMA user_version = 1")
+        }
+    }
+    /// Version 2: attempts, the ordered event log of each task, and the outbox that hands events to whoever registered for them.
+    private func createVersion2() throws {
+        try transaction {
+            // One row per try at a task. `outcome` stays empty while the attempt is still going.
+            try run("""
+                CREATE TABLE IF NOT EXISTS attempts(
+                    task_id TEXT NOT NULL,
+                    n INTEGER NOT NULL,
+                    run_id TEXT NOT NULL DEFAULT '',
+                    provider TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    outcome TEXT,
+                    PRIMARY KEY(task_id, n))
+                """)
+            // `id` orders every event of every task; `seq` orders one task's events and never has a gap.
+            try run("""
+                CREATE TABLE IF NOT EXISTS events(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    cause TEXT NOT NULL DEFAULT '',
+                    correlation TEXT NOT NULL DEFAULT '',
+                    attempt INTEGER,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(task_id, seq))
+                """)
+            try run("CREATE TABLE IF NOT EXISTS consumers(name TEXT PRIMARY KEY, registered_at TEXT NOT NULL)")
+            // One row per event per registered consumer, written in the same transaction as the event. `delivered_at` is the consumer's record that it handled the event.
+            try run("CREATE TABLE IF NOT EXISTS outbox(event_id INTEGER NOT NULL, consumer TEXT NOT NULL, delivered_at TEXT, PRIMARY KEY(event_id, consumer))")
+            try run("CREATE INDEX IF NOT EXISTS outbox_waiting ON outbox(consumer, event_id) WHERE delivered_at IS NULL")
+            try run("PRAGMA user_version = 2")
         }
     }
 
@@ -116,6 +158,8 @@ final class BuddyOperationsDB {
         }
         return prepared
     }
+    /// The row number SQLite gave the most recent INSERT on this connection.
+    var lastInsertID: Int64 { handle.map { sqlite3_last_insert_rowid($0) } ?? 0 }
     /// Runs one statement and returns how many rows it changed.
     @discardableResult func run(_ sql: String, _ binds: [Bind] = []) throws -> Int {
         let prepared = try statement(sql, binds); defer { sqlite3_finalize(prepared) }

@@ -33,7 +33,7 @@ import CryptoKit
         var id = "", other = ""
         let all: [() throws -> Void] = [
             { id = try store.create(workspace: w, agent: a, requestId: "first", title: "First", goal: "Do it", kind: "general", provider: "claude", budget: 0.5)["id"] as! String },
-            { try store.update(id, ["status": "running", "remainingBudgetUSD": 0, "reservedBudgetUSD": 0.5]) },
+            { try store.update(id, ["status": "running", "attempt": 1, "executionRunID": "run-1", "remainingBudgetUSD": 0, "reservedBudgetUSD": 0.5]) },
             { try store.update(id, ["progress": "Halfway there"]) },
             { other = try store.create(workspace: w, agent: a, requestId: "second", title: "Second", goal: "Do more", kind: "general", provider: "chatgpt", budget: 0)["id"] as! String },
             { try store.update(other, ["status": "completed", "result": "Done"]) },
@@ -41,17 +41,51 @@ import CryptoKit
             { _ = try store.archiveFinished(keeping: 1) },
             { try store.update(id, ["status": "paused"]) },
             { _ = try store.resume(id, additionalBudgetUSD: 0.3, authorizationID: authorization) },
+            { try store.update(id, ["status": "running", "attempt": 2, "executionRunID": "run-2"]) },
             { try store.update(id, ["status": "completed", "result": "All finished"]) },
         ]
         for step in 0..<min(steps, all.count) { try all[step](); rest(step + 1) }
     }
-    static let scriptSteps = 10
+    static let scriptSteps = 11
     /// What a restarted worker shows: the same text whichever process wrote it.
+    static func authorizationCount(_ value: Any?) -> Int { (value as? [[String: Any]])?.count ?? 0 }
+    /// What must hold whenever the process is ended: each task's history has no gaps, its last status entry is the task's status, and an
+    /// attempt is open exactly while the task is running. Reads the raw tables, so it sees the state before any restart tidies it.
+    static func historyProblems(_ directory: URL) throws -> [String] {
+        let db = try BuddyOperationsDB(directory: directory, existing: true)
+        var problems: [String] = []
+        for row in try db.rows("SELECT id, status FROM tasks") {
+            guard let id = row[0].string, let status = row[1].string else { continue }
+            let events = try db.rows("SELECT seq, type, payload FROM events WHERE task_id = ? ORDER BY seq", [.text(id)])
+            let seqs = events.compactMap { $0[0].int }
+            if let first = seqs.first, seqs != Array(first..<(first + Int64(seqs.count))) { problems.append("history skips a number: \(seqs)") }
+            var known: String?
+            for event in events {
+                let payload = (try? BuddyOperationsDB.decode(event[2].string ?? "{}")) ?? [:]
+                switch event[1].string ?? "" {
+                case "task.created", "task.imported": known = payload["status"] as? String
+                case "task.status": known = payload["to"] as? String
+                default: break
+                }
+            }
+            if let known, known != status { problems.append("history says \(known) but the task is \(status)") }
+            let tries = try db.rows("SELECT COUNT(*) FROM attempts WHERE task_id = ?", [.text(id)]).first?.first?.int ?? 0
+            let open = try db.rows("SELECT COUNT(*) FROM attempts WHERE task_id = ? AND outcome IS NULL", [.text(id)]).first?.first?.int ?? 0
+            let running: Int64 = ["running", "waiting_review", "stopping"].contains(status) ? 1 : 0
+            if tries > 0 && open != running { problems.append("\(open) attempts open while the task is \(status)") }
+        }
+        return problems
+    }
     @MainActor static func summary(_ directory: URL) throws -> [String] {
         let store = try BuddyWorkerStore(directory: directory)
-        let live = store.jobs.map { "\($0["requestId"] as? String ?? "")|\($0["status"] as? String ?? "")|\($0["progress"] as? String ?? "")|\($0["result"] as? String ?? "")|\($0["remainingBudgetUSD"] ?? "-")|\(($0["budgetAuthorizations"] as? [[String: Any]])?.count ?? 0)" }
+        var live: [String] = []
+        for job in store.jobs {
+            let tries = try store.attempts(of: job["id"] as? String ?? "").map { "\($0.number)=\($0.outcome ?? "open")" }.joined(separator: ",")
+            let types = try store.history(of: job["id"] as? String ?? "").map(\.type).joined(separator: ",")
+            live.append("\(job["requestId"] as? String ?? "")|\(job["status"] as? String ?? "")|\(job["progress"] as? String ?? "")|\(job["result"] as? String ?? "")|\(job["remainingBudgetUSD"] ?? "-")|\((authorizationCount(job["budgetAuthorizations"])))|attempts:\(tries)|history:\(types)")
+        }
         let archived = try store.archivedJobs().map { "archived:\($0["requestId"] as? String ?? "")" }
-        return live + archived + ["paused:\(store.paused)"]
+        return live + archived + ["paused:\(store.paused)", "events:\(store.eventCount)"]
     }
 
     @MainActor static func main() throws {
@@ -71,7 +105,7 @@ import CryptoKit
         require(mode == 0o600, "the database is private to the user")
         let probe = try BuddyOperationsDB(directory: fresh, existing: true)
         require(try probe.rows("PRAGMA journal_mode").first?.first?.string == "wal", "changes are journaled so a crash cannot leave half of one")
-        require(try probe.rows("PRAGMA user_version").first?.first?.int == 1, "the schema carries a version")
+        require(try probe.rows("PRAGMA user_version").first?.first?.int == 2, "the schema carries a version")
         require(!names(fresh).contains { $0.hasSuffix(".migrated") } && !names(fresh).contains("Backups"), "nothing is backed up or renamed when there was nothing to migrate")
 
         // 2. A full old history: live tasks, two archive files, routines and a paused queue.
@@ -187,10 +221,14 @@ import CryptoKit
                 let outcome = try run(binary, [], environment: ["BUDDY_CRASH_CHILD": "script", "BUDDY_CRASH_DIR": directory.path, "BUDDY_CRASH_AT": "\(commit)", "BUDDY_CRASH_PHASE": phase, "BUDDY_CRASH_W": w, "BUDDY_CRASH_A": a])
                 require(outcome.status == 137, "the worker was ended \(phase) commit \(commit)")
                 let expected = reference[phase == "before" ? commit - 1 : commit]!
+                let rawProblems = try historyProblems(directory)
+                require(rawProblems.isEmpty, "straight after being ended \(phase) commit \(commit), history and state agree: \(rawProblems)")
                 let found = try summary(directory)
                 require(found == expected, "after being ended \(phase) commit \(commit), the saved tasks are exactly the state \(phase == "before" ? "before" : "after") that change\n found: \(found)\n wanted: \(expected)")
                 let integrity = try BuddyOperationsDB(directory: directory, existing: true).rows("PRAGMA integrity_check").first?.first?.string
                 require(integrity == "ok", "the database passes its integrity check after being ended \(phase) commit \(commit)")
+                let tidiedProblems = try historyProblems(directory)
+                require(tidiedProblems.isEmpty, "after the restart tidies up, history and state still agree: \(tidiedProblems)")
             }
         }
         let finished = root.appendingPathComponent("crash-complete"); try FileManager.default.createDirectory(at: finished, withIntermediateDirectories: true)
@@ -217,6 +255,124 @@ import CryptoKit
             require(names(directory).contains("tasks.json.migrated") && !names(directory).contains("tasks.json"), "the next start finishes setting the old files aside (\(phase))")
             require(try BuddyOperationsDB(directory: directory, existing: true).rows("SELECT COUNT(*) FROM tasks").first?.first?.int == 5, "no task was imported twice (\(phase))")
         }
+        // 7. History: every change leaves the right entries behind, in order, and attempts open and close with the work.
+        let story = root.appendingPathComponent("story")
+        let tale = try BuddyWorkerStore(directory: story)
+        try script(tale, w, a, steps: scriptSteps)
+        let firstTask = tale.jobs[0], firstID = firstTask["id"] as! String
+        let aside = try tale.archivedJobs()[0]["id"] as! String
+        let firstHistory = try tale.history(of: firstID)
+        require(firstHistory.map(\.type) == ["task.created", "task.status", "attempt.started", "attempt.ended", "task.status", "task.status", "task.status", "attempt.started", "attempt.ended", "task.status"], "a task's history lists what happened in order: \(firstHistory.map(\.type))")
+        require(firstHistory.map(\.seq) == Array(1...10), "a task's entries are numbered one after another without a gap")
+        require(firstHistory[0].cause == "request" && firstHistory[0].correlation == "first", "an entry says what caused it and which request it belongs to")
+        require(firstHistory[5].cause == "resume" && (firstHistory[5].payload["from"] as? String) == "paused" && (firstHistory[5].payload["to"] as? String) == "queued", "resuming is recorded as a move from paused to queued")
+        require(firstHistory.map(\.id) == firstHistory.map(\.id).sorted(), "entries are ordered across the whole log as well")
+        require(try tale.history(of: aside).map(\.type) == ["task.created", "task.status", "task.archived"], "a task that is archived says so in its history")
+        require(try tale.history(of: firstID, after: 8).map(\.seq) == [9, 10], "history can be read from just after a point")
+        let tries = try tale.attempts(of: firstID)
+        require(tries.map(\.number) == [1, 2] && tries.map(\.outcome) == ["paused", "completed"] && tries.map(\.runID) == ["run-1", "run-2"] && tries.allSatisfy { $0.provider == "claude" && $0.endedAt != nil }, "attempts record their run, provider and how each ended")
+        let storyProblems = try historyProblems(story)
+        require(storyProblems.isEmpty, "history and state agree: \(storyProblems)")
+        let countBefore = tale.eventCount
+        for _ in 0..<5 { _ = try tale.create(workspace: w, agent: a, requestId: "first", title: "First", goal: "Do it", kind: "general", provider: "claude", budget: 0.5) }
+        require(tale.eventCount == countBefore && tale.jobs.count == 1, "asking again for the same request adds neither a task nor an entry")
+        try tale.update(firstID, ["progress": "Only text changed"])
+        require(tale.eventCount == countBefore, "progress text alone is not an event")
+
+        // A restart that finds work still marked running ends its attempt and says why.
+        let crashed = root.appendingPathComponent("crashed")
+        do {
+            let before = try BuddyWorkerStore(directory: crashed)
+            let made = try before.create(workspace: w, agent: a, requestId: "interrupted", title: "Running", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0)
+            try before.update(made["id"] as! String, ["status": "running", "attempt": 1, "executionRunID": "run-x"])
+        }
+        let restarted = try BuddyWorkerStore(directory: crashed), interruptedID = restarted.jobs[0]["id"] as! String
+        let restartHistory = try restarted.history(of: interruptedID)
+        require(restartHistory.map(\.type) == ["task.created", "task.status", "attempt.started", "attempt.ended", "task.status"] && restartHistory.last?.cause == "worker.restart" && restartHistory.last?.payload["to"] as? String == "interrupted", "a restart records that it interrupted the running task")
+        require(try restarted.attempts(of: interruptedID).first?.outcome == "interrupted", "and ends the attempt as interrupted")
+        let reopenedAgain = try BuddyWorkerStore(directory: crashed)
+        require(reopenedAgain.eventCount == restarted.eventCount, "starting again adds nothing")
+
+        // Tasks that were there before history began get one starting entry, from the import and from a database left by slice 1.
+        require(try queue.history(of: live[0]["id"] as! String).map(\.type) == ["task.imported"] && queue.eventCount == 5, "imported tasks each begin with one entry, and the archived ones have none")
+        let upgraded = root.appendingPathComponent("upgraded")
+        do {
+            let seeded = try BuddyWorkerStore(directory: upgraded)
+            _ = try seeded.create(workspace: w, agent: a, requestId: "one", title: "One", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0)
+            _ = try seeded.create(workspace: w, agent: a, requestId: "two", title: "Two", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0)
+            let raw = try BuddyOperationsDB(directory: upgraded, existing: true)
+            for table in ["events", "attempts", "consumers", "outbox"] { try raw.run("DROP TABLE \(table)") }
+            try raw.run("PRAGMA user_version = 1")
+        }
+        let moved = try BuddyWorkerStore(directory: upgraded)
+        require(try BuddyOperationsDB(directory: upgraded, existing: true).rows("PRAGMA user_version").first?.first?.int == 2, "a database from slice 1 is brought up to version 2")
+        let movedTypes = try moved.history(of: moved.jobs[0]["id"] as! String).map(\.type)
+        require(moved.jobs.count == 2 && moved.eventCount == 2 && movedTypes == ["task.imported"], "each task it already held gets a starting entry")
+
+        // 8. The outbox: events reach each consumer once, and replaying them changes nothing.
+        let hub = root.appendingPathComponent("hub")
+        let bus = try BuddyWorkerStore(directory: hub)
+        try bus.register(consumer: "early")
+        let firstMade = try bus.create(workspace: w, agent: a, requestId: "bus-1", title: "Bus", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0), busID = firstMade["id"] as! String
+        try bus.register(consumer: "late")
+        try bus.register(consumer: "everything", replayHistory: true)
+        try bus.update(busID, ["status": "running", "attempt": 1, "executionRunID": "bus-run"])
+        try bus.update(busID, ["status": "completed", "result": "Done"])
+        let early = try bus.undelivered(for: "early"), late = try bus.undelivered(for: "late"), everything = try bus.undelivered(for: "everything")
+        require(early.count == 5 && late.count == 4 && everything.count == 5, "a consumer gets what happened after it signed up, and all of it if it asked for the past (\(early.count), \(late.count), \(everything.count))")
+        require(early.map(\.id) == early.map(\.id).sorted() && early.map(\.seq) == Array(1...5), "events arrive oldest first, numbered as in the task's own history")
+        try bus.register(consumer: "late")
+        require(try bus.undelivered(for: "late").count == 4, "signing up twice changes nothing")
+        func note(_ event: BuddyTaskEvent) -> (BuddyOperationsDB) throws -> Void { { db in try db.setMeta("notified:\(event.id)", event.type) } }
+        let probeDB = try BuddyOperationsDB(directory: hub, existing: true)
+        func notified() throws -> Int { Int(try probeDB.rows("SELECT COUNT(*) FROM meta WHERE key LIKE 'notified:%'").first?.first?.int ?? 0) }
+        struct Refused: Error {}
+        var failedOnce = false; do { try bus.deliver(early[0], to: "early") { _ in throw Refused() } } catch { failedOnce = true }
+        let waitingAfterFailure = try bus.undelivered(for: "early").count
+        require(failedOnce && waitingAfterFailure == 5, "an event whose handling fails stays waiting")
+        var delivered = 0
+        for event in early { if try bus.deliver(event, to: "early", effect: note(event)) { delivered += 1 } }
+        let notifiedOnce = try notified(), nothingLeft = try bus.undelivered(for: "early").isEmpty
+        require(delivered == 5 && notifiedOnce == 5 && nothingLeft, "each event is handled once, in one step with the record that it was handled")
+        var repeated = 0
+        for event in early + early { if try bus.deliver(event, to: "early", effect: note(event)) { repeated += 1 } }
+        let notifiedAfterReplay = try notified()
+        require(repeated == 0 && notifiedAfterReplay == 5, "replaying every event changes nothing: no second notification")
+        let lateWaiting = try bus.undelivered(for: "late").count, strangerGot = try bus.deliver(early[0], to: "nobody-signed-up")
+        require(lateWaiting == 4 && !strangerGot, "one consumer's progress does not move another's, and an unknown consumer receives nothing")
+        // A worker ended while handling an event: before the commit nothing happened, after it everything did, and a retry never doubles it.
+        for phase in ["before", "effect", "after"] {
+            let directory = root.appendingPathComponent("deliver-\(phase)")
+            let outcome = try run(binary, [], environment: ["BUDDY_CRASH_CHILD": "deliver", "BUDDY_CRASH_DIR": directory.path, "BUDDY_CRASH_PHASE": phase, "BUDDY_CRASH_W": w, "BUDDY_CRASH_A": a])
+            require(outcome.status == 137, "the worker was ended while handling an event (\(phase))")
+            let store = try BuddyWorkerStore(directory: directory), check = try BuddyOperationsDB(directory: directory, existing: true)
+            let recorded = Int(try check.rows("SELECT COUNT(*) FROM meta WHERE key LIKE 'handled:%'").first?.first?.int ?? 0)
+            let waiting = try store.undelivered(for: "writer")
+            require(phase == "after" ? (recorded == 1 && waiting.count == 1) : (recorded == 0 && waiting.count == 2), "ended \(phase) the commit, the event and its effect are both done or both not (\(recorded) handled, \(waiting.count) waiting)")
+            for event in waiting { try store.deliver(event, to: "writer") { db in try db.setMeta("handled:\(event.id)", event.type) } }
+            let total = Int(try check.rows("SELECT COUNT(*) FROM meta WHERE key LIKE 'handled:%'").first?.first?.int ?? 0)
+            let leftWaiting = try store.undelivered(for: "writer").count
+            require(total == 2 && leftWaiting == 0, "after the retry every event has been handled exactly once (\(phase))")
+        }
+        // History is trimmed only from archived tasks, and never an event someone still has to receive.
+        let trimmed = root.appendingPathComponent("trimmed")
+        do {
+            let busy = try BuddyWorkerStore(directory: trimmed)
+            for i in 0..<6 {
+                let made = try busy.create(workspace: w, agent: a, requestId: "trim-\(i)", title: "Trim", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0)
+                try busy.update(made["id"] as! String, ["status": "completed"])
+            }
+            _ = try busy.archiveFinished(keeping: 0)
+            require(busy.eventCount == 18, "six finished tasks leave three entries each")
+            try busy.register(consumer: "slow", replayHistory: true)
+        }
+        BuddyWorkerStore.eventLimit = 5
+        let guarded = try BuddyWorkerStore(directory: trimmed)
+        require(guarded.eventCount == 18, "events a consumer still has to receive are never trimmed")
+        for event in try guarded.undelivered(for: "slow", limit: 1000) { try guarded.deliver(event, to: "slow") }
+        let hardlyAny = try BuddyWorkerStore(directory: trimmed)
+        BuddyWorkerStore.eventLimit = 100_000
+        require(hardlyAny.eventCount == 5, "once they are handled, the oldest entries of archived tasks are trimmed down to the limit (\(hardlyAny.eventCount))")
         print("PASS: first-start migration with a verified ZIP backup, exact IDs and schedules, old files set aside not deleted, refusal of every unverifiable file, one task per request, versions, oversize refusal, newer-schema refusal, and the process ended at all \(scriptSteps * 2) commit boundaries plus both import boundaries")
     }
 
@@ -227,6 +383,21 @@ import CryptoKit
             _ = try BuddyOperationsDB(directory: directory)   // the schema is made first, so the next commit is the import itself
             if phase == "before" { BuddyOperationsDB.beforeCommit = { _exit(137) } } else { BuddyOperationsMigration.afterImport = { _exit(137) } }
             _ = try BuddyWorkerStore(directory: directory)
+            exit(0)
+        }
+        if mode == "deliver" {
+            let store = try BuddyWorkerStore(directory: directory)
+            try store.register(consumer: "writer")
+            let made = try store.create(workspace: environment["BUDDY_CRASH_W"]!, agent: environment["BUDDY_CRASH_A"]!, requestId: "deliver", title: "Deliver", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0)
+            try store.update(made["id"] as! String, ["status": "paused"])
+            // two events wait: the creation and the status change; handle the first one and end the process at the chosen point
+            let first = try store.undelivered(for: "writer")[0]
+            if phase == "before" { BuddyOperationsDB.beforeCommit = { _exit(137) } }
+            if phase == "after" { BuddyOperationsDB.afterCommit = { _exit(137) } }
+            try store.deliver(first, to: "writer") { db in
+                try db.setMeta("handled:\(first.id)", first.type)
+                if phase == "effect" { _exit(137) }
+            }
             exit(0)
         }
         let target = Int(environment["BUDDY_CRASH_AT"] ?? "") ?? 999

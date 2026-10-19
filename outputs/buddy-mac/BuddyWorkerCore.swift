@@ -176,6 +176,7 @@ struct BuddyAttempt {
         jobs = tasks; paused = try db.meta("paused") == "1"
         if jobs.count > Self.archiveTrigger { try? archiveFinished(keeping: Self.archiveKeep) }
         try recordBaseline()
+        try recordBudgetBaseline()
         try backfillActions()
         var interrupted: [(old: [String: Any], new: [String: Any])] = []
         for i in jobs.indices where Self.interrupted.contains(jobs[i]["status"] as? String ?? "") {
@@ -279,6 +280,7 @@ struct BuddyAttempt {
             try db.transaction {
                 try Self.insert(created, archived: false, in: db)
                 try Self.appendEvent("task.created", task: created, attempt: nil, cause: "request", payload: ["kind": kind, "provider": provider, "status": "queued"], in: db)
+                if provider == "claude" { try Self.appendBudget("authorize", amount: budget, task: created, attempt: nil, cause: "request", idem: "created:" + (created["id"] as? String ?? ""), in: db) }
             }
         } catch { jobs.removeLast(); throw error }
         return job
@@ -326,6 +328,7 @@ struct BuddyAttempt {
             if opened > 0 { try appendEvent("attempt.started", task: new, attempt: newAttempt, cause: cause, payload: ["n": newAttempt, "runID": run], in: db) }
         }
         try syncActions(new, from: old, cause: cause, in: db)
+        try syncBudget(new, from: old, cause: cause, in: db)
     }
 
     /// Tasks that were already there when history began (a first start after the update) get one starting entry, so every task's
@@ -621,6 +624,96 @@ struct BuddyAttempt {
     func releaseLeases(heldBy task: String) throws { try db.run("UPDATE leases SET holder = '', task_id = '', expires_at = 0 WHERE task_id = ?", [.text(task)]) }
     /// A worker that has just started has no live holders: whatever the last one held is free.
     @discardableResult func breakAllLeases() throws -> Int { try db.run("UPDATE leases SET holder = '', task_id = '', expires_at = 0 WHERE holder <> ''") }
+
+    // MARK: money
+
+    private static func number(_ value: Any?) -> Double { (value as? Double) ?? (value as? NSNumber)?.doubleValue ?? 0 }
+    private static func appendBudget(_ kind: String, amount: Double, task: [String: Any], attempt: Int?, cause: String, idem: String? = nil, day: String? = nil, in db: BuddyOperationsDB) throws {
+        guard amount > 1e-9 else { return }
+        let attemptColumn: BuddyOperationsDB.Bind
+        if let attempt { attemptColumn = .int(Int64(attempt)) } else { attemptColumn = .null }
+        let idemColumn: BuddyOperationsDB.Bind
+        if let idem { idemColumn = .text(idem) } else { idemColumn = .null }
+        try db.run("INSERT OR IGNORE INTO budget_entries(workspace, agent_id, task_id, attempt, kind, amount_usd, day, at, cause, idem) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   [.text(task["workspace"] as? String ?? ""), .text(task["agentId"] as? String ?? ""), .text(task["id"] as? String ?? ""), attemptColumn, .text(kind), .text(String(amount)), .text(day ?? BuddyBudget.day(Date())), .text(stamp()), .text(cause), idemColumn])
+    }
+    /// Writes every change to what a task has set aside, spent or cannot account for as entries, in the transaction that saves the task. An
+    /// attempt that ends turns its reservation into a spend (and gives back the rest); one that is abandoned turns it into an uncertain amount.
+    private static func syncBudget(_ new: [String: Any], from old: [String: Any], cause: String, in db: BuddyOperationsDB) throws {
+        let attempt = new["attempt"] as? Int
+        let spent = max(0, number(new["spentUSD"]) - number(old["spentUSD"])), uncertain = max(0, number(new["uncertainBudgetUSD"]) - number(old["uncertainBudgetUSD"]))
+        let reservedChange = number(new["reservedBudgetUSD"]) - number(old["reservedBudgetUSD"])
+        try appendBudget("reserve", amount: max(0, reservedChange), task: new, attempt: attempt, cause: cause, in: db)
+        try appendBudget("spend", amount: spent, task: new, attempt: attempt, cause: cause, in: db)
+        try appendBudget("uncertain", amount: uncertain, task: new, attempt: attempt, cause: cause, in: db)
+        try appendBudget("release", amount: max(0, -reservedChange - spent - uncertain), task: new, attempt: attempt, cause: cause, in: db)
+        let known = Set((old["budgetAuthorizations"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
+        for authorization in new["budgetAuthorizations"] as? [[String: Any]] ?? [] {
+            guard let id = authorization["id"] as? String, !known.contains(id) else { continue }
+            try appendBudget("authorize", amount: number(authorization["amountUSD"]), task: new, attempt: attempt, cause: cause, idem: "auth:" + id, in: db)
+        }
+    }
+    /// Money already spent when the record began is entered once, on the day it was spent, so it is never counted as today's.
+    private func recordBudgetBaseline() throws {
+        var pending: [(job: [String: Any], spent: Double, uncertain: Double)] = []
+        for job in jobs {
+            let spent = Self.number(job["spentUSD"]), uncertain = Self.number(job["uncertainBudgetUSD"])
+            guard spent > 1e-9 || uncertain > 1e-9, let id = job["id"] as? String else { continue }
+            if (try db.rows("SELECT 1 FROM budget_entries WHERE task_id = ? LIMIT 1", [.text(id)])).isEmpty { pending.append((job, spent, uncertain)) }
+        }
+        guard !pending.isEmpty else { return }
+        try db.transaction {
+            for item in pending {
+                let when = (item.job["updatedAt"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date.distantPast
+                let day = BuddyBudget.day(when), id = item.job["id"] as? String ?? ""
+                try Self.appendBudget("spend", amount: item.spent, task: item.job, attempt: nil, cause: "history.begins", idem: "baseline-spend:" + id, day: day, in: db)
+                try Self.appendBudget("uncertain", amount: item.uncertain, task: item.job, attempt: nil, cause: "history.begins", idem: "baseline-uncertain:" + id, day: day, in: db)
+            }
+        }
+    }
+    /// Sets or removes a daily limit: for one agent (`scope` "agent", `id` the agent) or for the whole workspace. Nil removes it.
+    func setLimit(workspace: String, scope: String, id: String = "", amount: Double?, setBy: String, quote: String = "") throws {
+        guard UUID(uuidString: workspace) != nil, ["agent", "workspace"].contains(scope), scope == "workspace" || UUID(uuidString: id) != nil else { throw BuddyWorkerFailure(message: "Choose an agent or the whole workspace for this limit.") }
+        try db.transaction {
+            guard let amount else { try db.run("DELETE FROM limits WHERE workspace = ? AND scope = ? AND scope_id = ? AND period = 'day'", [.text(workspace), .text(scope), .text(scope == "agent" ? id : "")]); return }
+            guard amount.isFinite, amount >= 0, amount <= 100000 else { throw BuddyWorkerFailure(message: "Choose a daily limit between $0 and $100,000.") }
+            try db.run("INSERT INTO limits(workspace, scope, scope_id, period, amount_usd, set_by, quote, set_at) VALUES(?, ?, ?, 'day', ?, ?, ?, ?) ON CONFLICT(workspace, scope, scope_id, period) DO UPDATE SET amount_usd = excluded.amount_usd, set_by = excluded.set_by, quote = excluded.quote, set_at = excluded.set_at",
+                       [.text(workspace), .text(scope), .text(scope == "agent" ? id : ""), .text(String(amount)), .text(setBy), .text(String(quote.prefix(500))), .text(Self.stamp())])
+        }
+    }
+    func limits(workspace: String) throws -> [[String: Any]] {
+        try db.rows("SELECT scope, scope_id, amount_usd, set_by, quote, set_at FROM limits WHERE workspace = ? ORDER BY scope, scope_id", [.text(workspace)]).map { row in
+            ["scope": row[0].string ?? "", "id": row[1].string ?? "", "amountUSD": Double(row[2].string ?? "") ?? 0, "setBy": row[3].string ?? "", "quote": row[4].string ?? "", "setAt": row[5].string ?? ""]
+        }
+    }
+    private var support: URL { directory.deletingLastPathComponent() }
+    func exposure(workspace: String, agent: String, now: Date = Date()) throws -> BuddyBudget.Exposure { try BuddyBudget.exposure(db, support: support, workspace: workspace, agent: agent, now: now) }
+    /// Today's money for every agent in a workspace, with its limit and how much room is left.
+    func budgetStatus(workspace: String, agents: [String], now: Date = Date()) throws -> [String: Any] {
+        var out: [String: [String: Any]] = [:]
+        for agent in agents {
+            let used = try exposure(workspace: workspace, agent: agent, now: now), limit = try BuddyBudget.limit(db, workspace: workspace, agent: agent)
+            var row: [String: Any] = ["spent": used.spent, "uncertain": used.uncertain, "reserved": used.reserved]
+            if let limit { row["limitUSD"] = limit.amount; row["limitScope"] = limit.scope; row["roomUSD"] = max(0, limit.amount - used.total) }
+            out[agent] = row
+        }
+        return ["day": BuddyBudget.day(now), "agents": out, "limits": try limits(workspace: workspace)]
+    }
+    /// The money entries of one task, oldest first.
+    func ledger(of taskID: String) throws -> [[String: Any]] {
+        try db.rows("SELECT kind, amount_usd, day, cause, attempt FROM budget_entries WHERE task_id = ? ORDER BY id", [.text(taskID)]).map { row in
+            ["kind": row[0].string ?? "", "amountUSD": Double(row[1].string ?? "") ?? 0, "day": row[2].string ?? "", "cause": row[3].string ?? "", "attempt": row[4].int.map { Int($0) } as Any? ?? NSNull()]
+        }
+    }
+    /// Stops a task that would pass today's limit, with a plain reason, instead of starting it. It stays resumable.
+    func refuseForLimit(_ id: String, limit: Double, scope: String, exposure: BuddyBudget.Exposure, wanted: Double) throws {
+        func dollars(_ value: Double) -> String { String(format: "$%.2f", value) }
+        let whose = scope == "agent" ? "this agent" : "the workspace"
+        let message = "Today’s limit for \(whose) (\(dollars(limit))) would be passed: \(dollars(exposure.total)) is already spent or set aside, and this task needs up to \(dollars(wanted)). Raise the limit or wait until tomorrow, then resume."
+        let job = try self.job(id)
+        try update(id, ["status": "paused", "progress": message], cause: "budget.limit")
+        try db.transaction { try Self.appendEvent("budget.refused", task: job, attempt: job["attempt"] as? Int, cause: "budget.limit", payload: ["limitUSD": limit, "scope": scope, "usedUSD": exposure.total, "wantedUSD": wanted], in: db) }
+    }
 
     func resume(_ id: String, continuingCoding:Bool=false,additionalBudgetUSD:Double?=nil,authorizationID:String?=nil) throws -> [String: Any] {
         let job = try self.job(id)

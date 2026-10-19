@@ -164,7 +164,15 @@ import Darwin
         }
         if operation == "status" {
             let jobs = store.jobs.filter { $0["workspace"] as? String == current }.map { job -> [String: Any] in var out = job; out["attentionKey"]=attentionKey(job); out["unconfirmedCount"]=(job["reviews"] as? [[String: Any]] ?? []).filter { $0["status"] as? String == "uncertain" }.count; out.removeValue(forKey: "goal"); out.removeValue(forKey: "events"); out.removeValue(forKey: "reviews"); out.removeValue(forKey: "result"); return out }
-            return ["workspace":current,"online": true, "paused": store.paused, "tasks": jobs, "routines":routines.routines.filter{$0["workspace"] as? String==current}, "scheduleError":(try? String(contentsOf:root.appendingPathComponent("schedule-error.txt"),encoding:.utf8)) ?? "", "privateBrowser": privateAgent.map { ["agentId": $0, "taskId": privateTask as Any? ?? NSNull()] } as Any? ?? NSNull(), "claudeConnected": try providerSettings.current(current).claudeEnabled && BuddyClaudeKey.read(current) != nil, "defaultProvider": try providerSettings.current(current).provider, "agentModels":try agentModels.ensure(workspace:current,agents:((try state())["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String},provider:providerSettings.current(current).provider).mapValues(\.payload), "claudeBudgetUSD": try providerSettings.current(current).claudeBudgetUSD, "nodeAvailable": BuddyWorkerProcess.runtime != nil, "computer": "This Mac · private browser and files"]
+            return ["workspace":current,"online": true, "paused": store.paused, "tasks": jobs, "routines":routines.routines.filter{$0["workspace"] as? String==current}, "scheduleError":(try? String(contentsOf:root.appendingPathComponent("schedule-error.txt"),encoding:.utf8)) ?? "", "privateBrowser": privateAgent.map { ["agentId": $0, "taskId": privateTask as Any? ?? NSNull()] } as Any? ?? NSNull(), "claudeConnected": try providerSettings.current(current).claudeEnabled && BuddyClaudeKey.read(current) != nil, "defaultProvider": try providerSettings.current(current).provider, "agentModels":try agentModels.ensure(workspace:current,agents:((try state())["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String},provider:providerSettings.current(current).provider).mapValues(\.payload), "claudeBudgetUSD": try providerSettings.current(current).claudeBudgetUSD, "nodeAvailable": BuddyWorkerProcess.runtime != nil, "computer": "This Mac · private browser and files", "budget": (try? store.budgetStatus(workspace: current, agents: ((try state())["agents"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })) ?? [:]]
+        }
+        // A daily limit set from the screen (the person's own action; a model's request goes through its own tool, which checks what they said).
+        if operation == "limit" {
+            guard let scope = request["scope"] as? String, ["agent", "workspace"].contains(scope) else { throw BuddyWorkerFailure(message: "Choose an agent or the whole workspace.") }
+            let amount: Double? = request["amountUSD"] is NSNull || request["amountUSD"] == nil ? nil : request["amountUSD"] as? Double
+            if request["amountUSD"] != nil, !(request["amountUSD"] is NSNull), amount == nil { throw BuddyWorkerFailure(message: "Choose a daily limit in dollars, or leave it empty for none.") }
+            try store.setLimit(workspace: current, scope: scope, id: request["agentId"] as? String ?? "", amount: amount, setBy: "user")
+            return try store.budgetStatus(workspace: current, agents: ((try state())["agents"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
         }
         if operation == "openChromeSettings",let id=privateAgent {
             guard active==nil else{throw BuddyWorkerFailure(message:"The agent is finishing its pause. Try again in a moment.")}
@@ -458,6 +466,11 @@ import Darwin
         guard a["setupStatus"] as? String != "pending" else {throw BuddyWorkerFailure(message:"Finish this agent's setup in their chat before running this task.")}
         guard try providerSettings.current(workspace).enabled(job["provider"] as? String ?? "") else { _ = try store.update(id, ["status": "paused", "progress": "This provider is disconnected. Reconnect it in Settings → AI provider, then resume."]); return }
         if job["provider"] as? String=="claude",(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0 {throw BuddyWorkerFailure(message:"Choose an additional Claude allowance in this task before resuming. Previous unconfirmed usage stays recorded.")}
+        // Today's limit for this agent is checked before anything is set aside. A task that would pass it waits, resumable, with the reason.
+        if job["provider"] as? String=="claude" {
+            let wanted=job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0
+            if let room=BuddyBudget.headroom(support:support,workspace:workspace,agent:agentID),room.room+1e-9<wanted {try store.refuseForLimit(id,limit:room.limit,scope:room.scope,exposure:room.exposure,wanted:wanted);return}
+        }
         browser?.close(); browser = nil
         active = id; providerRevision = try providerSettings.current(workspace).revision(job["provider"] as? String ?? ""); authorization = authorizationData(job); stopped = false; startedAt = Date(); runID = UUID().uuidString
         lastActivityAt=startedAt

@@ -3,9 +3,24 @@ import Foundation
  @MainActor static func require(_ value:Bool,_ message:String){if !value{fputs("FAILED: \(message)\n",stderr);exit(1)}}
  @MainActor static func main() async throws {
   do {
+    // The same assessment, worded four ways by different summaries over a morning, is told once; a change to it is told.
+    let now=Date(),stamp=ISO8601DateFormatter(),names:Set<String>=["lyra","forge","vera","chief","inbox"]
+    let first:[[String:Any]]=[["at":stamp.string(from:now.addingTimeInterval(-7200)),"body":"Your Bank of America assessment is due about Oct 21 and is not completed yet."]]
+    func told(_ text:String,_ prior:[[String:Any]]=first,age:TimeInterval=0)->Bool {BuddyTeamMonitorStore.toldAlready(text,updates:prior,agentNames:names,now:now.addingTimeInterval(age))}
+    require(told("Bank of America assessment is still open, with an inferred deadline of about Oct 21, 1:15 PM PDT."),"the same assessment, reworded, is not told again")
+    require(told("Bank of America assessment may be due Oct 21, 1:15 PM PDT (inferred, not confirmed)."),"nor with a hedge in brackets")
+    require(told("Bank of America assessment is likely due Oct 21, 1:15 PM PDT (inferred from a 72-hour window, not stated in the email)."),"nor with the reasoning added")
+    require(!told("Bank of America assessment is completed."),"but its being completed is new, though the earlier message said it was not")
+    require(!told("Your Bank of America assessment is now due Oct 22."),"and so is a different date")
+    require(!told("Your Bank of America assessment recruiter replied with a new link."),"and so is a reply")
+    require(!told("Bank of America assessment is still open, with an inferred deadline of about Oct 21.",first,age:21*3600),"and after a day it may be brought up once more")
+    require(!told("Lyra needs two answers from you."),"a message about the team's own agents is not matched by their names")
+    require(!told("Bank of America assessment is still open.",[]),"nothing told yet means nothing is repeated")
+  }
+  do {
     let stamp=ISO8601DateFormatter(),at=Date(),agentRows:[[String:Any]]=[["id":"forge","name":"Forge"],["id":"chief","name":"Chief"]]
-    let outcomes=BuddyTeamMonitor.recentOutcomes([["agentId":"chief","title":"Omori VIX pipeline re-run","status":"completed","updatedAt":stamp.string(from:at.addingTimeInterval(-600)),"result":"The 34 events reproduce."],["agentId":"forge","title":"Old task","status":"completed","updatedAt":stamp.string(from:at.addingTimeInterval(-3*86400)),"result":"Too old."],["agentId":"forge","title":"Still going","status":"running","updatedAt":stamp.string(from:at)]],agents:agentRows,now:at)
-    require(outcomes.count==1 && outcomes[0]["agent"] as? String=="Chief" && (outcomes[0]["result"] as? String)?.contains("34 events")==true,"the team summary is told what finished in the last day, by whom, and nothing older or unfinished: \(outcomes)")
+    let outcomes=BuddyTeamMonitor.recentOutcomes([["agentId":"chief","title":"Omori VIX pipeline re-run","status":"completed","updatedAt":stamp.string(from:at.addingTimeInterval(-600)),"result":"The 34 events reproduce."],["agentId":"forge","title":"Old task","status":"completed","updatedAt":stamp.string(from:at.addingTimeInterval(-3*86400)),"result":"Too old."],["agentId":"forge","title":"Still going","status":"running","updatedAt":stamp.string(from:at)],["agentId":"forge","title":"Check mail (08:00)","status":"completed","kind":"email","routineID":"r","updatedAt":stamp.string(from:at.addingTimeInterval(-60)),"result":"Bank of America assessment due Oct 21."]],agents:agentRows,now:at)
+    require(outcomes.count==1 && outcomes[0]["agent"] as? String=="Chief" && (outcomes[0]["result"] as? String)?.contains("34 events")==true,"the team summary is told what finished in the last day, by whom, and nothing older, unfinished or scheduled (a scan is delivered by its own pacing, not re-told here): \(outcomes)")
     let reports:[[String:Any]]=[["id":"c1"],["id":"c2"]]
     require(BuddyTeamMonitor.alreadyTold(reports:reports,cited:["c1"],told:["c1"]) && !BuddyTeamMonitor.alreadyTold(reports:reports,cited:["c1","c2"],told:["c1"]) && !BuddyTeamMonitor.alreadyTold(reports:reports,cited:["nope"],told:["c1"]),"a summary is dropped only when every check-in it covers already reached the person")
     require(BuddyTeamMonitor.instructions(kind:"overview").contains("recentOutcomes"),"the summary is told that a newer outcome replaces an older report's status")

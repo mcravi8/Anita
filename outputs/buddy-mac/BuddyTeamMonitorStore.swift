@@ -90,6 +90,49 @@ import CryptoKit
         guard let update=updates.last(where:{$0["workspace"] as? String==workspace && $0["agentId"] as? String==agent}),let body=update["body"] as? String else{return nil}
         return (body,Self.date(update["at"]))
     }
+    /// What a message to the person is about: the named firms and places in it (not the team's own agents, the person, or a channel such as Gmail), the days it
+    /// mentions, and how it says the matter stands. A parenthesis is a hedge ("(inferred, not confirmed)") and counts for none of these.
+    struct Matter {var entities=Set<String>(),days=Set<String>(),standing=Set<String>()}
+    private static let namePattern=try! NSRegularExpression(pattern:#"[A-Z][A-Za-z&]*(?:\s+(?:of|and|the)\s+[A-Z][A-Za-z&]*|\s+[A-Z][A-Za-z&]*)*"#)
+    private static let dayPattern=try! NSRegularExpression(pattern:#"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b"#,options:[.caseInsensitive])
+    private static let ignoredNames:Set<String>=["your","the","this","that","please","nothing","there","today","tomorrow","matteo","gmail","agentmail","google","buddy","monday","tuesday","wednesday","thursday","friday","saturday","sunday","pdt","pst","utc","pm","am","jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec","january","february","march","april","june","july","august","september","october","november","december","inbox","chief"]
+    static func matter(_ text:String,agentNames:Set<String>)->Matter {
+        var clean=text.replacingOccurrences(of:#"\([^)]*\)"#,with:" ",options:.regularExpression)
+        clean=clean.replacingOccurrences(of:"’",with:"'")
+        var out=Matter()
+        let range=NSRange(clean.startIndex...,in:clean)
+        for m in namePattern.matches(in:clean,range:range) {
+            guard let r=Range(m.range,in:clean) else{continue}
+            var words=clean[r].split(separator:" ").map(String.init)
+            while let first=words.first,ignoredNames.contains(first.lowercased()) {words.removeFirst()}
+            let name=words.joined(separator:" ").lowercased()
+            guard !name.isEmpty,!ignoredNames.contains(name),!agentNames.contains(name) else{continue}
+            // One capitalised word is only a name if it is not just starting a sentence.
+            let startsSentence=m.range.location==0 || (Range(NSRange(location:max(0,m.range.location-2),length:min(2,m.range.location)),in:clean).map{clean[$0].contains(".") || clean[$0].contains("\n")} ?? false)
+            if words.count<2,startsSentence {continue}
+            out.entities.insert(name)
+        }
+        for m in dayPattern.matches(in:clean,range:range) {
+            if let month=Range(m.range(at:1),in:clean),let day=Range(m.range(at:2),in:clean) {out.days.insert(clean[month].lowercased()+" "+String(Int(clean[day]) ?? 0))}
+        }
+        let words=clean.lowercased().split{!$0.isLetter}.map(String.init)
+        for (i,word) in words.enumerated() where signal.contains(word) {
+            // "not completed" and "completed" say opposite things.
+            out.standing.insert(i>0 && words[i-1]=="not" && word != "not" ? "not-"+word:word)
+        }
+        return out
+    }
+    /// Whether the person has already been told this, in a message from the last day: it is about the same named thing, mentions no day the earlier one did not, and says
+    /// nothing about how it stands that the earlier one did not. Anything that changed (a new date, "completed", "cancelled", a reply) is new and is said.
+    static func toldAlready(_ text:String,updates:[[String:Any]],agentNames:Set<String>,now:Date,window:TimeInterval=20*3600)->Bool {
+        let new=matter(text,agentNames:agentNames)
+        guard !new.entities.isEmpty else{return false}
+        return updates.contains{prior in
+            guard let at=(prior["at"] as? String).flatMap({ISO8601DateFormatter().date(from:$0)}),now.timeIntervalSince(at)<window else{return false}
+            let old=matter(prior["body"] as? String ?? "",agentNames:agentNames)
+            return !new.entities.isDisjoint(with:old.entities) && new.days.isSubset(of:old.days) && new.standing.isSubset(of:old.standing)
+        }
+    }
     /// Whether `text` only repeats an earlier report that is still recent enough to count.
     static func repeats(_ text:String,priority:Int,prior:(body:String,at:Date)?,now:Date)->Bool {
         guard let prior,now.timeIntervalSince(prior.at)<=repeatWindow(priority:priority) else{return false}

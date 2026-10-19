@@ -54,7 +54,7 @@ with tempfile.TemporaryDirectory(prefix='buddy-build-', suffix='.noindex') as te
     renderer = build / 'render-icon'
     subprocess.run(['xcrun', 'swiftc', '-O', '-module-cache-path', str(build / 'module-cache'), '-framework', 'AppKit', str(build_source / 'render-icon.swift'), '-o', str(renderer)], check=True)
     iconset = build / 'Buddy.iconset'
-    subprocess.run([str(renderer), str(iconset)], check=True)
+    subprocess.run([str(renderer), str(iconset), str(build_source / 'icon-logo.png')], check=True)
     subprocess.run(['iconutil', '-c', 'icns', str(iconset), '-o', str(resources / 'Buddy.icns')], check=True)
     shutil.copyfile(iconset / 'icon_512x512@2x.png', outputs / 'buddy-app-icon.png')
     subprocess.run(['codesign', '--force', '--sign', signing_identity, '--timestamp=none', '--identifier', 'app.buddy.desktop', str(staged)], check=True)

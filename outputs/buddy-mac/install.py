@@ -9,6 +9,7 @@ import os
 import posixpath
 import plistlib
 import shutil
+import sqlite3
 import subprocess
 import stat
 import tempfile
@@ -74,6 +75,23 @@ def unpack(archive, directory):
     return directory / 'Buddy.app'
 
 
+def saved_queue():
+    """The background task queue as the worker last saved it: from its database once that exists, else from the old tasks.json."""
+    database = SUPPORT / 'Worker/operations.sqlite'
+    if database.exists():
+        connection = sqlite3.connect(f'file:{database}?mode=rw', uri=True, timeout=5)
+        try:
+            marker = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
+            if marker and connection.execute("SELECT 1 FROM meta WHERE key='migration'").fetchone():
+                paused = connection.execute("SELECT value FROM meta WHERE key='paused'").fetchone()
+                tasks = [json.loads(row[0]) for row in connection.execute('SELECT body FROM tasks WHERE archived = 0 ORDER BY seq')]
+                return {'paused': bool(paused and paused[0] == '1'), 'tasks': tasks}
+        finally:
+            connection.close()
+    tasks = SUPPORT / 'Worker/tasks.json'
+    return json.loads(tasks.read_text()) if tasks.exists() else None
+
+
 def ensure_idle():
     if (SUPPORT / 'Worker/PrivateSignIn.json').exists():
         raise RuntimeError('Finish private sign-in before updating Buddy.')
@@ -82,9 +100,8 @@ def ensure_idle():
         state = json.loads(workspace.read_text())
         if any(run.get('status') in ('starting', 'answering', 'stopping') for run in state.get('runs', {}).values()):
             raise RuntimeError('Finish or stop active conversations before updating Buddy.')
-    tasks = SUPPORT / 'Worker/tasks.json'
-    if tasks.exists():
-        queue = json.loads(tasks.read_text())
+    queue = saved_queue()
+    if queue is not None:
         safe = ('completed', 'failed', 'cancelled', 'interrupted', 'paused')
         if queue.get('paused'):
             safe += ('queued',)

@@ -106,7 +106,15 @@ import Foundation
         _ = try grants.allowed(for: workspace + ":" + agent, catalog: [connection]); try otherGrants.set(key: workspace + ":" + agent, connection: "web", allowed: false)
         require(try grants.allowed(for: workspace + ":" + agent, catalog: [connection]).isEmpty, "worker notices access removed by another process")
         print("PASS: durable queue, idempotency, restart/no replay, expired approvals, pause, spending validation, private files, merge conflicts, current folder and service grants")
-        try Data("broken".utf8).write(to: root.appendingPathComponent("Worker/tasks.json"))
-        var corrupt = false; do { _ = try BuddyWorkerStore(directory: root.appendingPathComponent("Worker")) } catch { corrupt = true }; require(corrupt, "corrupt queue fails closed")
+        // A damaged old file stops the first start with the file untouched; a damaged database stops every start after it.
+        let legacy = root.appendingPathComponent("Legacy"); try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+        try Data("broken".utf8).write(to: legacy.appendingPathComponent("tasks.json"))
+        var corrupt = false; do { _ = try BuddyWorkerStore(directory: legacy) } catch { corrupt = true }
+        let untouched = try Data(contentsOf: legacy.appendingPathComponent("tasks.json")) == Data("broken".utf8)
+        require(corrupt && untouched, "a corrupt old queue fails closed and is left exactly as it was")
+        let worn = root.appendingPathComponent("Worker"); _ = try BuddyWorkerStore(directory: worn)
+        try Data("this is not a database at all, only some text".utf8).write(to: worn.appendingPathComponent("operations.sqlite"))
+        try? FileManager.default.removeItem(at: worn.appendingPathComponent("operations.sqlite-wal")); try? FileManager.default.removeItem(at: worn.appendingPathComponent("operations.sqlite-shm"))
+        corrupt = false; do { _ = try BuddyWorkerStore(directory: worn) } catch { corrupt = true }; require(corrupt, "a corrupt task database fails closed")
     }
 }

@@ -1,6 +1,6 @@
 """Explicit, offline removal of the active team; preserve files and account access."""
 from pathlib import Path
-import argparse,datetime,fcntl,json,os,subprocess,tempfile,uuid,zipfile
+import argparse,datetime,fcntl,json,os,sqlite3,subprocess,tempfile,uuid,zipfile
 
 BOOTSTRAP='Learn the job the user wants help with through the setup conversation before beginning work.'
 def stop_worker():
@@ -9,6 +9,14 @@ def stop_worker():
     subprocess.run(['launchctl','bootout',f'gui/{os.getuid()}/app.buddy.worker'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     if subprocess.run(['pgrep','-x','BuddyWorker'],stdout=subprocess.DEVNULL).returncode==0:
         raise RuntimeError('Buddy’s worker is still stopping. Retry when it has exited.')
+
+def worker_database(support):
+    """An open connection to the worker's task database once it holds the tasks and routines, else None (the old JSON files are then the truth)."""
+    path=support/'Worker/operations.sqlite'
+    if not path.exists():return None
+    connection=sqlite3.connect(f'file:{path}?mode=rw',uri=True,timeout=5)
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() and connection.execute("SELECT 1 FROM meta WHERE key='migration'").fetchone():return connection
+    connection.close();return None
 
 def reset(support,stop=stop_worker):
     support=Path(support);stop()
@@ -33,10 +41,19 @@ def reset(support,stop=stop_worker):
         if 'conversation-providers.json' in saved:saved['conversation-providers.json']={k:v for k,v in saved['conversation-providers.json'].items() if not k.startswith(workspace+':')}
         for name,field in [('Worker/tasks.json','tasks'),('Worker/routines.json','routines')]:
             if name in saved:saved[name][field]=[r for r in saved[name][field] if r['workspace']!=workspace]
+        database=worker_database(support);export=None
+        if database:
+            try:
+                paused=database.execute("SELECT value FROM meta WHERE key='paused'").fetchone()
+                export=json.dumps({'paused':bool(paused and paused[0]=='1'),
+                    'tasks':[{'archived':bool(row[0]),'task':json.loads(row[1])} for row in database.execute('SELECT archived, body FROM tasks ORDER BY seq')],
+                    'routines':[json.loads(row[0]) for row in database.execute('SELECT body FROM routines ORDER BY seq')]},ensure_ascii=False).encode()
+            finally:database.close()
         directory=support/'AgentArchives.noindex';directory.mkdir(mode=0o700,exist_ok=True)
         archive=directory/('agents-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:6]+'.zip')
         with zipfile.ZipFile(archive,'w',compression=zipfile.ZIP_DEFLATED) as z:
             for name,data in raw.items():z.writestr(name,data)
+            if export is not None:z.writestr('Worker/operations-export.json',export)
         archive.chmod(0o600)
         with zipfile.ZipFile(archive) as z:
             if z.testzip():raise RuntimeError('Could not verify the recovery archive. Nothing was removed.')
@@ -45,6 +62,13 @@ def reset(support,stop=stop_worker):
             for i,(name,value) in enumerate(saved.items()):
                 path=Path(temp)/str(i);path.write_text(json.dumps(value,ensure_ascii=False));path.chmod(0o600);staged.append((path,support/name))
             for source,target in staged:os.replace(source,target)
+        database=worker_database(support)
+        if database:
+            try:
+                with database:
+                    database.execute('DELETE FROM tasks WHERE workspace = ?',(workspace,));database.execute('DELETE FROM routines WHERE workspace = ?',(workspace,))
+                database.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            finally:database.close()
         return count,archive
 
 if __name__=='__main__':

@@ -1,4 +1,4 @@
-import importlib.util,json,tempfile,unittest,uuid,zipfile
+import importlib.util,json,sqlite3,tempfile,unittest,uuid,zipfile
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('reset_agents',Path(__file__).parents[1]/'reset_agents.py');reset=importlib.util.module_from_spec(spec);spec.loader.exec_module(reset)
 class ResetTests(unittest.TestCase):
@@ -17,4 +17,22 @@ class ResetTests(unittest.TestCase):
             with zipfile.ZipFile(archive) as z:self.assertEqual(json.loads(z.read('workspace.json'))['agents'][0]['name'],'Old Buddy')
             self.assertEqual(list(json.loads((root/'agent-memory.json').read_text())['records']),[other+':'+a]);journal=json.loads((root/'team-monitor.json').read_text());self.assertEqual(journal['checks'],[{'workspace':other}]);self.assertEqual(journal['updates'],[]);self.assertEqual(journal['observed'],{});self.assertEqual(journal['daily']['2026-10-17']['reserved'],0.1)
             self.assertEqual(json.loads((root/'team-plans.json').read_text()),[{'workspace':other,'id':'keep-team'}])
+    def test_removes_tasks_and_routines_from_the_worker_database_and_keeps_them_in_the_recovery_archive(self):
+        with tempfile.TemporaryDirectory(suffix='.noindex') as tmp:
+            root=Path(tmp);w=str(uuid.uuid4());other=str(uuid.uuid4());a=str(uuid.uuid4());(root/'Worker').mkdir()
+            (root/'workspace.json').write_text(json.dumps({'version':1,'conversationWorkspace':w,'agents':[{'id':a,'name':'Old Buddy'}],'groups':[],'messages':{}}))
+            connection=sqlite3.connect(root/'Worker/operations.sqlite')
+            connection.executescript("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);CREATE TABLE tasks(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, workspace TEXT, archived INTEGER DEFAULT 0, body TEXT);CREATE TABLE routines(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT, workspace TEXT, body TEXT)")
+            connection.execute("INSERT INTO meta VALUES('migration','{}'),('paused','1')")
+            for workspace,archived,title in [(w,0,'mine'),(w,1,'mine archived'),(other,0,'theirs')]:connection.execute('INSERT INTO tasks(id,workspace,archived,body) VALUES(?,?,?,?)',(str(uuid.uuid4()),workspace,archived,json.dumps({'title':title,'workspace':workspace})))
+            for workspace,title in [(w,'mine'),(other,'theirs')]:connection.execute('INSERT INTO routines(id,workspace,body) VALUES(?,?,?)',(str(uuid.uuid4()),workspace,json.dumps({'title':title})))
+            connection.commit();connection.close()
+            count,archive=reset.reset(root,stop=lambda:None)
+            connection=sqlite3.connect(root/'Worker/operations.sqlite')
+            self.assertEqual([json.loads(r[0])['title'] for r in connection.execute('SELECT body FROM tasks')],['theirs'])
+            self.assertEqual([json.loads(r[0])['title'] for r in connection.execute('SELECT body FROM routines')],['theirs'])
+            self.assertEqual(connection.execute("SELECT value FROM meta WHERE key='paused'").fetchone()[0],'1');connection.close()
+            with zipfile.ZipFile(archive) as z:
+                saved=json.loads(z.read('Worker/operations-export.json'))
+                self.assertEqual(sorted(t['task']['title'] for t in saved['tasks']),['mine','mine archived','theirs']);self.assertTrue(saved['paused']);self.assertEqual(len(saved['routines']),2)
 if __name__=='__main__':unittest.main()

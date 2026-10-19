@@ -284,7 +284,10 @@ struct BuddyInboxFailure: LocalizedError {
             guard data.count<=32*1024*1024,let saved=try JSONSerialization.jsonObject(with:data) as? [String:Any],saved["version"] as? Int==1,let rows=saved[field] as? [[String:Any]],rows.count<=limit else {throw BuddyInboxFailure(message:"Saved routine results could not be verified.")}
             return rows
         }
-        let jobs=try array("tasks.json","tasks",1000),routines=try array("routines.json","routines",100)
+        // The worker's database is the truth once it exists; the old JSON files are read only before the worker has first run.
+        let saved:(tasks:[[String:Any]],routines:[[String:Any]])?
+        do { saved=try BuddyOperationsDB.snapshot(directory:support.appendingPathComponent("Worker")) } catch { throw BuddyInboxFailure(message:"Saved routine results could not be verified.") }
+        let jobs=try saved?.tasks ?? array("tasks.json","tasks",1000),routines=try saved?.routines ?? array("routines.json","routines",100)
         let normalize:(String)->String = {$0.lowercased().split(whereSeparator:{$0.isWhitespace}).joined(separator:" ")}
         let eligible=routines.filter{$0["workspace"] as? String==workspace && $0["agentId"] as? String==agent && $0["status"] as? String=="active" && $0["kind"] as? String=="email" && (query.isEmpty || normalize($0["query"] as? String ?? "")==normalize(query))}
         var results:[[String:Any]]=[]

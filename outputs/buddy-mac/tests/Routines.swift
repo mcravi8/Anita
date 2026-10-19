@@ -21,9 +21,9 @@ import Foundation
         require(queue.jobs[0]["model"] as? String=="claude-pinned","routine occurrence retains its pinned model")
         require(queue.jobs[0]["inboxQuery"] as? String==args["query"] as? String && queue.jobs[0]["routineID"] as? String==rid,"native task carries saved search and stable routine memory")
         // simulate lost routine update after queue was saved
-        var saved=try JSONSerialization.jsonObject(with:Data(contentsOf:root.appendingPathComponent("routines.json"))) as! [String:Any]
-        var values=saved["routines"] as! [[String:Any]];values[0]["nextRun"]=r["nextRun"];saved["routines"]=values
-        try JSONSerialization.data(withJSONObject:saved).write(to:root.appendingPathComponent("routines.json"))
+        let database=try BuddyOperationsDB(directory:root,existing:true)
+        var lost=try BuddyOperationsDB.decode(database.rows("SELECT body FROM routines").first!.first!.string!);lost["nextRun"]=r["nextRun"]
+        try database.run("UPDATE routines SET body = ?",[.text(BuddyOperationsDB.encode(lost))])
         let restarted=try BuddyRoutineStore(directory:root);try restarted.enqueueDue(store:queue,workspace:w,now:wake)
         require(queue.jobs.count==1,"restart cannot duplicate an already queued occurrence")
         try queue.update(id,["status":"completed","result":"Zopa pending; UBS complete"])

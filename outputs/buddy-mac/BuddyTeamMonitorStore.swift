@@ -79,6 +79,10 @@ import CryptoKit
     }
     func observed(_ state:[String:Any],jobs:[[String:Any]],now:Date)throws->[[String:Any]] {
         let w=state["conversationWorkspace"] as? String ?? "",old=value["observed"] as? [String:[String:Any]] ?? [:];var seen=old,out=[[String:Any]]()
+        // Read once for every agent: the worker's database once it exists, the old routines.json before that.
+        let workerDirectory=url.deletingLastPathComponent().appendingPathComponent("Worker");var savedRoutines=[[String:Any]]()
+        if let snapshot=try BuddyOperationsDB.snapshot(directory:workerDirectory) {savedRoutines=snapshot.routines}
+        else {let routineFile=workerDirectory.appendingPathComponent("routines.json");if FileManager.default.fileExists(atPath:routineFile.path),let routineData=try JSONSerialization.jsonObject(with:Data(contentsOf:routineFile)) as? [String:Any] {savedRoutines=routineData["routines"] as? [[String:Any]] ?? []}}
         for a in state["agents"] as? [[String:Any]] ?? [] {
             guard let id=a["id"] as? String,a["setupStatus"] as? String != "pending" else{continue}
             var sources=[[String:Any]]()
@@ -94,8 +98,7 @@ import CryptoKit
             let activeGroups=groupSources.filter{$0["status"] as? String != "completed"},doneGroups=groupSources.filter{$0["status"] as? String=="completed"};sources+=Array(activeGroups.prefix(20))+Array(doneGroups.suffix(8))
             let omitted=max(0,unfinished.count-40)+max(0,activeGroups.count-20)
             if omitted>0 {sources.append(["id":"coverage:"+id,"agentId":id,"kind":"coverage","status":"waiting_user","text":"\(omitted) unfinished work records exceed this check-in's input limits. Coverage is incomplete. Inspect the task list; do not claim all work has been reviewed."])}
-            let routineFile=url.deletingLastPathComponent().appendingPathComponent("Worker/routines.json")
-            if FileManager.default.fileExists(atPath:routineFile.path),let routineData=try JSONSerialization.jsonObject(with:Data(contentsOf:routineFile)) as? [String:Any] {for r in (routineData["routines"] as? [[String:Any]] ?? []).filter({$0["workspace"] as? String==w && $0["agentId"] as? String==id}) {sources.append(["id":"routine:"+(r["id"] as? String ?? ""),"agentId":id,"kind":"routine","title":r["title"] ?? "","status":r["status"] ?? "","nextRun":r["nextRun"] ?? "","lastError":r["lastError"] ?? ""])}}
+            for r in savedRoutines.filter({$0["workspace"] as? String==w && $0["agentId"] as? String==id}) {sources.append(["id":"routine:"+(r["id"] as? String ?? ""),"agentId":id,"kind":"routine","title":r["title"] ?? "","status":r["status"] ?? "","nextRun":r["nextRun"] ?? "","lastError":r["lastError"] ?? ""])}
             sources=BuddyAgentMemory.privateValue(sources) as! [[String:Any]]
             let fingerprint=Self.hash(sources),key=w+":"+id,previous=old[key]
             var record:[String:Any] = ["workspace":w,"agentId":id,"name":BuddyAgentMemory.privateText(a["name"] as? String ?? "Buddy"),"sources":sources,"fingerprint":fingerprint,"scope":["recentChatLimit":8,"unfinishedTasks":unfinished.count,"includedUnfinishedTasks":min(40,unfinished.count),"recentCompletedTasks":recent.count,"unfinishedGroups":activeGroups.count,"omittedUnfinished":omitted],"observedAt":Self.stamp(now),"changedAt":previous?["changedAt"] ?? Self.stamp(now)]

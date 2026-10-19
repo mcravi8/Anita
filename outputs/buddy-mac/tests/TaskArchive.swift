@@ -12,12 +12,6 @@ import Foundation
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: ["version": 1, "paused": false, "tasks": tasks]).write(to: directory.appendingPathComponent("tasks.json"))
     }
-    static func archives(_ directory: URL) throws -> [[[String: Any]]] {
-        try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.hasPrefix("tasks-archive-") }.sorted().map { name in
-            let value = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent(name))) as! [String: Any]
-            return value["tasks"] as! [[String: Any]]
-        }
-    }
     @MainActor static func main() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("buddy-task-archive-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -33,7 +27,7 @@ import Foundation
         try journal(full, seeded)
         let store = try BuddyWorkerStore(directory: full)
         require(store.jobs.count == 600, "the list is brought down to its working size (\(store.jobs.count))")
-        let archived = try archives(full).flatMap { $0 }
+        let archived = try store.archivedJobs()
         require(archived.count == 400, "the oldest finished tasks are in the archive (\(archived.count))")
         let originalIDs = Set(seeded.map { $0["id"] as! String }), keptIDs = Set(store.jobs.map { $0["id"] as! String }), archivedIDs = Set(archived.map { $0["id"] as! String })
         require(keptIDs.union(archivedIDs) == originalIDs && keptIDs.isDisjoint(with: archivedIDs), "every task is in exactly one place: nothing is lost or duplicated")
@@ -42,8 +36,9 @@ import Foundation
         let newestRoutine = seeded.last { $0["routineID"] as? String == "hourly" }!["id"] as! String
         require(store.jobs.last { $0["routineID"] as? String == "hourly" }?["id"] as? String == newestRoutine, "the newest task of a routine stays, because the next run builds on its result")
         require(archived.first?["result"] as? String == "Result 0" && archived.last.map { ($0["id"] as! String) != newestRoutine } == true, "archived tasks keep their full content")
-        let mode = (try FileManager.default.attributesOfItem(atPath: full.appendingPathComponent(try FileManager.default.contentsOfDirectory(atPath: full.path).first { $0.hasPrefix("tasks-archive-") }!).path)[.posixPermissions] as? NSNumber)?.intValue ?? 0
-        require(mode == 0o600, "the archive is private to the user")
+        let mode = (try FileManager.default.attributesOfItem(atPath: full.appendingPathComponent("operations.sqlite").path)[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        require(mode == 0o600, "the database that holds the archive is private to the user")
+        require(try FileManager.default.contentsOfDirectory(atPath: full.path).filter { $0.hasPrefix("tasks-archive-") }.isEmpty, "archiving no longer writes loose files")
         // New work is accepted again.
         let made = try store.create(workspace: w, agent: a, requestId: "after-archive", title: "New work", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0)
         require(made["status"] as? String == "queued" && store.jobs.count == 601, "a new task can be created")
@@ -54,21 +49,22 @@ import Foundation
         let edge = root.appendingPathComponent("edge")
         try journal(edge, (0..<900).map { task($0, workspace: w, agent: a, status: "completed") })
         let atEdge = try BuddyWorkerStore(directory: edge)
-        let edgeBefore = try archives(edge)
+        let edgeBefore = try atEdge.archivedJobs()
         require(atEdge.jobs.count == 900 && edgeBefore.isEmpty, "a list at the trigger is left alone when opened")
         _ = try atEdge.create(workspace: w, agent: a, requestId: "edge-1", title: "Edge", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0)
-        let edgeAfter = try archives(edge).flatMap { $0 }
+        let edgeAfter = try atEdge.archivedJobs()
         require(atEdge.jobs.count == 601 && edgeAfter.count == 300, "creating a task archives the oldest finished ones first")
 
         // 3. A heavy history is archived by size before the journal reaches its own limit.
         let heavy = root.appendingPathComponent("heavy")
         try journal(heavy, (0..<250).map { task($0, workspace: w, agent: a, status: "completed", padding: 110_000) })
         let big = try BuddyWorkerStore(directory: heavy)
-        let before = try FileManager.default.attributesOfItem(atPath: heavy.appendingPathComponent("tasks.json").path)[.size] as! Int
+        let before = big.liveBytes
         require(before > BuddyWorkerStore.archiveSizeTrigger, "the fixture is heavy (\(before) bytes)")
         _ = try big.create(workspace: w, agent: a, requestId: "heavy-1", title: "Heavy", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0)
-        let after = try FileManager.default.attributesOfItem(atPath: heavy.appendingPathComponent("tasks.json").path)[.size] as! Int
+        let after = big.liveBytes
         require(big.jobs.count == 201 && after < before, "a heavy journal is cut down by size (\(before) -> \(after))")
+        require(try big.archivedJobs().count == 50, "the tasks cut by size are kept, not deleted")
 
         // 4. Without anything finished to archive, the old limit still protects the queue.
         let busy = root.appendingPathComponent("busy")

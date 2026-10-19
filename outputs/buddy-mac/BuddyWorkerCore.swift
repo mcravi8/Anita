@@ -133,35 +133,38 @@ enum BuddyWorkerWire {
 
 @MainActor final class BuddyWorkerStore {
     let directory: URL
-    private let url: URL
+    private let db: BuddyOperationsDB
     private(set) var jobs: [[String: Any]]
     private(set) var paused: Bool
     static let interrupted = Set(["running", "waiting_review", "stopping"])
     static let terminal = Set(["completed", "cancelled"])
-    /// Finished tasks move to an archive file once the history gets long, so a routine that runs every hour never fills it up.
+    /// Finished tasks are set aside once the history gets long, so a routine that runs every hour never fills it up. They stay in the database.
     static let archiveTrigger = 900, archiveKeep = 600, archiveSizeTrigger = 24 * 1024 * 1024
+    /// One task may not grow past this, however long its history gets.
+    static let rowLimit = 16 * 1024 * 1024
     init(directory: URL) throws {
-        self.directory = directory; url = directory.appendingPathComponent("tasks.json")
+        self.directory = directory
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
-        if FileManager.default.fileExists(atPath: url.path) {
-            let data = try Data(contentsOf: url)
-            guard data.count <= 32 * 1024 * 1024, let saved = try JSONSerialization.jsonObject(with: data) as? [String: Any], saved["version"] as? Int == 1, let tasks = saved["tasks"] as? [[String: Any]], tasks.count <= 1000,
-                  tasks.allSatisfy({ ($0["id"] as? String).flatMap(UUID.init(uuidString:)) != nil && ($0["workspace"] as? String).flatMap(UUID.init(uuidString:)) != nil }), Set(tasks.compactMap { $0["id"] as? String }).count == tasks.count else { throw BuddyWorkerFailure(message: "Buddy couldn’t verify its saved background tasks. Restore tasks.json before starting the worker.") }
-            jobs = tasks; paused = saved["paused"] as? Bool ?? false
-        } else { jobs = []; paused = false }
+        db = try BuddyOperationsDB(directory: directory)
+        try BuddyOperationsMigration.importLegacy(into: db, directory: directory)
+        let tasks = try db.rows("SELECT body FROM tasks WHERE archived = 0 ORDER BY seq").compactMap { $0.first?.string }.map(BuddyOperationsDB.decode)
+        guard tasks.count <= 1000, tasks.allSatisfy({ ($0["id"] as? String).flatMap(UUID.init(uuidString:)) != nil && ($0["workspace"] as? String).flatMap(UUID.init(uuidString:)) != nil }), Set(tasks.compactMap { $0["id"] as? String }).count == tasks.count else { throw BuddyWorkerFailure(message: "Buddy couldn’t verify its saved background tasks. Restore them from the newest ZIP in Worker/Backups before starting the worker.") }
+        jobs = tasks; paused = try db.meta("paused") == "1"
         if jobs.count > Self.archiveTrigger { try? archiveFinished(keeping: Self.archiveKeep) }
+        var interrupted: [[String: Any]] = []
         for i in jobs.indices where Self.interrupted.contains(jobs[i]["status"] as? String ?? "") {
             var reviews = jobs[i]["reviews"] as? [[String: Any]] ?? []
             for r in reviews.indices { if reviews[r]["status"] as? String == "pending" { reviews[r]["status"] = "expired" } else if reviews[r]["status"] as? String == "answered" { reviews[r]["status"] = "uncertain" } }
             jobs[i]["reviews"] = reviews
             jobs[i]["status"] = "interrupted"; jobs[i]["progress"] = "The worker restarted. Review the last result and any external action before continuing. Nothing was automatically retried."
+            interrupted.append(jobs[i])
         }
-        try persist()
+        if !interrupted.isEmpty { try db.transaction { for job in interrupted { try Self.save(job, in: db) } } }
     }
-    /// Moves the oldest completed or cancelled tasks into their own file, leaving `keep` tasks in the list. Nothing is deleted. A task that
-    /// needs attention stays, and so does the newest task of every routine, because the next run builds on its result. The tasks leave the
-    /// list only after the archive file is safely written.
+    /// Sets the oldest completed or cancelled tasks aside, leaving `keep` tasks in the list. Nothing is deleted: they stay in the database,
+    /// marked as archived, and come back with `archivedJobs()`. A task that needs attention stays in the list, and so does the newest task of
+    /// every routine, because the next run builds on its result. The move is one transaction, so a task is never in neither place.
     @discardableResult func archiveFinished(keeping keep: Int) throws -> Int {
         guard jobs.count > keep else { return 0 }
         func routineKey(_ job: [String: Any]) -> String? {
@@ -175,26 +178,49 @@ enum BuddyWorkerWire {
             if excess > 0, Self.terminal.contains(job["status"] as? String ?? ""), !newest.contains(job["id"] as? String ?? "") { moved.append(job); excess -= 1 } else { kept.append(job) }
         }
         guard !moved.isEmpty else { return 0 }
-        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let file = directory.appendingPathComponent("tasks-archive-\(stamp)-\(UUID().uuidString.prefix(8)).json")
-        let data = try JSONSerialization.data(withJSONObject: ["version": 1, "archivedAt": stamp, "tasks": moved], options: [.sortedKeys])
-        try data.write(to: file, options: .atomic); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        try db.transaction { for job in moved { try db.run("UPDATE tasks SET archived = 1, version = version + 1 WHERE id = ?", [.text(job["id"] as? String ?? "")]) } }
         jobs = kept
         return moved.count
     }
-    func persist() throws {
-        let data = try JSONSerialization.data(withJSONObject: ["version": 1, "paused": paused, "tasks": jobs], options: [.sortedKeys])
-        guard data.count <= 32 * 1024 * 1024 else { throw BuddyWorkerFailure(message: "The worker’s saved task history is full.") }
-        try data.write(to: url, options: .atomic); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        let file = try FileHandle(forWritingTo: url); try file.synchronize(); try file.close()
+    /// Tasks that were set aside, oldest first.
+    func archivedJobs() throws -> [[String: Any]] {
+        try db.rows("SELECT body FROM tasks WHERE archived = 1 ORDER BY seq").compactMap { $0.first?.string }.map(BuddyOperationsDB.decode)
+    }
+    /// How much room the tasks in the list take, in bytes.
+    var liveBytes: Int { Int((try? db.rows("SELECT COALESCE(SUM(length(CAST(body AS BLOB))), 0) FROM tasks WHERE archived = 0").first?.first?.int) ?? 0) }
+    private static func row(_ job: [String: Any]) throws -> (id: String, body: String) {
+        let body = try BuddyOperationsDB.encode(job)
+        guard body.utf8.count <= rowLimit else { throw BuddyWorkerFailure(message: "The worker’s saved task history is full.") }
+        return (job["id"] as? String ?? "", body)
+    }
+    static func insert(_ job: [String: Any], archived: Bool, in db: BuddyOperationsDB) throws {
+        let (id, body) = try row(job)
+        try db.run("INSERT INTO tasks(id, workspace, agent_id, request_id, status, kind, archived, created_at, updated_at, body) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+            .text(id), .text(job["workspace"] as? String ?? ""), .text(job["agentId"] as? String ?? ""), .text(job["requestId"] as? String ?? ""),
+            .text(job["status"] as? String ?? ""), .text(job["kind"] as? String ?? ""), .int(archived ? 1 : 0), .text(job["createdAt"] as? String ?? ""), .text(job["updatedAt"] as? String ?? ""), .text(body)])
+    }
+    private static func save(_ job: [String: Any], in db: BuddyOperationsDB) throws {
+        let (id, body) = try row(job)
+        let changed = try db.run("UPDATE tasks SET status = ?, kind = ?, updated_at = ?, version = version + 1, body = ? WHERE id = ?", [
+            .text(job["status"] as? String ?? ""), .text(job["kind"] as? String ?? ""), .text(job["updatedAt"] as? String ?? ""), .text(body), .text(id)])
+        guard changed == 1 else { throw BuddyWorkerFailure(message: "This task is unavailable.") }
     }
     func job(_ id: String) throws -> [String: Any] {
         guard let job = jobs.first(where: { $0["id"] as? String == id }) else { throw BuddyWorkerFailure(message: "This background task is unavailable.") }; return job
     }
+    /// Money is always kept as decimals. A literal `0` arrives as a whole number, which `as? Double` cannot read back, so a task that had
+    /// just been stopped looked as if it still had its whole budget until the worker restarted (and an allowance chosen for it was refused).
+    private static let amounts = ["budgetUSD", "remainingBudgetUSD", "reservedBudgetUSD", "uncertainBudgetUSD", "spentUSD"]
+    private static func decimals(_ values: [String: Any]) -> [String: Any] {
+        var out = values
+        for key in amounts { if let whole = out[key] as? Int { out[key] = Double(whole) } }
+        return out
+    }
     @discardableResult func update(_ id: String, _ values: [String: Any]) throws -> [String: Any] {
         guard let i = jobs.firstIndex(where: { $0["id"] as? String == id }) else { throw BuddyWorkerFailure(message: "This task is unavailable.") }
-        let old = jobs[i]; jobs[i].merge(values) { _, new in new }; jobs[i]["updatedAt"] = ISO8601DateFormatter().string(from: Date())
-        do { try persist() } catch { jobs[i] = old; throw error }; return jobs[i]
+        let old = jobs[i]; jobs[i].merge(Self.decimals(values)) { _, new in new }; jobs[i]["updatedAt"] = ISO8601DateFormatter().string(from: Date())
+        let saved = jobs[i]
+        do { try db.transaction { try Self.save(saved, in: db) } } catch { jobs[i] = old; throw error }; return jobs[i]
     }
     func create(workspace: String, agent: String, requestId: String, title: String, goal: String, kind: String, provider: String, budget: Double, model:String?=nil) throws -> [String: Any] {
         guard UUID(uuidString: workspace) != nil, UUID(uuidString: agent) != nil, !requestId.isEmpty, requestId.count <= 200,
@@ -202,15 +228,19 @@ enum BuddyWorkerWire {
               !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, goal.count <= 30000,
               ["research", "applications", "email", "general", "coding"].contains(kind), ["chatgpt", "claude"].contains(provider), (kind != "coding" || provider=="claude"), budget.isFinite, budget >= 0, budget <= 10 else { throw BuddyWorkerFailure(message: "Add a short task title, a clear brief, and a supported provider.") }
         if let old = jobs.first(where: { $0["workspace"] as? String == workspace && $0["agentId"] as? String == agent && $0["requestId"] as? String == requestId }) { return old }
-        let journalSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
-        if jobs.count >= Self.archiveTrigger || journalSize > Self.archiveSizeTrigger { try? archiveFinished(keeping: journalSize > Self.archiveSizeTrigger ? 200 : Self.archiveKeep) }
+        let heavy = liveBytes > Self.archiveSizeTrigger
+        if jobs.count >= Self.archiveTrigger || heavy { try? archiveFinished(keeping: heavy ? 200 : Self.archiveKeep) }
         guard jobs.count < 1000, jobs.filter({ !Self.terminal.contains($0["status"] as? String ?? "") }).count < 30 else { throw BuddyWorkerFailure(message: "Finish or cancel some background tasks before adding more.") }
         let now = ISO8601DateFormatter().string(from: Date())
         var job: [String: Any] = ["id": UUID().uuidString, "workspace": workspace, "agentId": agent, "requestId": requestId, "title": title, "goal": goal, "kind": kind, "provider": provider, "budgetUSD": budget, "status": "queued", "progress": "Queued", "createdAt": now, "updatedAt": now, "attempt": 0, "events": [[String: Any]](), "result": "", "files": [[String: Any]]()]
         if let model,!model.isEmpty {guard model.range(of:#"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"#,options:.regularExpression) != nil else{throw BuddyWorkerFailure(message:"Invalid task model.")};job["model"]=model}
-        jobs.append(job); do { try persist() } catch { jobs.removeLast(); throw error }; return job
+        let created = job
+        jobs.append(job); do { try db.transaction { try Self.insert(created, archived: false, in: db) } } catch { jobs.removeLast(); throw error }; return job
     }
-    func setPaused(_ value: Bool) throws { let old = paused; paused = value; do { try persist() } catch { paused = old; throw error } }
+    func setPaused(_ value: Bool) throws {
+        let old = paused; paused = value
+        do { try db.transaction { try db.setMeta("paused", value ? "1" : "0") } } catch { paused = old; throw error }
+    }
     func resume(_ id: String, continuingCoding:Bool=false,additionalBudgetUSD:Double?=nil,authorizationID:String?=nil) throws -> [String: Any] {
         let job = try self.job(id)
         let authorizations=job["budgetAuthorizations"] as? [[String:Any]] ?? []
@@ -229,23 +259,38 @@ enum BuddyWorkerWire {
 
 /// Durable local schedules. One overdue occurrence runs after wake, never a burst of catch-up sends.
 @MainActor final class BuddyRoutineStore {
-    private let url:URL
+    private let db:BuddyOperationsDB
     private(set) var routines:[[String:Any]]
     init(directory:URL) throws {
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
-        url=directory.appendingPathComponent("routines.json")
-        if FileManager.default.fileExists(atPath:url.path) {
-            let data=try Data(contentsOf:url)
-            guard data.count<8*1024*1024,let saved=try JSONSerialization.jsonObject(with:data) as? [String:Any],saved["version"] as? Int==1,let values=saved["routines"] as? [[String:Any]],values.count<=100,Set(values.compactMap{$0["id"] as? String}).count==values.count else { throw BuddyWorkerFailure(message:"Buddy couldn't verify saved routines. Restore routines.json before starting the worker.") }
-            for value in values { try Self.validate(value);guard let id=value["id"] as? String,UUID(uuidString:id) != nil,let next=value["nextRun"] as? String,ISO8601DateFormatter().date(from:next) != nil else { throw BuddyWorkerFailure(message:"A saved routine has invalid timing. Repair routines.json before starting.") } }
-            routines=values
-        } else { routines=[] }
+        db=try BuddyOperationsDB(directory:directory)
+        try BuddyOperationsMigration.importLegacy(into:db,directory:directory)
+        let values=try db.rows("SELECT body FROM routines ORDER BY seq").compactMap{$0.first?.string}.map(BuddyOperationsDB.decode)
+        guard values.count<=100,Set(values.compactMap{$0["id"] as? String}).count==values.count else { throw BuddyWorkerFailure(message:"Buddy couldn't verify saved routines. Restore them from the newest ZIP in Worker/Backups before starting the worker.") }
+        for value in values { try Self.validate(value);guard let id=value["id"] as? String,UUID(uuidString:id) != nil,let next=value["nextRun"] as? String,ISO8601DateFormatter().date(from:next) != nil else { throw BuddyWorkerFailure(message:"A saved routine has invalid timing. Restore it from the newest ZIP in Worker/Backups before starting.") } }
+        routines=values
     }
+    /// Writes only what changed, in one transaction: new routines are added, edited ones updated, removed ones deleted.
     private func persist() throws {
-        try JSONSerialization.data(withJSONObject:["version":1,"routines":routines],options:[.sortedKeys]).write(to:url,options:.atomic)
-        try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:url.path)
+        let saved=routines
+        try db.transaction {
+            var existing=[String:String]()
+            for row in try db.rows("SELECT id, body FROM routines") { if let id=row[0].string,let body=row[1].string { existing[id]=body } }
+            var keep=Set<String>()
+            for routine in saved {
+                guard let id=routine["id"] as? String else { throw BuddyWorkerFailure(message:"A routine is missing its ID.") }
+                let body=try BuddyOperationsDB.encode(routine);keep.insert(id)
+                if let old=existing[id] {
+                    if old != body { try db.run("UPDATE routines SET workspace = ?, agent_id = ?, status = ?, version = version + 1, body = ? WHERE id = ?",[.text(routine["workspace"] as? String ?? ""),.text(routine["agentId"] as? String ?? ""),.text(routine["status"] as? String ?? ""),.text(body),.text(id)]) }
+                } else { try Self.insert(routine,body:body,id:id,in:db) }
+            }
+            for id in existing.keys where !keep.contains(id) { try db.run("DELETE FROM routines WHERE id = ?",[.text(id)]) }
+        }
     }
-    private static func validate(_ r:[String:Any]) throws {
+    static func insert(_ routine:[String:Any],body:String,id:String,in db:BuddyOperationsDB) throws {
+        try db.run("INSERT INTO routines(id, workspace, agent_id, status, body) VALUES(?, ?, ?, ?, ?)",[.text(id),.text(routine["workspace"] as? String ?? ""),.text(routine["agentId"] as? String ?? ""),.text(routine["status"] as? String ?? ""),.text(body)])
+    }
+    fileprivate static func validate(_ r:[String:Any]) throws {
         if r["browserAgentId"] != nil || r["browserOrigin"] != nil {
             guard (r["browserAgentId"] as? String).flatMap(UUID.init(uuidString:)) != nil,let origin=r["browserOrigin"] as? String,let u=URLComponents(string:origin),u.scheme=="https",u.host != nil,u.user==nil,u.password==nil,u.path.isEmpty,u.query==nil,u.fragment==nil else{throw BuddyWorkerFailure(message:"Choose an existing browser owner and an exact HTTPS site origin.")}
         }
@@ -361,5 +406,132 @@ enum BuddyWorkerWire {
             }
             if !NSArray(array:original).isEqual(to:routines) { try persist() }
         } catch { routines=original;throw error }
+    }
+}
+
+/// Brings the old JSON files (`tasks.json`, `tasks-archive-*.json`, `routines.json`) into the database, once.
+///
+/// Before anything is changed the files are copied into a ZIP in `Worker/Backups`. They are checked exactly as the old loaders checked them,
+/// so a damaged file stops the worker with the files untouched. The import is one transaction that also counts what it wrote. Only after
+/// it has committed are the files renamed to `*.migrated`; they are never deleted. From then on the database is the only writer, and a file
+/// with the old name is left alone, because importing it again could overwrite newer work.
+@MainActor enum BuddyOperationsMigration {
+    /// Test hook: runs after the import has committed and before the old files are set aside.
+    static var afterImport: (() -> Void)?
+    private struct Source { let name: String; let url: URL; let data: Data; var rows = 0 }
+
+    static func importLegacy(into db: BuddyOperationsDB, directory: URL, now: Date = Date()) throws {
+        if let record = try db.meta("migration") { setAside(record: record, directory: directory); return }
+        let fm = FileManager.default, iso = ISO8601DateFormatter()
+        func load(_ name: String, limit: Int) throws -> Source? {
+            let url = directory.appendingPathComponent(name)
+            guard fm.fileExists(atPath: url.path) else { return nil }
+            let data = try Data(contentsOf: url)
+            guard data.count <= limit else { throw BuddyWorkerFailure(message: "\(name) is too large to verify. Restore it before starting the worker.") }
+            return Source(name: name, url: url, data: data)
+        }
+        func object(_ source: Source, version: Int = 1) throws -> [String: Any] {
+            guard let saved = try? JSONSerialization.jsonObject(with: source.data) as? [String: Any], saved["version"] as? Int == version else { throw BuddyWorkerFailure(message: "Buddy couldn’t verify \(source.name). Restore it before starting the worker.") }
+            return saved
+        }
+        func validTask(_ task: [String: Any]) -> Bool { (task["id"] as? String).flatMap(UUID.init(uuidString:)) != nil && (task["workspace"] as? String).flatMap(UUID.init(uuidString:)) != nil }
+
+        var sources: [Source] = [], paused = false
+        var live: [[String: Any]] = [], archived: [[String: Any]] = [], routines: [[String: Any]] = [], skipped = 0
+        if var tasksFile = try load("tasks.json", limit: 32 * 1024 * 1024) {
+            let saved = try object(tasksFile)
+            guard let tasks = saved["tasks"] as? [[String: Any]], tasks.count <= 1000, tasks.allSatisfy(validTask), Set(tasks.compactMap { $0["id"] as? String }).count == tasks.count else { throw BuddyWorkerFailure(message: "Buddy couldn’t verify its saved background tasks. Restore tasks.json before starting the worker.") }
+            let requests = tasks.map { "\($0["workspace"] as? String ?? "")|\($0["agentId"] as? String ?? "")|\($0["requestId"] as? String ?? "")" }.filter { !$0.hasSuffix("|") }
+            guard Set(requests).count == requests.count else { throw BuddyWorkerFailure(message: "Two saved tasks claim the same request. Restore tasks.json before starting the worker.") }
+            live = tasks; paused = saved["paused"] as? Bool ?? false; tasksFile.rows = tasks.count; sources.append(tasksFile)
+        }
+        let liveIDs = Set(live.compactMap { $0["id"] as? String })
+        var archivedIDs = Set<String>()
+        for name in try fm.contentsOfDirectory(atPath: directory.path).filter({ $0.hasPrefix("tasks-archive-") && $0.hasSuffix(".json") }).sorted() {
+            guard var file = try load(name, limit: 32 * 1024 * 1024) else { continue }
+            guard let tasks = try object(file)["tasks"] as? [[String: Any]], tasks.allSatisfy(validTask) else { throw BuddyWorkerFailure(message: "Buddy couldn’t verify \(name). Restore it before starting the worker.") }
+            for task in tasks {
+                guard let id = task["id"] as? String else { continue }
+                if liveIDs.contains(id) || !archivedIDs.insert(id).inserted { skipped += 1 } else { archived.append(task) }
+            }
+            file.rows = tasks.count; sources.append(file)
+        }
+        if var routinesFile = try load("routines.json", limit: 8 * 1024 * 1024) {
+            let saved = try object(routinesFile)
+            guard let values = saved["routines"] as? [[String: Any]], values.count <= 100, Set(values.compactMap { $0["id"] as? String }).count == values.count else { throw BuddyWorkerFailure(message: "Buddy couldn't verify saved routines. Restore routines.json before starting the worker.") }
+            for value in values {
+                try BuddyRoutineStore.validate(value)
+                guard let id = value["id"] as? String, UUID(uuidString: id) != nil, let next = value["nextRun"] as? String, iso.date(from: next) != nil else { throw BuddyWorkerFailure(message: "A saved routine has invalid timing. Repair routines.json before starting.") }
+            }
+            routines = values; routinesFile.rows = values.count; sources.append(routinesFile)
+        }
+
+        let stamp = iso.string(from: now)
+        var record: [String: Any] = ["at": stamp, "live": live.count, "archived": archived.count, "routines": routines.count, "skippedDuplicates": skipped,
+                                     "sources": sources.map { ["name": $0.name, "sha256": digest($0.data), "bytes": $0.data.count, "rows": $0.rows] as [String: Any] }]
+        if !sources.isEmpty { record["backup"] = try backUp(sources, in: directory) }
+
+        do {
+            try db.transaction {
+                for task in archived { try BuddyWorkerStore.insert(task, archived: true, in: db) }
+                for task in live { try BuddyWorkerStore.insert(task, archived: false, in: db) }
+                for routine in routines { try BuddyRoutineStore.insert(routine, body: try BuddyOperationsDB.encode(routine), id: routine["id"] as? String ?? "", in: db) }
+                try db.setMeta("paused", paused ? "1" : "0")
+                // Count what was written before it is allowed to commit.
+                let liveCount = try db.rows("SELECT COUNT(*) FROM tasks WHERE archived = 0").first?.first?.int ?? -1
+                let archivedCount = try db.rows("SELECT COUNT(*) FROM tasks WHERE archived = 1").first?.first?.int ?? -1
+                let routineCount = try db.rows("SELECT COUNT(*) FROM routines").first?.first?.int ?? -1
+                guard Int(liveCount) == live.count, Int(archivedCount) == archived.count, Int(routineCount) == routines.count else { throw BuddyWorkerFailure(message: "The import did not match the saved files, so nothing was changed. Your files are untouched.") }
+                try db.setMeta("migration", try BuddyOperationsDB.encode(record))
+            }
+        } catch let failure as BuddyOperationsFailure where failure.message.contains("UNIQUE") {
+            throw BuddyWorkerFailure(message: "Two saved tasks claim the same request. Restore tasks.json before starting the worker.")
+        }
+        afterImport?()
+        if let saved = try db.meta("migration") { setAside(record: saved, directory: directory) }
+    }
+
+    private static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+
+    /// Copies the files into a ZIP before anything else happens. The name comes from the files' contents, so a worker that keeps failing
+    /// to start does not pile up copies. Returns the ZIP's name.
+    private static func backUp(_ sources: [Source], in directory: URL) throws -> String {
+        let fm = FileManager.default
+        let folder = directory.appendingPathComponent("Backups", isDirectory: true)
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let id = digest(Data(sources.map { $0.name + ":" + digest($0.data) }.joined(separator: "\n").utf8)).prefix(16)
+        let zip = folder.appendingPathComponent("pre-database-\(id).zip")
+        func tool(_ path: String, _ arguments: [String]) throws -> String {
+            let process = Process(), pipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: path); process.arguments = arguments; process.standardOutput = pipe; process.standardError = Pipe()
+            try process.run(); let output = pipe.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+            guard process.terminationStatus == 0 else { throw BuddyWorkerFailure(message: "Buddy couldn’t make a backup of its saved tasks, so it did not change them.") }
+            return String(decoding: output, as: UTF8.self)
+        }
+        func verified() -> Bool {
+            guard let listing = try? tool("/usr/bin/unzip", ["-Z1", zip.path]), (try? tool("/usr/bin/unzip", ["-tq", zip.path])) != nil else { return false }
+            return Set(listing.split(separator: "\n").map(String.init)) == Set(sources.map(\.name))
+        }
+        if fm.fileExists(atPath: zip.path), verified() { return zip.lastPathComponent }
+        try? fm.removeItem(at: zip)
+        _ = try tool("/usr/bin/zip", ["-q", "-j", "-X", zip.path] + sources.map(\.url.path))
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: zip.path)
+        guard verified() else { try? fm.removeItem(at: zip); throw BuddyWorkerFailure(message: "Buddy couldn’t verify the backup of its saved tasks, so it did not change them.") }
+        return zip.lastPathComponent
+    }
+
+    /// Renames the old files that were imported (same contents as recorded) to `*.migrated`. A file with the old name but different contents
+    /// is left where it is.
+    private static func setAside(record: String, directory: URL) {
+        let fm = FileManager.default
+        guard let saved = try? BuddyOperationsDB.decode(record), let sources = saved["sources"] as? [[String: Any]] else { return }
+        for source in sources {
+            guard let name = source["name"] as? String, let hash = source["sha256"] as? String else { continue }
+            let url = directory.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url), digest(data) == hash else { continue }
+            var target = directory.appendingPathComponent(name + ".migrated")
+            if fm.fileExists(atPath: target.path) { target = directory.appendingPathComponent(name + "." + UUID().uuidString.prefix(8) + ".migrated") }
+            try? fm.moveItem(at: url, to: target)
+        }
     }
 }

@@ -1,8 +1,85 @@
-/* The sidebar slides: narrowing to the icon rail and widening back on a wide window, and sliding in and out as a drawer on a narrow one. */
-.shell{transition:grid-template-columns .3s cubic-bezier(.22,.8,.24,1)}
-@media(max-width:680px){
-  /* Hidden only after it has finished sliding out, and shown at once when it starts sliding in. */
-  .sidebar{transition:transform .3s cubic-bezier(.22,.8,.24,1),visibility 0s linear .3s}
-  .sidebar.mobile-open{transition:transform .3s cubic-bezier(.22,.8,.24,1),visibility 0s}
+/*
+  The sidebar, wide and as a narrow rail, laid out on one grid so that going between them is a glide and not a rebuild.
+
+    - Every row keeps its height and its place: agents start at the same y in both (130), their pictures sit on one vertical axis (x 39), and so do
+      the footer icons. Only the sidebar's edge moves, and the words are clipped by it and fade (early on the way in, late on the way out).
+    - The commands (notifications, new chat, search, the sidebar toggle) are placed from the sidebar's right edge. They ride the edge and settle into
+      a 2 x 2 grid under the logo, inside the header band, so nothing below the band is pushed.
+    - Slow enough to follow (0.64 s), with an ease that starts and ends gently.
+
+  This file sits after buddy-theme.css, whose rail rules it replaces where they changed positions.
+*/
+@media(min-width:681px){
+  :root{--glide:640ms;--curve:cubic-bezier(.62,0,.22,1);--rail:78px}
+  .shell{transition:grid-template-columns var(--glide) var(--curve)}
+  .shell.sidebar-compact{grid-template-columns:var(--rail) minmax(0,1fr)}
+
+  /* Words: gone before the edge reaches them, back after it has passed. */
+  .buddy-brand h2,.chat-search,.chat-row-copy,.worker-nav>span:not([data-worker-badge]),.workspace-button>span:not(.fig-slot),.workspace-button>.icon,.hidden-agents-label,.preview-status>.small-icon,.compact-chat-search{
+    opacity:1;visibility:visible;
+    transition:opacity calc(var(--glide)*.4) ease-in calc(var(--glide)*.5),visibility 0s,right var(--glide) var(--curve),top var(--glide) var(--curve);
+  }
+  .shell.sidebar-compact .buddy-brand h2,.shell.sidebar-compact .chat-search,.shell.sidebar-compact .chat-row-copy,.shell.sidebar-compact .worker-nav>span:not([data-worker-badge]),.shell.sidebar-compact .workspace-button>span:not(.fig-slot),.shell.sidebar-compact .workspace-button>.icon,.shell.sidebar-compact .hidden-agents-label,.shell.sidebar-compact .preview-status>.small-icon{
+    opacity:0;visibility:hidden;pointer-events:none;
+    transition:opacity calc(var(--glide)*.3) ease-out,visibility 0s calc(var(--glide)*.3),right var(--glide) var(--curve),top var(--glide) var(--curve);
+  }
+  /* Their rail rules took these out of the layout, which moved everything below; keep them in place and let the edge clip them. */
+  .shell.sidebar-compact .buddy-brand h2,.shell.sidebar-compact .chat-row-copy,.shell.sidebar-compact .worker-nav>span:not([data-worker-badge]),.shell.sidebar-compact .workspace-button>span:not(.fig-slot){display:revert}
+  .shell.sidebar-compact .chat-search{display:flex}
+  .shell.sidebar-compact .workspace-button>.fig-slot{display:inline-block}
+  /* The "Hidden" label gives way (its space closes, so the count and the chevron slide in to take its place) instead of vanishing. */
+  .hidden-agents-label{display:inline-block;max-width:80px;overflow:hidden;white-space:nowrap;transition:max-width var(--glide) var(--curve),opacity calc(var(--glide)*.4) ease-in calc(var(--glide)*.5),visibility 0s}
+  .shell.sidebar-compact .hidden-agents-label{display:inline-block;max-width:0;transition:max-width var(--glide) var(--curve),opacity calc(var(--glide)*.3) ease-out,visibility 0s calc(var(--glide)*.3)}
+
+  /* Header band: the same box in both states (logo, then the search field), with the commands lifted out of it. */
+  /* overflow:hidden keeps the wide logo line from widening the rail; the commands (placed from the sidebar, not the header) are not clipped by it. */
+  .sidebar-header,.shell.sidebar-compact .sidebar-header{position:static;overflow:hidden;flex-direction:row;padding:20px 14px 14px;gap:8px}
+  .sidebar-header-actions,.shell.sidebar-compact .sidebar-header-actions{display:contents}
+  .buddy-brand{transition:transform var(--glide) var(--curve)}
+  .shell.sidebar-compact .buddy-brand{transform:translate(3px,-8px)}
+
+  .sidebar-header .icon-button:not(.mobile-sidebar-close),.sidebar .compact-chat-search{
+    position:absolute;margin:0;width:36px;height:36px;
+    transition:right var(--glide) var(--curve),top var(--glide) var(--curve),width var(--glide) var(--curve),height var(--glide) var(--curve),opacity calc(var(--glide)*.4) ease-in calc(var(--glide)*.5),visibility 0s;
+  }
+  .sidebar-header .sidebar-layout-toggle{right:14px;top:24px}
+  .sidebar-header [data-action="new-chat"]{right:50px;top:24px}
+  .sidebar-header .activity-nav,.sidebar-header .pending-suggestions-button{right:86px;top:24px}
+  .sidebar-header-actions:has(.pending-suggestions-button) .activity-nav{right:122px}
+  .sidebar .compact-chat-search{display:grid;right:228px;top:78px;opacity:0;visibility:hidden;pointer-events:none}
+
+  .shell.sidebar-compact .sidebar-header .icon-button:not(.mobile-sidebar-close),.shell.sidebar-compact .sidebar .compact-chat-search{width:32px;height:32px}
+  .shell.sidebar-compact .sidebar-header .activity-nav{right:39px;top:58px}
+  .shell.sidebar-compact .sidebar-header [data-action="new-chat"]{right:7px;top:58px}
+  .shell.sidebar-compact .sidebar-header .sidebar-layout-toggle{right:7px;top:92px}
+  .shell.sidebar-compact .sidebar-header .pending-suggestions-button{right:39px;top:92px}
+  .shell.sidebar-compact .sidebar .compact-chat-search{right:39px;top:92px;opacity:1;visibility:visible;pointer-events:auto;
+    transition:right var(--glide) var(--curve),top var(--glide) var(--curve),width var(--glide) var(--curve),height var(--glide) var(--curve),opacity calc(var(--glide)*.4) ease-in calc(var(--glide)*.5),visibility 0s}
+  /* With an agent suggestion waiting there is no room for a fifth command: search waits for the wide sidebar. */
+  .shell.sidebar-compact .sidebar:has(.pending-suggestions-button) .compact-chat-search{opacity:0;visibility:hidden;pointer-events:none}
+  .worker-nav,.workspace-button,.preview-status{overflow:hidden;white-space:nowrap}
+  .worker-nav>span,.workspace-button>span{white-space:nowrap}
+
+  /* Agents: same rows, same height, same place. Only the highlight narrows. */
+  .shell.sidebar-compact .chat-list{padding:4px 8px 12px}
+  .chat-row,.shell.sidebar-compact .chat-row{position:relative;overflow:hidden;justify-content:flex-start;padding:7px 10px 7px 6px;gap:10px;min-height:0;width:auto}
+  .shell.sidebar-compact .hidden-agents>summary{justify-content:flex-start;padding:11px 13px;gap:7px}
+
+  /* Footer: icons on the avatars' axis (x 39), words fading, the settings gear leaving. */
+  .shell.sidebar-compact .sidebar-footer,.sidebar-footer{padding:10px 12px 14px;align-items:stretch;gap:2px}
+  .worker-nav{padding-left:19px}
+  .workspace-button{padding-left:11px}
+  .preview-status{padding-left:20px}
+  .shell.sidebar-compact .worker-nav,.shell.sidebar-compact .workspace-button{width:auto;min-height:0;justify-content:flex-start;padding:10px 8px 10px 19px}
+  .shell.sidebar-compact .workspace-button{padding:6px 8px 6px 11px}
+  .shell.sidebar-compact .preview-status{font-size:11px;color:transparent;justify-content:flex-start;padding:4px 8px 4px 20px;gap:5px;min-height:0}
+  .preview-status{transition:color calc(var(--glide)*.3) ease}
+  .preview-status>svg:first-child{color:var(--text4)}
 }
-/* A reader who asks for less motion gets none: the page-wide reduced-motion rule in styles.css already switches every transition off. */
+@media(max-width:680px){
+  :root{--glide:640ms;--curve:cubic-bezier(.62,0,.22,1)}
+  /* The drawer is hidden only after it has finished sliding out, and shown at once when it starts sliding in. */
+  .sidebar{transition:transform var(--glide) var(--curve),visibility 0s linear var(--glide)}
+  .sidebar.mobile-open{transition:transform var(--glide) var(--curve),visibility 0s}
+}
+/* Anyone who asks their system for less motion gets none: the page-wide rule in styles.css switches every transition off. */

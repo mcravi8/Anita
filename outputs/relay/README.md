@@ -21,6 +21,8 @@ Then open `http://127.0.0.1:4173`. There are no dependencies or build steps.
 - Settings → Appearance switches between Light, Dark and Match system.
 - Open a conversation's details → Create a similar agent to start from a copy of that agent's configuration. Editing the new agent does not change the original.
 - Open New chat → Agent suggestions → Try a sample suggestion to review the approval journey. Change the suggested configuration, save it for later, decline it, or approve and add it to selected groups.
+- The chat header is a floating pill with the figure and name. The chevron on its right slides out the subtitle and the actions (shared files, details); the choice holds as you move between chats. Messages scroll under a soft fade.
+- The sidebar's dot field plays: quiet patterns form and dissolve in the background; a working agent has a thought cloud over its head; opening a chat grows roots from the agent's head across its row; a reply that lands in a chat you are not in shows as a dot-matrix count at the right of the row (dots converge on it as it lands); typing sends dots from the composer into the agent and it looks your way; after 15 idle seconds agents close their eyes and only choosing one wakes it. With reduced motion the counts, the sleeping eyes and the cloud stay and the moving effects go. The code is `buddy-field-play.js`, plugged into `BuddyFigures.extend`.
 - Click the folder in a conversation header for shared Files, Tasks, and Computer tabs.
 - Write messages, mention bots, and revisit saved drafts.
 - Create tasks, assign ownership, hand off work, and mark tasks done.

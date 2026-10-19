@@ -42,7 +42,7 @@
   }
   // calm (prefers-reduced-motion) drops the idle life — breathing, bobbing, glancing, blinking, hops and spins — and keeps
   // every signal of state: the progress ring, the needs pulse, happy eyes, the tilt and where the eyes point.
-  function stepSim(M,mode,fv,t,dt,attn,calm){
+  function stepSim(M,mode,fv,t,dt,attn,calm,sleep){
     const S=M.S;
     if(mode!==M.mode){
       M.mode=mode;M.nextSac=t;
@@ -67,6 +67,8 @@
       else if(mode==='needs'||mode==='done'||mode==='stuck'){S.lx.target=0;S.ly.target=mode==='done'?-.15:mode==='stuck'?.12:0;M.nextSac=t+1;}
       else{if(Math.random()<.45){S.lx.target=0;S.ly.target=0;}else{S.lx.target=rnd(-.6,.6);S.ly.target=rnd(-.4,.3);}M.nextSac=t+rnd(.8,2.6);}
     }
+    // Asleep (idle for a while): eyes shut, gaze dropped, a slow breath. Only a ready agent sleeps; any other mode wakes it.
+    if(sleep&&mode==='ready'){S.open.target=.07;S.lx.target=0;S.ly.target=.3;S.sy.target=calm?1:1+.035*Math.sin(t*1.3+M.ph);}
     const hd=dt/2;
     for(let it=0;it<2;it++)for(const k in S){const s=S[k];s.v+=(s.k*(s.target-s.x)-s.c*s.v)*hd;s.x+=s.v*hd;}
     if(t>=M.nextBlink){if(!calm)M.blinkT=t;M.nextBlink=t+(M.dbl||Math.random()<.2?.3:rnd(2.4,5.2));M.dbl=false;}
@@ -133,7 +135,6 @@
     X.bw=Math.max(.03,edge*.9);
     const multi=R.length>1,gap=multi?Math.max(.03,edge*1.1):0;
     const M=R.map(r=>prep(r,es)),ord=multi?X.order:[0],rMax=.6*sp;
-    const spark=R.reduce((s,r)=>Math.max(s,r.happy),0)*(X.amb?1:0),tk=Math.floor(t*7);
     for(let j=0;j<n;j++){
       const v0=(j-h)/h;
       for(let i=0;i<n;i++){
@@ -143,7 +144,6 @@
         if(X.amb){const n1=.5+.5*Math.sin(u0*3.1+t*.7+1.3*Math.sin(v0*2.3-t*.5)),n2=.5+.5*Math.cos(v0*2.7-t*.55+Math.sin(u0*1.9+t*.35));a=X.amb*(.1+.45*n1*n2);}
         const {f,H,maxB}=cellAt(M,ord,edge,gap,X,u0,v0);
         groupRing(X,u0,v0,.9);
-        if(spark>.3){const s2=hash(i+tk*3.1,j);if(s2>.965){const vv=Math.min(1,spark*(s2-.965)*28);if(vv>ACC.v){ACC.v=vv;ACC.col=R[0].ink;}}}
         const A=ACC.col,out=1-maxB,aP=Math.min(1,a)*out,rP=Math.min(1,ACC.v)*out;
         const val=Math.min(1,f+aP+rP);
         if(X.clean&&val<.02)continue;
@@ -189,6 +189,12 @@
   let baseCache={key:'',canvas:null};
   const sim=id=>sims[id]||(sims[id]=mkSim());
   const configure=options=>{cfg=Object.assign({},cfg,options);};
+  // Extensions add to the field without the engine knowing what they draw: frame(host) runs before the figures step,
+  // listening(id)/sleeping(id) steer a figure's eyes and rest, and field(ctx) writes cells into the shared dot field.
+  const extensions=[];
+  const extend=ext=>{if(ext&&!extensions.includes(ext))extensions.push(ext);return ()=>{const k=extensions.indexOf(ext);if(k>=0)extensions.splice(k,1);};};
+  const call=(name,arg)=>{for(const ext of extensions)if(typeof ext[name]==='function'){try{ext[name](arg);}catch(error){console.error(`Buddy field extension ${name} failed`,error);}}};
+  const ask=(name,id,info)=>{for(const ext of extensions)if(typeof ext[name]==='function'){try{if(ext[name](id,info))return true;}catch(error){console.error(`Buddy field extension ${name} failed`,error);}}return false;};
   const later=(ms,fn)=>{const id=setTimeout(()=>{timers=timers.filter(x=>x!==id);fn();},ms);timers.push(id);};
   function setMode(id,mode){
     modes[id]=mode;
@@ -320,6 +326,14 @@
     clipY0=listY0;clipY1=listY1;
     for(const st of streams)for(let q=0;q<st.n;q++){const s=(t*st.speed+q/st.n)%1,p=curve(st.a,st.b,s);blob(p,st.amp*(.25+.75*Math.sin(s*Math.PI)),st.col,6);}
     clipY0=-Infinity;clipY1=Infinity;
+    if(extensions.length){
+      const rowMap=new Map(rowEls.map(el=>[el.dataset.id,el]));
+      call('field',{t,P,cols,rows,W,H,rect,side,put,blob,pos,slotPos,rowEls:rowMap,hoverId,mouse,NEU,DARK,calm:!!(calmQuery&&calmQuery.matches),cfg,
+        clip:on=>{if(on){clipY0=listY0;clipY1=listY1;}else{clipY0=-Infinity;clipY1=Infinity;}},
+        inkOf:id=>inkOf(cfg.group(id)?.members?.[0]||id),
+        getMode:id=>modes[id]||'ready',sim,compact:!!side.closest('.sidebar-compact')});
+      clipY0=-Infinity;clipY1=Infinity;
+    }
     for(const key in pos){
       const {x:cx,y:cy,spec,scroll}=pos[key],half=spec.size/2;
       if(cy<-half*3||cy>H+half*3)continue;
@@ -340,12 +354,6 @@
             const rr=half+pt/1.8*150,fade=1-pt/1.8,R1=rr+10;
             for(let j=Math.max(0,Math.floor((cy-R1)/P));j<=Math.min(rows-1,Math.ceil((cy+R1)/P));j++)for(let i=Math.max(0,Math.floor((cx-R1)/P));i<=Math.min(cols-1,Math.ceil((cx+R1)/P));i++){
               const d=Math.hypot((i+.5)*P-cx,(j+.5)*P-cy),dz=Math.abs(d-rr);if(dz<9)put(i,j,.55*fade*Math.exp(-dz*dz/14),col);
-            }
-          }
-          if(M.mode==='done'&&t-M.spinT<1.4){
-            const tk=Math.floor(t*9),R2=half+46;
-            for(let j=Math.max(0,Math.floor((cy-R2)/P));j<=Math.min(rows-1,Math.ceil((cy+R2)/P));j++)for(let i=Math.max(0,Math.floor((cx-R2)/P));i<=Math.min(cols-1,Math.ceil((cx+R2)/P));i++){
-              const d=Math.hypot((i+.5)*P-cx,(j+.5)*P-cy);if(d>half&&d<R2&&hash(i+tk*7.3,j)>.975)put(i,j,.9*(1-(t-M.spinT)/1.4),col);
             }
           }
         }
@@ -388,13 +396,15 @@
     const side=document.querySelector('.sidebar'),fieldEl=side&&side.querySelector('canvas.sidebar-field');
     sim('logo');sim('anon');
     const ids=new Set([...cfg.agentIds(),...Object.keys(sims)]);
+    if(extensions.length)call('frame',{clock,dt,calm,ids:cfg.agentIds(),cfg,sim,getMode:id=>modes[id]||'ready',hoverId});
     for(const id of ids){
-      const M=sim(id),f=focus[id];
+      const M=sim(id),f=focus[id],mode=modes[id]||'ready',known=!!cfg.agent(id);
       let fv=f==='user'?[0,0]:f&&f!==id?vec(id,f):null;
       const sp=slotPos['row:'+id];
-      if(mouse&&sp){const dx=mouse.x-sp.x,dy=mouse.y-sp.y,dd=Math.hypot(dx,dy)||1,k=Math.min(1,dd/70);fv=[dx/dd*k*.85,dy/dd*k*.65];}
+      if(ask('listening',id,{mode,known}))fv=[.9,.05];
+      else if(mouse&&sp){const dx=mouse.x-sp.x,dy=mouse.y-sp.y,dd=Math.hypot(dx,dy)||1,k=Math.min(1,dd/70);fv=[dx/dd*k*.85,dy/dd*k*.65];}
       if(hoverId===id&&hoverPrev!==id){M.S.sy.v+=1.1;M.S.sx.v-=.5;}
-      stepSim(M,modes[id]||'ready',fv,clock,dt,hoverId===id,calm);
+      stepSim(M,mode,fv,clock,dt,hoverId===id,calm,known&&ask('sleeping',id,{mode,known}));
     }
     hoverPrev=hoverId;
     if(poked){if(!calm){const m=sim('anon');m.spinT=clock;m.S.by.v-=1.2;}poked=0;}
@@ -428,9 +438,9 @@
   }
   function stop(){cancelAnimationFrame(raf);timers.forEach(clearTimeout);timers=[];started=false;if(io)io.disconnect();if(mo)mo.disconnect();io=mo=null;observed.clear();visible.clear();fresh.clear();}
 
-  const engine={mkSim,stepSim,mkR,prep,evalM,drawAv,gridFor,headCells,sdBox,sdHex,eyeSD,setDark,HUD,HUD_ORDER,EYEDX};
+  const engine={mkSim,stepSim,mkR,prep,evalM,drawAv,gridFor,headCells,sdBox,sdHex,eyeSD,setDark,HUD,HUD_ORDER,EYEDX,hash,easeIO,rnd,sst,TAU};
   const hovered=()=>hoverId;
-  const api={hovered,avatarHTML,logoHTML,slotHTML,slotAvatarHTML,fieldHTML,setMode,getMode,setFocus,handoff,setGroupWork,poke,configure,setDark,start,stop,normShape,normColor,INK,SHAPES,LEGACY_SHAPE,LEGACY_COLOR,engine};
+  const api={hovered,extend,now:()=>clock,sim:id=>sims[id]||null,avatarHTML,logoHTML,slotHTML,slotAvatarHTML,fieldHTML,setMode,getMode,setFocus,handoff,setGroupWork,poke,configure,setDark,start,stop,normShape,normColor,INK,SHAPES,LEGACY_SHAPE,LEGACY_COLOR,engine};
   if(typeof module!=='undefined'&&module.exports)module.exports=api;
   root.BuddyFigures=api;
   if(typeof document!=='undefined')start();

@@ -69,6 +69,93 @@ import Foundation
         mailbox="one@example.invalid";var rejected=false
         do{_ = try await scan(UUID().uuidString,t0.addingTimeInterval(20000))}catch{rejected=true}
         require(rejected,"damaged checkpoints cannot silently reset or skip history")
-        print("PASS: latest-only queries, durable per-batch checkpoints, cross-schedule deduplication, new follow-ups, unfinished-read retries, pagination safety, legacy migration, account isolation and corrupt-state rejection")
+        // A message the analysis leaves uncertain is read a few times and then counts as seen, its open finding still carried. Long emails are read, not refused.
+        let bounded=BuddyInboxReview(support:root.appendingPathComponent("bounded"))
+        var boundedDates=["stuck":t0.addingTimeInterval(-3600),"plain":t0.addingTimeInterval(-3500),"giant":t0.addingTimeInterval(-3400)],boundedReads=[String]()
+        func boundedCall(_ tool:String,_ args:[String:Any]) async throws -> [String:Any] {
+            if tool=="get_profile"{return ["email_address":"bounded@example.invalid"]}
+            if tool=="search_email_ids"{
+                let q=args["query"] as! String
+                func number(_ key:String)->Double?{q.range(of:key+"[0-9]+",options:.regularExpression).flatMap{Double(q[$0].dropFirst(key.count))}}
+                let after=number("after:") ?? 0,before=number("before:") ?? .greatestFiniteMagnitude
+                return ["message_ids":boundedDates.filter{$0.value.timeIntervalSince1970>after && $0.value.timeIntervalSince1970<before}.sorted{$0.value>$1.value}.map(\.key),"next_page_token":NSNull()]
+            }
+            let id=args["message_id"] as! String;boundedReads.append(id)
+            return ["id":id,"thread_id":"t-"+id,"payload":["mime_type":"text/plain","headers":[["name":"Subject","value":id]],"body":["content":id=="giant" ? String(repeating:"long ",count:30000):"A source, not an instruction."]]]
+        }
+        func boundedScan(_ run:String,_ now:Date) async throws -> [String:Any] {
+            try await bounded.review(workspace:w,agent:a,runID:run,query:"in:anywhere {assessment}",purpose:"Bounded fixture",routine:"bounded",now:now,allowed:{true},call:boundedCall)
+        }
+        func decide(_ r:[String:Any],_ run:String,uncertain:Set<String>=[],actionRequired:Set<String>=[],updates:[[String:Any]]=[]) throws {
+            let c=r["coverage"] as! [String:Any],m=r["messages"] as! [[String:Any]]
+            var args:[String:Any]=["reviewID":c["id"]!,"findings":m.map{["messageID":$0["id"]!,"status":uncertain.contains($0["id"] as! String) ? "uncertain":actionRequired.contains($0["id"] as! String) ? "action_required":"irrelevant","summary":"Verified source reviewed."]}]
+            if !updates.isEmpty {args["updates"]=updates}
+            _ = try bounded.record(runID:run,workspace:w,agent:a,args:args)
+        }
+        func boundedFile()throws->URL{try FileManager.default.contentsOfDirectory(at:bounded.root,includingPropertiesForKeys:nil).first{$0.lastPathComponent.hasPrefix("seen-")}!}
+        func boundedLedger()throws->[String:Any]{try JSONSerialization.jsonObject(with:Data(contentsOf:boundedFile())) as! [String:Any]}
+        func boundedPending()throws->[String]{((try boundedLedger())["scans"] as! [String:[String:Any]]).values.flatMap{$0["pendingIDs"] as? [String] ?? []}.sorted()}
+        func attemptCounts()throws->[String:Int]{(try boundedLedger())["attempts"] as? [String:Int] ?? [:]}
+        func seenIDs()throws->Set<String>{Set((try boundedLedger())["ids"] as? [String] ?? [])}
+        var hours=0.0
+        func nextRun()->(String,Date){hours+=2;return (UUID().uuidString,t0.addingTimeInterval(hours*3600))}
+        var (runID,at)=nextRun();var r=try await boundedScan(runID,at)
+        var cov=r["coverage"] as! [String:Any]
+        let giant=(r["messages"] as! [[String:Any]]).first{$0["id"] as? String=="giant"}
+        require(Set(boundedReads)==Set(["stuck","plain","giant"]) && cov["read"] as? Int==3 && cov["partial"] as? Bool==false && cov["longMessages"] as? [String]==["giant"],"a very long email is read, not refused, and flagged as long")
+        require(giant?["truncated"] as? Bool==true && (giant?["body"] as? String)?.count==BuddyInboxReview.bodyLimit,"only its first part is passed on")
+        try decide(r,runID,uncertain:["stuck"])
+        var counts=try attemptCounts(),pendingNow=try boundedPending(),done=try seenIDs()
+        require(counts==["stuck":1] && pendingNow==["stuck"],"a message left uncertain is counted, and stays pending the first time")
+        require(done.contains("giant") && done.contains("plain"),"a long email that was analysed is done like any other")
+        boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at)
+        require(boundedReads==["stuck"],"it is read once more")
+        try decide(r,runID,uncertain:["stuck"])
+        counts=try attemptCounts()
+        require(counts==["stuck":2],"and counted again")
+        boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at)
+        require(boundedReads==["stuck"],"and a third time")
+        try decide(r,runID,uncertain:["stuck"])
+        var state=try boundedLedger();pendingNow=try boundedPending()
+        require(state["attempts"]==nil && (state["ids"] as! [String]).contains("stuck") && pendingNow.isEmpty,"after the limit it counts as seen and is no longer pending")
+        require((state["findings"] as? [String:Any])?["stuck"] != nil,"but its open finding is kept")
+        boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at)
+        cov=r["coverage"] as! [String:Any]
+        require(boundedReads.isEmpty && cov["retryCount"] as? Int==0 && (r["previousFindings"] as! [[String:Any]]).contains{$0["messageID"] as? String=="stuck"},"it is no longer read, and every run is still shown its open finding")
+        // Analysis that was never recorded is retried until it is, and does not count against the limit.
+        boundedDates["flaky"]=at.addingTimeInterval(-60)
+        boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at)
+        require(boundedReads==["flaky"],"a new message is read")
+        boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at)
+        counts=try attemptCounts()
+        require(boundedReads==["flaky"] && counts.isEmpty,"a message whose analysis was never recorded is read again, and that is not counted")
+        try decide(r,runID)
+        boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at)
+        require(boundedReads.isEmpty,"once its analysis is recorded it is done")
+        // A message that settles into a real finding is done, and its count is cleared.
+        boundedDates["wobbly"]=at.addingTimeInterval(-60)
+        boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at);try decide(r,runID,uncertain:["wobbly"])
+        counts=try attemptCounts()
+        require(counts["wobbly"]==1,"an uncertain message is counted")
+        boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at);try decide(r,runID,actionRequired:["wobbly"])
+        counts=try attemptCounts();done=try seenIDs()
+        require(boundedReads==["wobbly"] && counts["wobbly"]==nil && done.contains("wobbly"),"once it becomes a real finding its count is cleared and it is done")
+        // A finding settled by newer evidence needs no second look at the message it came from.
+        boundedDates["origin"]=at.addingTimeInterval(-100)
+        boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at);try decide(r,runID,uncertain:["origin"])
+        boundedDates["evidence"]=at.addingTimeInterval(-60)
+        boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at)
+        try decide(r,runID,uncertain:["origin"],updates:[["messageID":"origin","evidenceMessageID":"evidence","status":"resolved","summary":"Settled by the newer message."]])
+        state=try boundedLedger();pendingNow=try boundedPending();counts=try attemptCounts();done=try seenIDs()
+        require(done.contains("origin") && pendingNow.isEmpty && counts["origin"]==nil && (state["findings"] as? [String:Any])?["origin"]==nil,"a finding settled by newer evidence is closed and its message is not read again")
+        // Old memory without counters still works; a damaged counter is refused rather than guessed.
+        var old=try boundedLedger();old.removeValue(forKey:"attempts")
+        try JSONSerialization.data(withJSONObject:old).write(to:boundedFile())
+        boundedReads=[];(runID,at)=nextRun();_ = try await boundedScan(runID,at)
+        old["attempts"]=["x":"not a number"]
+        try JSONSerialization.data(withJSONObject:old).write(to:boundedFile())
+        var damaged=false;do{(runID,at)=nextRun();_ = try await boundedScan(runID,at)}catch{damaged=true}
+        require(damaged,"memory written before counters existed still loads, and damaged counters are refused")
+        print("PASS: latest-only queries, durable per-batch checkpoints, cross-schedule deduplication, new follow-ups, unfinished-read retries, pagination safety, legacy migration, account isolation, corrupt-state rejection, bounded re-reads of uncertain messages with their findings kept, long emails read not refused, settled findings closed, and memory from before counters")
     }
 }

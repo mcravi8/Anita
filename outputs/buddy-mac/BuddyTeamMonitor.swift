@@ -37,11 +37,45 @@ import Foundation
         out["automaticClaudeUsage"]=["dailyLimitUSD":out.removeValue(forKey:"dailyLimitUSD") ?? NSNull(),"sharedAcrossAgents":true,"appliesTo":["team_checkins","preference_learning"],"excludes":["chat_replies","background_tasks","scheduled_tasks"],"dailyUsage":out.removeValue(forKey:"daily") ?? [:]]
         let visible=Set(allowed.compactMap{$0["agentId"] as? String})
         out["observed"]=(out["observed"] as? [[String:Any]] ?? []).filter{visible.contains($0["agentId"] as? String ?? "")}
-        out["checks"]=(out["checks"] as? [[String:Any]] ?? []).filter{visible.contains($0["agentId"] as? String ?? "")}
+        out["checks"]=(out["checks"] as? [[String:Any]] ?? []).filter{visible.contains($0["agentId"] as? String ?? "")}.suffix(20).map(Self.compact)
         if let w=raw["conversationWorkspace"] as? String,let r=memory.records[w+":"+actor] {out["learnedPreferences"]=r.filter{["enabled","role","instructions","rules","learnedAt","checkedAt","error","revision"].contains($0.key)}}
         out["roster"]=(raw["agents"] as? [[String:Any]] ?? []).map{["id":$0["id"] ?? "","name":BuddyAgentMemory.privateText($0["name"] as? String ?? "Buddy"),"role":BuddyAgentMemory.privateText($0["role"] as? String ?? "")]}
         out["work"]=allowed.prefix(20).map{record in var r=record;let sources=record["sources"] as? [[String:Any]] ?? [];r["sources"]=target != nil ? sources:Array(sources.filter{$0["kind"] as? String != "chat"}.suffix(5))+sources.filter{$0["speaker"] as? String=="user"}.suffix(1);return r}
-        out["omittedAgents"]=max(0,allowed.count-20);return out
+        out["omittedAgents"]=max(0,allowed.count-20);return Self.fitting(out)
+    }
+    /// A check-in as the agent sees it in a status result: what happened, not the text of every past report.
+    static func compact(_ check:[String:Any])->[String:Any] {
+        var out=check.filter{["id","agentId","kind","status","createdAt","startedAt","finishedAt","force"].contains($0.key)}
+        if let error=check["error"] as? String,!error.isEmpty {out["error"]=String(error.prefix(200))}
+        if let output=check["output"] as? [String:Any] {
+            var brief=output.filter{["notify","priority","suppressed"].contains($0.key)}
+            if let body=output["body"] as? String,!body.isEmpty {brief["body"]=String(body.prefix(200))}
+            out["output"]=brief
+        }
+        return out
+    }
+    /// What a tool result may weigh before a model can no longer open it. Anything over is trimmed to fit, never refused.
+    static let toolResultLimit=60_000
+    /// Trims a status result to `limit` bytes, a step at a time and only as far as needed: first long text, then the number of sources and check-ins
+    /// kept, then agents, and last everything but the core. It says what it trimmed, so the model knows the result is a summary.
+    static func fitting(_ value:[String:Any],limit:Int=toolResultLimit)->[String:Any] {
+        func size(_ v:[String:Any])->Int {JSONSerialization.isValidJSONObject(v) ? ((try? JSONSerialization.data(withJSONObject:v).count) ?? Int.max):Int.max}
+        guard size(value)>limit else{return value}
+        var out=value,trimmed=[String]()
+        func mapWork(_ change:(inout [String:Any])->Void) {out["work"]=(out["work"] as? [[String:Any]] ?? []).map{var record=$0;change(&record);return record}}
+        func mapSources(_ change:([[String:Any]])->[[String:Any]]) {mapWork{record in record["sources"]=change(record["sources"] as? [[String:Any]] ?? [])}}
+        let steps:[(String,()->Void)]=[
+            ("long text shortened",{mapSources{$0.map{source in source.mapValues{($0 as? String).map{String($0.prefix(240))} ?? $0}}}}),
+            ("fewer sources per agent",{mapSources{Array($0.suffix(3))}}),
+            ("fewer check-ins",{out["checks"]=Array((out["checks"] as? [[String:Any]] ?? []).suffix(8)).map{var c=$0;c.removeValue(forKey:"output");return c}}),
+            ("fewer agents",{out["work"]=Array((out["work"] as? [[String:Any]] ?? []).prefix(8));out["observed"]=Array((out["observed"] as? [[String:Any]] ?? []).prefix(8))}),
+            ("only the core",{out.removeValue(forKey:"work");out.removeValue(forKey:"observed");out["checks"]=Array((out["checks"] as? [[String:Any]] ?? []).suffix(3))})
+        ]
+        for (label,step) in steps {
+            step();trimmed.append(label)
+            if size(out)<=limit {break}
+        }
+        out["trimmed"]=trimmed;return out
     }
     func handle(_ args:[String:Any],state raw:[String:Any],jobs:[[String:Any]],actor:String?=nil,authorizedText:String="",now:Date=Date())throws->[String:Any] {
         try memory.synchronize(raw);let state=try BuddyAgentMemory.overlay(raw,support:support),w=state["conversationWorkspace"] as! String

@@ -23,6 +23,22 @@ import Foundation
   require(!BuddyTeamMonitorStore.repeats(said,priority:1,prior:(said,reported.addingTimeInterval(-25*3600)),now:reported),"and is reminded after that")
   require(BuddyTeamMonitorStore.repeats(said,priority:0,prior:(said,reported.addingTimeInterval(-2*3600)),now:reported) && !BuddyTeamMonitorStore.repeats(said,priority:0,prior:(said,reported.addingTimeInterval(-4*3600)),now:reported),"a blocker is repeated after three hours")
   require(!BuddyTeamMonitorStore.repeats(said,priority:1,prior:nil,now:reported),"nothing is a repeat of nothing")
+  // A status result never grows past what a model can open: it is trimmed to fit, says so, and a small one is left alone.
+  func jsonSize(_ value:[String:Any])->Int {(try? JSONSerialization.data(withJSONObject:value).count) ?? -1}
+  func bigWork(_ agents:Int)->[[String:Any]] {(0..<agents).map{n in ["agentId":"agent-\(n)","name":"Agent \(n)","sources":(0..<6).map{k in ["id":"worker:\(n)-\(k)","kind":"worker","status":"completed","result":String(repeating:"result ",count:200),"progress":String(repeating:"x",count:600)] as [String:Any]}]}}
+  let heavy:[String:Any]=["roster":[["id":"a","name":"A"]],"agents":["a":["proactive":true]],"checks":(0..<80).map{["id":"c\($0)","status":"completed","output":["body":String(repeating:"b",count:1500)]] as [String:Any]},"work":bigWork(20),"observed":bigWork(20)]
+  let fitted=BuddyTeamMonitor.fitting(heavy)
+  require(jsonSize(heavy)>BuddyTeamMonitor.toolResultLimit && jsonSize(fitted)<=BuddyTeamMonitor.toolResultLimit,"an oversized status result is trimmed to fit")
+  require((fitted["trimmed"] as? [String])?.isEmpty==false && fitted["roster"] != nil && fitted["agents"] != nil,"it says what it trimmed and keeps the core")
+  let small:[String:Any]=["roster":[String](),"checks":[String]()]
+  require(NSDictionary(dictionary:BuddyTeamMonitor.fitting(small)).isEqual(to:small),"a small result is left exactly as it is")
+  let mild=BuddyTeamMonitor.fitting(heavy,limit:jsonSize(heavy)-1000)
+  require((mild["trimmed"] as? [String])==["long text shortened"],"a result a little over the limit only has its long text shortened")
+  let extreme:[String:Any]=["roster":(0..<3000).map{["id":"a\($0)","name":"Agent number \($0)"]},"checks":(0..<80).map{["id":"c\($0)","output":["body":String(repeating:"b",count:1500)]] as [String:Any]},"work":bigWork(20)]
+  require(jsonSize(BuddyTeamMonitor.fitting(extreme,limit:10_000))>0 && (BuddyTeamMonitor.fitting(extreme,limit:10_000)["trimmed"] as? [String])?.last=="only the core","even an absurd result is cut down to its core rather than refused")
+  let compacted=BuddyTeamMonitor.compact(["id":"c","agentId":"a","kind":"checkin","status":"completed","input":["x":"private"],"output":["notify":true,"priority":0,"body":String(repeating:"b",count:900),"detail":String(repeating:"d",count:900),"sourceIds":["s"]] as [String:Any]])
+  let compactOutput=compacted["output"] as? [String:Any] ?? [:]
+  require(compacted["input"]==nil && compactOutput["detail"]==nil && (compactOutput["body"] as? String)?.count==200 && compactOutput["notify"] as? Bool==true,"a check-in in an agent's status keeps what happened, not its full text")
   let root=FileManager.default.temporaryDirectory.appendingPathComponent("buddy-monitor-"+UUID().uuidString+".noindex")
   try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
   let w=UUID().uuidString,chief=UUID().uuidString,maze=UUID().uuidString,task=UUID().uuidString
@@ -172,6 +188,17 @@ import Foundation
   var needed=busyWork;needed[0]["status"]="waiting_user";needed[0]["progress"]="Choose a source."
   for _ in 0..<10 {await quietStep(needed)}
   require(quietCalls()==1,"work that needs the user is checked at once")
+  // However much history there is, an agent's status stays small enough to open; the screen still gets all of it.
+  func addReports(_ range:Range<Int>)throws {for n in range {let job=try quietMonitor.store.enqueue(kind:"checkin",workspace:w,agent:solo,input:["requesterId":quietChief,"question":"Fixture \(n)"],fingerprint:"big-\(n)",policy:quietMonitor.store.policy(quietState),selection:.init(provider:"claude",model:"fixture"),now:Date(),force:true);try quietMonitor.store.update(job["id"] as! String,["status":"completed","output":["notify":true,"priority":1,"body":String(repeating:"Long report. ",count:150),"detail":String(repeating:"Detail. ",count:300),"sourceIds":["x"]] as [String:Any]])}}
+  try addReports(0..<3)
+  let fewView=try quietMonitor.handle(["action":"status"],state:quietState,jobs:needed,actor:quietChief),fewChecks=(fewView["checks"] as? [[String:Any]] ?? []).filter{($0["output"] as? [String:Any])?["notify"] as? Bool==true}
+  func bodyLength(_ check:[String:Any])->Int {((check["output"] as? [String:Any])?["body"] as? String)?.count ?? 0}
+  require(jsonSize(fewView)<BuddyTeamMonitor.toolResultLimit && fewView["trimmed"]==nil && fewChecks.allSatisfy{($0["output"] as? [String:Any])?["detail"]==nil && bodyLength($0)<=200} && fewChecks.filter{bodyLength($0)==200}.count==3,"a modest history is not trimmed as a whole, but each past report is short")
+  for n in 3..<60 {let job=try quietMonitor.store.enqueue(kind:"checkin",workspace:w,agent:solo,input:["requesterId":quietChief,"question":"Fixture \(n)"],fingerprint:"big-\(n)",policy:quietMonitor.store.policy(quietState),selection:.init(provider:"claude",model:"fixture"),now:Date(),force:true);try quietMonitor.store.update(job["id"] as! String,["status":"completed","output":["notify":true,"priority":1,"body":String(repeating:"Long report. ",count:150),"detail":String(repeating:"Detail. ",count:300),"sourceIds":["x"]] as [String:Any]])}
+  let agentView=try quietMonitor.handle(["action":"status"],state:quietState,jobs:needed,actor:quietChief),screenView=try quietMonitor.status(quietState)
+  let agentChecks=agentView["checks"] as? [[String:Any]] ?? []
+  require(jsonSize(agentView)<=BuddyTeamMonitor.toolResultLimit && agentChecks.count<=20 && agentChecks.allSatisfy{($0["output"] as? [String:Any])?["detail"]==nil},"an agent's status stays small however much history there is, and carries no past report text")
+  require((screenView["checks"] as? [[String:Any]] ?? []).count>20 && jsonSize(screenView)>BuddyTeamMonitor.toolResultLimit,"while the screen still gets the whole history")
   quietMonitor.shutdown()
   do{_ = try monitor.handle(["action":"set_proactive","enabled":true,"quote":"keep me updated"],state:state,jobs:jobs,actor:maze,authorizedText:"A different task.");require(false,"invented authorization rejected")}catch{}
   let enabled=try monitor.handle(["action":"set_proactive","enabled":true,"quote":"keep me updated"],state:state,jobs:jobs,actor:maze,authorizedText:"Please keep me updated.")

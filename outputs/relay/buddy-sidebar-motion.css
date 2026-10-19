@@ -1,0 +1,8 @@
+/* The sidebar slides: narrowing to the icon rail and widening back on a wide window, and sliding in and out as a drawer on a narrow one. */
+.shell{transition:grid-template-columns .3s cubic-bezier(.22,.8,.24,1)}
+@media(max-width:680px){
+  /* Hidden only after it has finished sliding out, and shown at once when it starts sliding in. */
+  .sidebar{transition:transform .3s cubic-bezier(.22,.8,.24,1),visibility 0s linear .3s}
+  .sidebar.mobile-open{transition:transform .3s cubic-bezier(.22,.8,.24,1),visibility 0s}
+}
+/* A reader who asks for less motion gets none: the page-wide reduced-motion rule in styles.css already switches every transition off. */

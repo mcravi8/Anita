@@ -43,6 +43,12 @@ test('a chat opens at its newest message and its unread signal goes away; other 
   assert.equal(await page.locator('.chat-row[data-id="sage"] .activity-dot').count(),0,'opening it cleared its signal');
   assert.ok(await page.evaluate(()=>calls.some(c=>c.operation==='notify'&&c.read===true&&c.ids.includes('decision:change:1'))),'the app is told it was read');
   assert.ok(await page.evaluate(()=>BuddyActivity.collect(state,{workspace:state.conversationWorkspace,tasks:[],decisions:[{id:'change:1',kind:'confirm',agentId:'sage',payload:{changeId:'1'}}],notifications:{'decision:change:1':{read:true,dismissed:false}}}).length===1),'reading keeps the alert listed; nothing is dismissed or approved');
+  // Redraws happen all the time (a message arrives, a setting changes). They must not throw the reader back to the top.
+  await page.evaluate(()=>{render();render();});await page.waitForTimeout(300);
+  assert.equal(await atBottom(),true,'a redraw while at the bottom stays at the bottom');
+  await page.evaluate(()=>{document.getElementById('chat-body').scrollTop=600;});
+  await page.evaluate(()=>{render();});await page.waitForTimeout(300);
+  assert.equal(await page.evaluate(()=>Math.round(document.getElementById('chat-body').scrollTop)),600,'a redraw while reading older messages keeps the place');
   // Reading back to an earlier chat starts at the bottom again, even after scrolling up.
   await page.evaluate(()=>{document.getElementById('chat-body').scrollTop=0;});
   await page.locator('.chat-row[data-id="chief"]').click();

@@ -399,7 +399,9 @@ An agent made from a team plan can arrive with a complete role and instructions 
 
 Opening a chat clears its unread signal (the alerts stay listed under Notifications, nothing is approved or dismissed), as does an alert that arrives while that chat is open and no panel covers it. A chat opens at its newest message, and again at the newest message when you return to it; while you are in it the page keeps following new messages only if you are near the bottom, as before.
 
-Tests: `chat-open-setup-ui.test.mjs` (open at the bottom, signals cleared and kept per chat, the one-click offers in each place, over-long instructions not offered, six breakages caught) and the repair case in `tests/OperationsDB.swift`.
+A chat that opened at its first messages was the page redrawing the whole view (which rebuilds the message list at the top) several times right after opening. The redraw is now wrapped: the reader's place is noted and put back (at the newest message if the chat was just opened or the reader was near the bottom). The sidebar slides (`buddy-sidebar-motion.css`): the grid column narrows and widens over 0.3 seconds, and on a narrow window the drawer stays visible until it has slid out; the page-wide reduced-motion rule turns it off.
+
+Tests: `chat-open-setup-ui.test.mjs` (open at the bottom, redraws keep the place, signals cleared and kept per chat, the one-click offers in each place, over-long instructions not offered, six breakages caught) and `sidebar-motion-ui.test.mjs` (gradual in both directions, drawer visible while leaving) and the repair case in `tests/OperationsDB.swift`.
 
 **A quote must ask for the change.** Having the exact words in the person's message is not enough: a reply made only of filler ("try again", "yes, go ahead", "do it") agrees to something or asks for a retry and never says what to change, so it cannot authorize a change or a rule. This came from Chief reading "try again" as leave to unhide three agents and give each a spending limit nobody had asked for. The model is also told to change only what was asked, and never to change a setting as its own way of fixing a problem.
 

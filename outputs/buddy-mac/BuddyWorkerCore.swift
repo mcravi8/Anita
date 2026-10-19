@@ -136,6 +136,19 @@ struct BuddyTaskEvent {
     let id: Int64, taskID: String, seq: Int, type: String, cause: String, correlation: String, attempt: Int?, payload: [String: Any], at: String
 }
 
+/// An action that needed the user's approval. `state` runs proposed, approved, dispatched, then confirmed or uncertain;
+/// declined, expired, not_sent and failed are the other ways it ends.
+struct BuddyAction {
+    let id: String, taskID: String, attempt: Int, runID: String, kind: String, tool: String, payloadHash: String, state: String
+    let proposedAt: String, dispatchedAt: String?, finishedAt: String?, late: Bool, resolvedBy: String, receipt: [String: Any]
+}
+
+/// Exclusive use of a resource (a browser profile). `generation` goes up every time the resource changes hands, so a holder whose lease
+/// was taken over can be recognised by its old number.
+struct BuddyLease: Equatable {
+    let resource: String, generation: Int64, holder: String
+}
+
 /// One try at a task. `outcome` is nil while the attempt is still going.
 struct BuddyAttempt {
     let taskID: String, number: Int, runID: String, provider: String, model: String, startedAt: String, endedAt: String?, outcome: String?
@@ -163,13 +176,17 @@ struct BuddyAttempt {
         jobs = tasks; paused = try db.meta("paused") == "1"
         if jobs.count > Self.archiveTrigger { try? archiveFinished(keeping: Self.archiveKeep) }
         try recordBaseline()
+        try backfillActions()
         var interrupted: [(old: [String: Any], new: [String: Any])] = []
         for i in jobs.indices where Self.interrupted.contains(jobs[i]["status"] as? String ?? "") {
             let before = jobs[i]
-            var reviews = jobs[i]["reviews"] as? [[String: Any]] ?? []
-            for r in reviews.indices { if reviews[r]["status"] as? String == "pending" { reviews[r]["status"] = "expired" } else if reviews[r]["status"] as? String == "answered" { reviews[r]["status"] = "uncertain" } }
+            let rows = try actionStates(of: jobs[i]["id"] as? String ?? "")
+            let reviews = Self.settled(jobs[i]["reviews"] as? [[String: Any]] ?? [], rows: rows, pending: "expired")
             jobs[i]["reviews"] = reviews
-            jobs[i]["status"] = "interrupted"; jobs[i]["progress"] = "The worker restarted. Review the last result and any external action before continuing. Nothing was automatically retried."
+            let unsure = reviews.filter { $0["status"] as? String == "uncertain" }
+            jobs[i]["status"] = "interrupted"
+            jobs[i]["progress"] = unsure.isEmpty ? "The worker restarted. Review the last result and any external action before continuing. Nothing was automatically retried."
+                : "The worker restarted while \(Self.describe(unsure)) may have been sent. Check whether it went through before continuing. Nothing was automatically retried."
             interrupted.append((before, jobs[i]))
         }
         if !interrupted.isEmpty { try db.transaction { for change in interrupted { try Self.commit(change.new, from: change.old, cause: "worker.restart", in: db) } } }
@@ -236,8 +253,12 @@ struct BuddyAttempt {
     }
     @discardableResult func update(_ id: String, _ values: [String: Any], cause: String = "") throws -> [String: Any] {
         guard let i = jobs.firstIndex(where: { $0["id"] as? String == id }) else { throw BuddyWorkerFailure(message: "This task is unavailable.") }
-        let old = jobs[i]; jobs[i].merge(Self.decimals(values)) { _, new in new }; jobs[i]["updatedAt"] = ISO8601DateFormatter().string(from: Date())
-        let saved = jobs[i]
+        let old = jobs[i]
+        var merged = old; merged.merge(Self.decimals(values)) { _, new in new }; merged["updatedAt"] = ISO8601DateFormatter().string(from: Date())
+        // A copy of a review that arrives late (from the connection service) must not move an action backwards.
+        if values["reviews"] != nil { merged = try keepingActionProgress(merged) }
+        jobs[i] = merged
+        let saved = merged
         do { try db.transaction { try Self.commit(saved, from: old, cause: cause, in: db) } } catch { jobs[i] = old; throw error }; return jobs[i]
     }
     func create(workspace: String, agent: String, requestId: String, title: String, goal: String, kind: String, provider: String, budget: Double, model:String?=nil) throws -> [String: Any] {
@@ -304,6 +325,7 @@ struct BuddyAttempt {
                                     [.text(id), .int(Int64(newAttempt)), .text(run), .text(new["provider"] as? String ?? ""), .text(new["model"] as? String ?? ""), .text(stamp())])
             if opened > 0 { try appendEvent("attempt.started", task: new, attempt: newAttempt, cause: cause, payload: ["n": newAttempt, "runID": run], in: db) }
         }
+        try syncActions(new, from: old, cause: cause, in: db)
     }
 
     /// Tasks that were already there when history began (a first start after the update) get one starting entry, so every task's
@@ -369,6 +391,237 @@ struct BuddyAttempt {
             return true
         }
     }
+    // MARK: actions
+
+    private static let actionRank: [String: Int] = ["proposed": 1, "approved": 2, "dispatched": 3, "confirmed": 4, "declined": 4, "expired": 4, "not_sent": 4, "failed": 4, "uncertain": 4]
+    private static let actionOfReview: [String: String] = ["pending": "proposed", "answered": "approved", "dispatched": "dispatched", "completed": "confirmed", "uncertain": "uncertain", "cancelled": "declined", "declined": "declined", "expired": "expired", "not_sent": "not_sent", "failed": "failed"]
+    private static let reviewOfAction: [String: String] = ["proposed": "pending", "approved": "answered", "dispatched": "dispatched", "confirmed": "completed", "uncertain": "uncertain", "declined": "cancelled", "expired": "expired", "not_sent": "not_sent", "failed": "failed"]
+    /// Kinds of review that this app performs itself, recording "sending" before it starts, so for them "approved" really does mean "not sent
+    /// yet". A connected-service request is sent by the connection service, whose ordering this app cannot fully vouch for, so an approved one
+    /// is treated as possibly sent, like a review of any unknown kind.
+    private static let dispatchRecorded: Set<String> = ["browser", "authentication", "coding"]
+    private static func kindOf(_ review: [String: Any]) -> String { review["kind"] as? String ?? "connection" }
+
+    private static func canMove(from current: String, to next: String) -> Bool {
+        let a = actionRank[current] ?? 0, b = actionRank[next] ?? 0
+        if b > a { return true }
+        return current == "uncertain" && ["confirmed", "not_sent", "failed"].contains(next)
+    }
+    /// A fingerprint of exactly what the user was shown, so the same operation proposed twice can be told apart from two different ones.
+    static func payloadHash(_ review: [String: Any]) -> String {
+        let basis: [String: Any] = ["kind": kindOf(review), "tool": review["tool"] ?? [String: Any]()]
+        guard let text = try? BuddyOperationsDB.encode(basis) else { return "" }
+        return SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    static func describe(_ reviews: [[String: Any]]) -> String {
+        if reviews.count == 1 { let name = ((reviews[0]["tool"] as? [String: Any])?["name"] as? String) ?? ""; return name.isEmpty ? "an action" : "“\(name)”" }
+        return "\(reviews.count) actions"
+    }
+
+    /// Keeps one action record for every review a task shows. Called inside the transaction that saves the task, so the two always agree.
+    private static func syncActions(_ new: [String: Any], from old: [String: Any], cause: String, in db: BuddyOperationsDB) throws {
+        let reviews = new["reviews"] as? [[String: Any]] ?? []
+        guard !reviews.isEmpty else { return }
+        var before: [String: [String: Any]] = [:]
+        for review in old["reviews"] as? [[String: Any]] ?? [] { if let id = review["id"] as? String { before[id] = review } }
+        for review in reviews {
+            guard let id = review["id"] as? String, let status = review["status"] as? String, let target = actionOfReview[status] else { continue }
+            if let prior = before[id], prior["status"] as? String == status,
+               NSDictionary(dictionary: prior["receipt"] as? [String: Any] ?? [:]).isEqual(to: review["receipt"] as? [String: Any] ?? [:]) { continue }
+            try recordAction(review, id: id, target: target, task: new, cause: cause, in: db)
+        }
+    }
+    private static func recordAction(_ review: [String: Any], id: String, target: String, task: [String: Any], cause: String, in db: BuddyOperationsDB) throws {
+        let taskID = task["id"] as? String ?? "", run = task["executionRunID"] as? String ?? "", attempt = task["attempt"] as? Int ?? 0
+        let kind = kindOf(review), tool = ((review["tool"] as? [String: Any])?["name"] as? String) ?? ""
+        let receipt = (try? BuddyOperationsDB.encode(review["receipt"] as? [String: Any] ?? [:])) ?? "{}"
+        let now = stamp(), finished = (actionRank[target] ?? 0) >= 4
+        var payload: [String: Any] = ["id": id, "kind": kind, "tool": tool, "state": target]
+        if let existing = try db.rows("SELECT state, run_id FROM actions WHERE id = ?", [.text(id)]).first, let current = existing[0].string {
+            guard canMove(from: current, to: target) else { return }
+            // A result that arrives from an attempt that has since been replaced is still recorded (it is a fact), but marked.
+            let late = ["confirmed", "uncertain", "failed"].contains(target) && !(existing[1].string ?? "").isEmpty && existing[1].string != run
+            var sets = ["state = ?", "receipt = ?"], binds: [BuddyOperationsDB.Bind] = [.text(target), .text(receipt)]
+            if target == "approved" { sets.append("approved_at = ?"); binds.append(.text(now)) }
+            if target == "dispatched" { sets.append("dispatched_at = ?"); binds.append(.text(now)) }
+            if finished { sets.append("finished_at = ?"); binds.append(.text(now)) }
+            if late { sets.append("late = 1"); payload["late"] = true }
+            if (review["receipt"] as? [String: Any])?["resolvedBy"] as? String == "user" { sets.append("resolved_by = 'user'") }
+            try db.run("UPDATE actions SET " + sets.joined(separator: ", ") + " WHERE id = ?", binds + [.text(id)])
+            payload["from"] = current
+        } else {
+            let hash = payloadHash(review), rank = actionRank[target] ?? 0
+            func when(_ yes: Bool) -> BuddyOperationsDB.Bind { yes ? .text(now) : .null }
+            try db.run("INSERT INTO actions(id, task_id, attempt, run_id, kind, tool, payload_hash, idempotency_key, state, proposed_at, approved_at, dispatched_at, finished_at, receipt) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       [.text(id), .text(taskID), .int(Int64(attempt)), .text(run), .text(kind), .text(tool), .text(hash), .text(hash.isEmpty ? "" : taskID + ":" + hash), .text(target), .text(now),
+                        when(rank >= 2), when(target == "dispatched"), when(finished), .text(receipt)])
+        }
+        try appendEvent("action." + target, task: task, attempt: attempt, cause: cause, payload: payload, in: db)
+    }
+
+    func actionStates(of taskID: String) throws -> [String: String] {
+        var out: [String: String] = [:]
+        for row in try db.rows("SELECT id, state FROM actions WHERE task_id = ?", [.text(taskID)]) { if let id = row[0].string, let state = row[1].string { out[id] = state } }
+        return out
+    }
+    /// A copy of a review that arrives late must not move an action backwards: the record, which only moves forward, wins.
+    private func keepingActionProgress(_ job: [String: Any]) throws -> [String: Any] {
+        guard var reviews = job["reviews"] as? [[String: Any]], !reviews.isEmpty else { return job }
+        let rows = try actionStates(of: job["id"] as? String ?? "")
+        var changed = false
+        for r in reviews.indices {
+            guard let id = reviews[r]["id"] as? String, let state = rows[id], let status = reviews[r]["status"] as? String, let shown = Self.actionOfReview[status], let mapped = Self.reviewOfAction[state] else { continue }
+            let behind = (Self.actionRank[shown] ?? 0) < (Self.actionRank[state] ?? 0)
+            let staleUncertain = shown == "uncertain" && state != "uncertain" && (Self.actionRank[state] ?? 0) >= 4
+            if behind || staleUncertain { reviews[r]["status"] = mapped; changed = true }
+        }
+        guard changed else { return job }
+        var out = job; out["reviews"] = reviews; return out
+    }
+    /// Reviews that already exist when action records begin get a record too, so they can be checked off like any other. An approval whose
+    /// outcome was never recorded is assumed to have been sent.
+    private func backfillActions() throws {
+        var missing: [(job: [String: Any], review: [String: Any], id: String)] = []
+        for job in jobs {
+            let known = try actionStates(of: job["id"] as? String ?? "")
+            for review in job["reviews"] as? [[String: Any]] ?? [] { if let id = review["id"] as? String, known[id] == nil { missing.append((job, review, id)) } }
+        }
+        guard !missing.isEmpty else { return }
+        try db.transaction {
+            for item in missing {
+                let status = item.review["status"] as? String ?? "", state = status == "answered" ? "dispatched" : (Self.actionOfReview[status] ?? "uncertain")
+                let hash = Self.payloadHash(item.review), tool = ((item.review["tool"] as? [String: Any])?["name"] as? String) ?? ""
+                try db.run("INSERT OR IGNORE INTO actions(id, task_id, attempt, run_id, kind, tool, payload_hash, idempotency_key, state, proposed_at, receipt) VALUES(?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)",
+                           [.text(item.id), .text(item.job["id"] as? String ?? ""), .int(Int64(item.job["attempt"] as? Int ?? 0)), .text(Self.kindOf(item.review)), .text(tool), .text(hash),
+                            .text(hash.isEmpty ? "" : (item.job["id"] as? String ?? "") + ":" + hash), .text(state), .text(item.review["answeredAt"] as? String ?? (item.job["createdAt"] as? String ?? "")),
+                            .text((try? BuddyOperationsDB.encode(item.review["receipt"] as? [String: Any] ?? [:])) ?? "{}")])
+            }
+        }
+    }
+
+    /// What a restart or a stop leaves each waiting action as, by how far it got. One never approved was never sent. One approved but not yet
+    /// sent (where the app records sending first) was not sent. One that was being sent may have been, so the user has to check.
+    static func settled(_ reviews: [[String: Any]], rows: [String: String], pending: String) -> [[String: Any]] {
+        var out = reviews
+        for r in out.indices {
+            guard let id = out[r]["id"] as? String, let status = out[r]["status"] as? String else { continue }
+            var state = actionOfReview[status] ?? ""
+            if let row = rows[id], (actionRank[row] ?? 0) > (actionRank[state] ?? 0) { state = row }
+            switch state {
+            case "proposed": out[r]["status"] = pending
+            case "approved": out[r]["status"] = (rows[id] != nil && dispatchRecorded.contains(kindOf(out[r]))) ? "not_sent" : "uncertain"
+            case "dispatched": out[r]["status"] = "uncertain"
+            default: break
+            }
+        }
+        return out
+    }
+    /// Ends whatever a task was waiting on because it is being stopped. Anything that may have been sent becomes "uncertain".
+    func settleActions(of id: String, pending: String, cause: String) throws {
+        let job = try self.job(id)
+        let reviews = Self.settled(job["reviews"] as? [[String: Any]] ?? [], rows: try actionStates(of: id), pending: pending)
+        guard !NSArray(array: reviews).isEqual(to: job["reviews"] as? [[String: Any]] ?? []) else { return }
+        try update(id, ["reviews": reviews], cause: cause)
+    }
+
+    private func reviewIndex(_ job: [String: Any], _ reviewID: String) -> (reviews: [[String: Any]], index: Int)? {
+        let reviews = job["reviews"] as? [[String: Any]] ?? []
+        return reviews.firstIndex { $0["id"] as? String == reviewID }.map { (reviews, $0) }
+    }
+    /// Records that an approved action is being handed over to be performed. This is the last step before anything leaves the Mac, and it is
+    /// saved first, so a crash from here on means "may have been sent", never "approved only". It refuses when the attempt that proposed the
+    /// action has been replaced, when the task is no longer working, or when an identical action is still unconfirmed in this task.
+    func markDispatched(task id: String, review reviewID: String) throws {
+        let job = try self.job(id)
+        guard var found = reviewIndex(job, reviewID) else { throw BuddyWorkerFailure(message: "This action is no longer on the task, so it was not sent.") }
+        guard ["running", "waiting_review"].contains(job["status"] as? String ?? "") else { throw BuddyWorkerFailure(message: "This attempt is no longer working, so the action was not sent.") }
+        guard ["pending", "answered"].contains(found.reviews[found.index]["status"] as? String ?? "") else { throw BuddyWorkerFailure(message: "This action was already sent or finished, so it was not sent again.") }
+        if let row = try db.rows("SELECT run_id FROM actions WHERE id = ?", [.text(reviewID)]).first, let proposedBy = row[0].string, !proposedBy.isEmpty, proposedBy != (job["executionRunID"] as? String ?? "") {
+            throw BuddyWorkerFailure(message: "The attempt that proposed this action has been replaced, so it was not sent. Ask again from the current attempt.")
+        }
+        let hash = Self.payloadHash(found.reviews[found.index])
+        if !hash.isEmpty, let twin = try db.rows("SELECT tool FROM actions WHERE task_id = ? AND payload_hash = ? AND id <> ? AND state IN ('dispatched', 'uncertain') LIMIT 1", [.text(id), .text(hash), .text(reviewID)]).first {
+            throw BuddyWorkerFailure(message: "An identical action (\(twin[0].string ?? "")) may already have gone through, so this one was not sent. Open the task and say whether the earlier one went through.")
+        }
+        found.reviews[found.index]["status"] = "dispatched"; found.reviews[found.index]["dispatchedAt"] = Self.stamp()
+        try update(id, ["reviews": found.reviews], cause: "dispatch")
+    }
+    /// Records how an action ended. It is recorded even when the attempt has been replaced meanwhile (it is a fact), and marked late.
+    func finishAction(task id: String, review reviewID: String, status: String, receipt: [String: Any]) throws {
+        let job = try self.job(id)
+        guard var found = reviewIndex(job, reviewID) else { return }
+        found.reviews[found.index]["status"] = status; found.reviews[found.index]["receipt"] = receipt
+        try update(id, ["reviews": found.reviews], cause: "receipt")
+    }
+    /// The user's answer to "check whether this went through": it did (confirmed) or it did not (not sent).
+    func resolveAction(task id: String, review reviewID: String, confirmed: Bool) throws {
+        let job = try self.job(id)
+        guard var found = reviewIndex(job, reviewID), found.reviews[found.index]["status"] as? String == "uncertain" else { throw BuddyWorkerFailure(message: "Only an action that is waiting to be checked can be marked.") }
+        var receipt = found.reviews[found.index]["receipt"] as? [String: Any] ?? [:]
+        receipt["resolvedBy"] = "user"; receipt["outcome"] = confirmed ? "went_through" : "did_not_go_through"; receipt["resolvedAt"] = Self.stamp()
+        found.reviews[found.index]["status"] = confirmed ? "completed" : "not_sent"; found.reviews[found.index]["receipt"] = receipt
+        try update(id, ["reviews": found.reviews], cause: "user.resolved")
+    }
+    func actions(of taskID: String) throws -> [BuddyAction] {
+        try db.rows("SELECT id, attempt, run_id, kind, tool, payload_hash, state, proposed_at, dispatched_at, finished_at, late, resolved_by, receipt FROM actions WHERE task_id = ? ORDER BY proposed_at, id", [.text(taskID)]).compactMap { row in
+            guard let id = row[0].string, let state = row[6].string else { return nil }
+            return BuddyAction(id: id, taskID: taskID, attempt: Int(row[1].int ?? 0), runID: row[2].string ?? "", kind: row[3].string ?? "", tool: row[4].string ?? "", payloadHash: row[5].string ?? "", state: state,
+                               proposedAt: row[7].string ?? "", dispatchedAt: row[8].string, finishedAt: row[9].string, late: row[10].int == 1, resolvedBy: row[11].string ?? "",
+                               receipt: (try? BuddyOperationsDB.decode(row[12].string ?? "{}")) ?? [:])
+        }
+    }
+    /// What the task's earlier actions came to, in words the model can act on. Native records, not the model's memory.
+    func actionFacts(of taskID: String) -> String {
+        guard let all = try? actions(of: taskID), !all.isEmpty else { return "" }
+        let lines = all.suffix(30).compactMap { action -> String? in
+            let name = action.tool.isEmpty ? "an action" : "“\(action.tool)”"
+            switch action.state {
+            case "confirmed": return "- \(name): done" + (action.resolvedBy == "user" ? " (the user confirmed it went through). Do not repeat it." : ". Do not repeat it.")
+            case "uncertain", "dispatched": return "- \(name): unconfirmed. It may or may not have gone through, and the user has not said. Do not repeat it; tell the user to check it."
+            case "not_sent": return "- \(name): was approved but not sent. It is safe to propose again if still needed."
+            case "declined": return "- \(name): the user declined it. Do not propose it again unless asked."
+            case "expired": return "- \(name): was never approved, so it was not sent."
+            default: return nil
+            }
+        }
+        return lines.isEmpty ? "" : "Actions from earlier attempts of this task (native record):\n" + lines.joined(separator: "\n")
+    }
+
+    // MARK: leases
+
+    /// Exclusive use of `resource` for `holder`. A free lease, an expired one, or one whose holder `isLive` says is gone is taken over with
+    /// the next generation number; the same holder asking again just renews. Returns nil while someone else holds it.
+    func acquireLease(_ resource: String, holder: String, task: String, ttl: TimeInterval = 600, now: Date = Date(), isLive: (String) -> Bool = { _ in true }) throws -> BuddyLease? {
+        let expires = Int64(now.timeIntervalSince1970 + ttl)
+        return try db.transaction {
+            guard let row = try db.rows("SELECT generation, holder, expires_at FROM leases WHERE resource = ?", [.text(resource)]).first, let generation = row[0].int else {
+                try db.run("INSERT INTO leases(resource, generation, holder, task_id, acquired_at, expires_at) VALUES(?, 1, ?, ?, ?, ?)", [.text(resource), .text(holder), .text(task), .text(Self.stamp()), .int(expires)])
+                return BuddyLease(resource: resource, generation: 1, holder: holder)
+            }
+            let current = row[1].string ?? ""
+            if current == holder {
+                try db.run("UPDATE leases SET expires_at = ? WHERE resource = ?", [.int(expires), .text(resource)])
+                return BuddyLease(resource: resource, generation: generation, holder: holder)
+            }
+            let free = current.isEmpty || (row[2].int ?? 0) <= Int64(now.timeIntervalSince1970) || !isLive(current)
+            guard free else { return nil }
+            try db.run("UPDATE leases SET generation = ?, holder = ?, task_id = ?, acquired_at = ?, expires_at = ? WHERE resource = ?", [.int(generation + 1), .text(holder), .text(task), .text(Self.stamp()), .int(expires), .text(resource)])
+            return BuddyLease(resource: resource, generation: generation + 1, holder: holder)
+        }
+    }
+    /// Whether this is still the lease that holds the resource. Check it just before doing something that must not happen twice.
+    func leaseIsCurrent(_ lease: BuddyLease) throws -> Bool {
+        guard let row = try db.rows("SELECT generation, holder FROM leases WHERE resource = ?", [.text(lease.resource)]).first else { return false }
+        return row[0].int == lease.generation && row[1].string == lease.holder
+    }
+    /// Frees the resource if this lease still holds it. The generation stays, so an old token cannot match a later lease.
+    func releaseLease(_ lease: BuddyLease) throws {
+        try db.run("UPDATE leases SET holder = '', task_id = '', expires_at = 0 WHERE resource = ? AND generation = ? AND holder = ?", [.text(lease.resource), .int(lease.generation), .text(lease.holder)])
+    }
+    func releaseLeases(heldBy task: String) throws { try db.run("UPDATE leases SET holder = '', task_id = '', expires_at = 0 WHERE task_id = ?", [.text(task)]) }
+    /// A worker that has just started has no live holders: whatever the last one held is free.
+    @discardableResult func breakAllLeases() throws -> Int { try db.run("UPDATE leases SET holder = '', task_id = '', expires_at = 0 WHERE holder <> ''") }
+
     func resume(_ id: String, continuingCoding:Bool=false,additionalBudgetUSD:Double?=nil,authorizationID:String?=nil) throws -> [String: Any] {
         let job = try self.job(id)
         let authorizations=job["budgetAuthorizations"] as? [[String:Any]] ?? []

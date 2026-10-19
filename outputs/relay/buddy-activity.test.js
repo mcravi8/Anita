@@ -26,3 +26,16 @@ test('linked schedules share the actual task alert and check failures explain th
  const w={workspace:'w',tasks:[{id:'t',agentId:'inbox',status:'failed',routineSeriesID:'series',progress:'This task’s Claude budget is exhausted or its last cost is uncertain.'}],routines:Array.from({length:6},(_,n)=>({id:'r'+n,agentId:'inbox',routineSeriesID:'series',status:'needs_attention'}))};assert.equal(A.collect(state,w).length,1);assert.match(A.collect(state,w)[0].description,/additional allowance/);
  const c=A.collect(state,{}, {workspace:'w',checks:[{id:'c',agentId:'chief',kind:'overview',status:'failed',error:'A team update referenced work outside its actual check-in.'}]})[0];assert.equal(c.checkId,'c');assert.match(c.description,/source reference/);assert.match(c.title,/Team update/);
 });
+test('an action that may not have gone through is something to check, whatever state its task is in',()=>{
+ const t={id:'t',workspace:'w',agentId:'inbox',title:'Send the form',status:'paused',updatedAt:'2026-10-18T18:00:00Z',attempt:1,unconfirmedCount:1},worker=w=>({workspace:'w',tasks:[w]});
+ for(const status of ['paused','cancelled','completed','failed']){
+  const items=A.collect(state,worker({...t,status}));assert.equal(items.length,1,status);assert.equal(items[0].kind,'needs',status);assert.equal(items[0].actionLabel,status==='failed'?'Open task':'Check action',status);
+ }
+ assert.deepEqual(A.collect(state,worker({...t,unconfirmedCount:0})),[],'a paused task with nothing unconfirmed is not an item');
+ assert.match(A.collect(state,worker(t))[0].description,/may not have gone through/);
+ assert.match(A.collect(state,worker({...t,unconfirmedCount:3}))[0].description,/3 actions/);
+ const interrupted=A.collect(state,worker({...t,status:'interrupted',progress:'The worker restarted while “Click Send” may have been sent. Check whether it went through before continuing. Nothing was automatically retried.'}));
+ assert.match(interrupted[0].description,/Click Send/,'an interrupted task names the action instead of a generic message');
+ assert.notEqual(A.collect(state,worker(t))[0].id,A.collect(state,worker({...t,unconfirmedCount:2}))[0].id,'a further unconfirmed action is a new item');
+ assert.equal(A.collect(state,worker({...t,unconfirmedCount:0,status:'completed'}))[0].kind,'finished','finished work with nothing unconfirmed is unchanged');
+});

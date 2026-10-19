@@ -13,7 +13,7 @@ struct BuddyOperationsFailure: LocalizedError {
 /// original dictionary as JSON in `body`, so the code above the store sees exactly the shape it always saw.
 final class BuddyOperationsDB {
     static let fileName = "operations.sqlite"
-    static let schemaVersion: Int64 = 2
+    static let schemaVersion: Int64 = 3
     /// Called just before COMMIT and just after it. Only the crash tests set them, to end the process at each commit boundary.
     static var beforeCommit: (() -> Void)?
     static var afterCommit: (() -> Void)?
@@ -67,6 +67,7 @@ final class BuddyOperationsDB {
         // Each step is its own transaction, so a database left at version 1 by an earlier Buddy is brought up one version at a time.
         if version < 1 { try createVersion1() }
         if version < 2 { try createVersion2() }
+        if version < 3 { try createVersion3() }
     }
     private func createVersion1() throws {
         try transaction {
@@ -157,6 +158,38 @@ final class BuddyOperationsDB {
             }
         }
         return prepared
+    }
+    /// Version 3: one record for every action that needs the user's approval (a browser operation, a sign-in, a command with network access, a
+    /// connected-service request), and the leases that give one attempt exclusive use of a resource such as a browser profile.
+    private func createVersion3() throws {
+        try transaction {
+            // `state` runs proposed, approved, dispatched, then confirmed or uncertain; declined, expired, not_sent and failed are the other ends.
+            // `run_id` is the attempt that proposed it, so a result that arrives from a replaced attempt can be told apart.
+            try run("""
+                CREATE TABLE IF NOT EXISTS actions(
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    run_id TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT '',
+                    tool TEXT NOT NULL DEFAULT '',
+                    payload_hash TEXT NOT NULL DEFAULT '',
+                    idempotency_key TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL,
+                    proposed_at TEXT NOT NULL DEFAULT '',
+                    approved_at TEXT,
+                    dispatched_at TEXT,
+                    finished_at TEXT,
+                    late INTEGER NOT NULL DEFAULT 0,
+                    resolved_by TEXT NOT NULL DEFAULT '',
+                    receipt TEXT NOT NULL DEFAULT '{}')
+                """)
+            try run("CREATE INDEX IF NOT EXISTS actions_task ON actions(task_id, state)")
+            try run("CREATE INDEX IF NOT EXISTS actions_payload ON actions(task_id, payload_hash)")
+            // A lease is never deleted, only freed, so `generation` only ever goes up and an old token can never match a newer lease.
+            try run("CREATE TABLE IF NOT EXISTS leases(resource TEXT PRIMARY KEY, generation INTEGER NOT NULL, holder TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', acquired_at TEXT NOT NULL DEFAULT '', expires_at INTEGER NOT NULL DEFAULT 0)")
+            try run("PRAGMA user_version = 3")
+        }
     }
     /// The row number SQLite gave the most recent INSERT on this connection.
     var lastInsertID: Int64 { handle.map { sqlite3_last_insert_rowid($0) } ?? 0 }

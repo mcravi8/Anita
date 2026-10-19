@@ -50,3 +50,9 @@ test('an interrupted or paused coding session offers a fresh allowance, because 
  assert.equal(worker.needsAllowance({...coding,provider:'chatgpt'}),false,'ChatGPT work is not metered here');
  assert.equal(worker.needsAllowance({...coding,kind:'research'}),true,'ordinary Claude tasks keep asking, as before');
 });
+
+test('actions that may or may not have gone through are listed for the user to check, and nothing else is',()=>{
+ const task={reviews:[{id:'1',status:'pending'},{id:'2',status:'uncertain',tool:{name:'Click Send'}},{id:'3',status:'completed'},{id:'4',status:'not_sent'},{id:'5',status:'dispatched'},{id:'6',status:'uncertain',kind:'authentication',origin:'https://example.com'}]};
+ assert.deepEqual(worker.unconfirmed(task).map(r=>r.id),['2','6']);
+ assert.deepEqual(worker.unconfirmed({}),[]);assert.deepEqual(worker.pending(task).map(r=>r.id),['1'],'checking an action is separate from approving one');
+});

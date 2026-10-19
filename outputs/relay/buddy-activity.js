@@ -10,6 +10,7 @@
     if(/limit|budget/i.test(raw))return 'The automatic Claude allowance has been reached. Review the usage limit before retrying.';
     if(/sign.in|private chrome/i.test(raw))return 'Sign-in is needed to continue. Open the task to finish signing in.';
     if(/reconnect|disconnected/i.test(raw))return 'The selected AI connection needs reconnecting in Settings.';
+    if(/may have been sent/.test(raw))return raw.replace(/\s+/g,' ').slice(0,240);
     if(/restarted|interrupted|stopped without/i.test(raw))return 'The last attempt stopped before confirming a result. Your saved work is preserved.';
     return raw.replace(/sk-[A-Za-z0-9_-]+/g,'[private credential]').replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/ig,'').slice(0,240)||'Open this item to review the problem and its recovery options.';
   }
@@ -20,8 +21,10 @@
     const add=item=>items.push({...item,unread:state.activitySeen?.[item.id]!==true});
     const tasks=worker.workspace===state.conversationWorkspace?(worker.tasks||[]):[];
     for(const t of tasks){
-      if(t.workspace&&t.workspace!==state.conversationWorkspace||!agents.has(t.agentId)||!needs.has(t.status)&&t.status!=='completed')continue;
-      add({id:`task:${t.id}:${t.attempt||0}:${t.status}:${t.attentionKey||''}`,kind:needs.has(t.status)?'needs':'finished',title:t.title||'Agent task',description:needs.has(t.status)?describe(t.progress):'The task finished. Open it to see the result.',agentId:t.agentId,at:t.updatedAt||t.createdAt,taskId:t.id,actionLabel:needs.has(t.status)?'Open task':'View result'});
+      // An action that may or may not have gone through is something to check, whatever state the task is in.
+      const unsure=Number(t.unconfirmedCount)||0,asks=needs.has(t.status)||unsure>0;
+      if(t.workspace&&t.workspace!==state.conversationWorkspace||!agents.has(t.agentId)||!asks&&t.status!=='completed')continue;
+      add({id:`task:${t.id}:${t.attempt||0}:${t.status}:${t.attentionKey||''}${unsure?':check'+unsure:''}`,kind:asks?'needs':'finished',title:t.title||'Agent task',description:needs.has(t.status)?describe(t.progress):unsure?(unsure===1?'An action may not have gone through. Open the task to check.':`${unsure} actions may not have gone through. Open the task to check.`):'The task finished. Open it to see the result.',agentId:t.agentId,at:t.updatedAt||t.createdAt,taskId:t.id,actionLabel:needs.has(t.status)?'Open task':unsure?'Check action':'View result'});
     }
     if(worker.workspace===state.conversationWorkspace){
       const issues=new Map();

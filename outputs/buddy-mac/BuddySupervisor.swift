@@ -20,8 +20,9 @@ import Foundation
     static let unreadable = "The supervisor's answer could not be read."
     /// The lane counts as online only if the worker ticked it this recently (wall clock). A test may shorten it.
     static var staleAfter: TimeInterval = 30
-    /// Stops the supervisor may resume: technical ones, and old work handed over by the update.
-    static let resumable: Set<String> = ["stall", "bridge.closed", "provider.error", "max_turns", "worker.restart", "orphaned", "legacy"]
+    /// Stops the supervisor may resume: technical ones, a result that could not be verified (no final summary, a mailbox not read), and old
+    /// work handed over by the update.
+    static let resumable: Set<String> = ["stall", "bridge.closed", "provider.error", "max_turns", "worker.restart", "orphaned", "legacy", "result.incomplete"]
     static let categories: Set<String> = ["money_out", "credential", "third_party", "objective", "personal_fact"]
     static let verbs = ["accept", "rework", "answer", "resume", "cancel", "waive", "reassign", "add_tasks", "forward_to_user", "stage_done", "hold"]
     static let schema: [String: Any] = [

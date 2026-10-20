@@ -108,6 +108,30 @@ import Foundation
         try store.update(job, ["status": "waiting_user", "stopCause": "checkpoint.supervisor", "progress": "Waiting for Chief: \(question)",
                                "checkpoint": ["id": UUID().uuidString, "category": "approach", "question": question, "options": ["Table 2", "Table 3"], "recommendation": "Table 2", "routedTo": "supervisor", "at": "2026-10-19T08:00:00Z"]])
     }
+    /// The user's case: Stage 1 done, then Stage 2 authorized while it has no tasks yet. Returns Stage 2's id.
+    @MainActor static func emptyStageTwo(_ world: World) throws -> String {
+        let proposed = try world.plans.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Reproduce and extend the Omori results", stages: stages, tasks: [tasks[0]], members: members, by: chief)
+        world.planID = proposed["id"] as? String ?? ""; world.keys = proposed["keys"] as? [String: String] ?? [:]
+        let stageIDs = (proposed["stages"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
+        _ = try world.plans.authorize(planId: world.planID, through: 1, quote: "get stage 1 done", messageId: "m1", viaButton: false, now: Date())
+        _ = try step(world)
+        try finish(world.store, jobs(world, "t1").first?["id"] as? String ?? "", result: "R1: the baseline reproduces.")
+        _ = try step(world)
+        try world.plans.accept(taskId: world.keys["t1"] ?? "", attempt: 1, by: chief, reason: "Matches the paper.")
+        _ = try step(world)
+        _ = try world.plans.stageDone(stageId: stageIDs.first ?? "", evidence: ["task:\(world.keys["t1"] ?? "")"], report: "Stage 1 is done.", by: chief, attemptOutcome: { _, _ in nil })
+        _ = try world.plans.authorize(planId: world.planID, through: 2, quote: "get stage 2 done", messageId: "m2", viaButton: false, now: Date())
+        _ = try step(world)
+        return stageIDs.last ?? ""
+    }
+    @MainActor static func stageTasks(_ world: World, _ stageId: String) throws -> [[String: Any]] {
+        ((try world.plans.plan(id: world.planID))?["stages"] as? [[String: Any]] ?? []).first { $0["id"] as? String == stageId }?["tasks"] as? [[String: Any]] ?? []
+    }
+    @MainActor static func itemState(_ world: World, _ key: String) throws -> (state: String, presented: Int, refusal: String) {
+        let row = ((try? rows(world, "SELECT state, presented, refusal FROM supervisor_items WHERE key = ?", [.text(key)]))
+                   ?? (try? rows(world, "SELECT state, presented, '(no refusal column)' FROM supervisor_items WHERE key = ?", [.text(key)])))?.first
+        return (row?[0].string ?? "", Int(row?[1].int ?? -1), row?[2].string ?? "")
+    }
     @MainActor static func rows(_ world: World, _ sql: String, _ binds: [BuddyOperationsDB.Bind] = []) throws -> [[BuddyOperationsDB.Column]] {
         try BuddyOperationsDB(directory: world.worker, existing: true).rows(sql, binds)
     }
@@ -302,5 +326,150 @@ import Foundation
         require(calls(hold).count == 3 && still.count == 1, "a stuck item is not presented again and the notice is not repeated")
         require(try rows(hold, "SELECT state, presented FROM supervisor_items").first.map { $0[0].string == "stuck" && $0[1].int == 3 } == true, "the item is recorded as stuck after three presentations")
         print("PASS: the lane does nothing without a Claude supervisor, while paused or past the supervisor's daily limit (one notice a day); an item that gets no effective action three times becomes one stuck notice and is not presented again")
+
+        // 6. The user's case, replayed: Stage 2 is authorized with no tasks. Chief is asked to plan it, answers add_tasks with no keys and the second
+        // task naming the first by its title, and the tasks are added on the first run; nothing goes stuck and the user gets no stuck notice.
+        let planning = try world(base, "planning")
+        try mode(planning, "auto")
+        let s2 = try emptyStageTwo(planning)
+        let before2 = ((try planning.plans.plan(id: planning.planID))?["stages"] as? [[String: Any]] ?? []).last?["status"] as? String ?? ""
+        require(before2 == "working", "Stage 2, authorized with no tasks, is working, not being checked: \(before2)")
+        await tick(planning)
+        let planCall = calls(planning).last ?? [:]
+        require((planCall["kinds"] as? [String]) == ["stage_plan"] && (planCall["items"] as? [String]) == ["stage_plan:\(s2)"], "the lane asks Chief to plan Stage 2, not to check that it is done: \(planCall["kinds"] ?? "") \(planCall["items"] ?? "")")
+        let planStage = (planCall["stages"] as? [Any])?.first as? [String: Any] ?? [:]
+        require(planStage["goal"] as? String == "Add the robustness checks" && (planStage["acceptance"] as? [String]) == ["Three robustness tables exist"] && (planCall["expected"] as? [String]) == ["add_tasks"], "with the stage's goal and acceptance, expecting add_tasks: \(planCall)")
+        require(planCall["addTasks"] as? Bool == true && planCall["taskKey"] as? Bool == true, "the instructions describe each task of add_tasks and say to plan an authorized stage with no tasks at once, and the schema lets each task carry a key: \(planCall)")
+        let planned = try stageTasks(planning, s2)
+        require(planned.count == 2 && (planned.last?["dependsOn"] as? [String]) == [planned.first?["id"] as? String ?? "?"] && planned.first?["assignee"] as? String == forge && planned.last?["assignee"] as? String == vera,
+                "Chief's add_tasks is applied on the first run, the dependency named by title included: \(planned.map { [$0["title"] ?? "", $0["dependsOn"] ?? ""] })")
+        require(try count(planning, "SELECT effective FROM supervisor_runs ORDER BY started_at DESC, rowid DESC LIMIT 1") == 1 && (try itemState(planning, "stage_plan:\(s2)")).state == "handled", "the run had its effect and the planning item is handled")
+        require(try notices(planning, "stuck").isEmpty, "the user gets no stuck notice")
+        let stage2Now = ((try planning.plans.plan(id: planning.planID))?["stages"] as? [[String: Any]] ?? []).last?["status"] as? String ?? ""
+        let started2 = try step(planning)
+        require(stage2Now == "working" && started2.count == 1 && planning.store.jobs.first { $0["id"] as? String == started2.first }?["agentId"] as? String == forge, "Stage 2 runs: Forge's task starts, Vera's waits for it: \(stage2Now) \(started2)")
+        let planCalls = calls(planning).count
+        await tick(planning)
+        require(calls(planning).count == planCalls, "a planned stage leaves the lane nothing to do")
+        print("PASS: an authorized stage with no tasks is presented to the supervisor as a stage to plan; add_tasks with dependencies named by title is applied on the first run and the stage runs, with nothing stuck")
+
+        // 7. A refused action is never silent: the reason is kept on the item, survives a restart and is in the next briefing; an effective action clears it.
+        let refusing = try world(base, "refusing")
+        try propose(refusing); _ = try step(refusing)
+        try finish(refusing.store, jobs(refusing, "t1").first?["id"] as? String ?? "", result: "R1")
+        _ = try step(refusing)
+        let refusedKey = "result:\(refusing.keys["t1"] ?? ""):1"
+        try mode(refusing, "refuse")
+        await tick(refusing)
+        require(try (calls(refusing).last?["refused"] as? [String]) == [""] && (try planTask(refusing, "t1"))["status"] as? String == "review", "the first briefing has no refusal and the rework without an instruction changes nothing")
+        let kept = try itemState(refusing, refusedKey)
+        require(kept.refusal.contains("Give the rework a precise instruction"), "the refusal is recorded on the item: \(kept)")
+        // A restart: a new lane on the same database.
+        let restarted = try world(base, "refusing")
+        restarted.planID = refusing.planID; restarted.keys = refusing.keys
+        try mode(restarted, "auto")
+        await tick(restarted)
+        require((calls(restarted).last?["refused"] as? [String]) == ["Your last action on this item was refused: Give the rework a precise instruction. Correct it and try again."], "the next briefing for the item says why its last action was refused: \(calls(restarted).last?["refused"] ?? "")")
+        require(try planTask(restarted, "t1")["status"] as? String == "done" && (try itemState(restarted, refusedKey)).refusal.isEmpty, "the corrected action is applied and the refusal is cleared")
+        let thrice = try world(base, "refused-thrice")
+        try propose(thrice); _ = try step(thrice)
+        try finish(thrice.store, jobs(thrice, "t1").first?["id"] as? String ?? "", result: "R1")
+        _ = try step(thrice)
+        try mode(thrice, "refuse")
+        await tick(thrice); await tick(thrice); await tick(thrice)
+        let refusedStuck = try notices(thrice, "stuck")
+        require(refusedStuck.count == 1 && refusedStuck.first?["text"] as? String == "The team is stuck on Rerun the pipeline: Buddy could not apply Chief's rework: Give the rework a precise instruction. Tell me how to proceed.", "a stuck notice after refusals says what was refused: \(refusedStuck)")
+        print("PASS: a refused action is recorded on its item with the reason, kept across a restart and shown in the next briefing until an action takes effect; a stuck notice after refusals names the refusal")
+
+        // 8. A run that never starts (the user's 17:25 failure) is not a presentation: nothing goes stuck, the lane keeps retrying, and after 30 minutes of
+        // failures the user gets one plain notice that background supervision can't start, settled once a run is applied again.
+        let offline = try world(base, "nostart")
+        try propose(offline); _ = try step(offline)
+        try finish(offline.store, jobs(offline, "t1").first?["id"] as? String ?? "", result: "R1")
+        _ = try step(offline)
+        let offlineKey = "result:\(offline.keys["t1"] ?? ""):1"
+        try mode(offline, "nostart")
+        for _ in 0..<5 { await tick(offline) }
+        let offlineState = try itemState(offline, offlineKey)
+        require(try calls(offline).count == 5 && offlineState.state == "open" && offlineState.presented == 0 && (try notices(offline, "stuck")).isEmpty, "five runs that never started make nothing stuck and count no presentation: \(calls(offline).count) \(offlineState)")
+        require(offline.lane.status["lastError"] as? String == "Subprocess initialization did not complete within 30000ms — check authentication and network connectivity" && offline.lane.status["online"] as? Bool == false, "the lane reports why it is not running: \(offline.lane.status)")
+        func cantStart() throws -> [[String: Any]] { (try offline.store.openDecisions(workspace: w)).filter { $0["title"] as? String == "Background supervision can't start" } }
+        require(try cantStart().isEmpty, "ten minutes of failures do not bother the user yet")
+        for _ in 0..<11 { await tick(offline) }
+        let cant = try cantStart()
+        require(calls(offline).count == 16 && cant.count == 1 && cant.first?["audience"] as? String == "user" && cant.first?["kind"] as? String == "notice"
+                && cant.first?["question"] as? String == "Chief can't supervise the team in the background: Subprocess initialization did not complete within 30000ms — check authentication and network connectivity. Buddy keeps trying every minute; results and questions wait for Chief meanwhile.",
+                "after 30 minutes of failures the user gets one plain notice with the reason: \(cant)")
+        for _ in 0..<3 { await tick(offline) }
+        require(try cantStart().count == 1 && (try notices(offline, "stuck")).isEmpty && (try itemState(offline, offlineKey)).state == "open", "the notice is not repeated and still nothing is stuck")
+        try mode(offline, "auto")
+        await tick(offline)
+        require(try planTask(offline, "t1")["status"] as? String == "done" && (try cantStart()).isEmpty && offline.lane.status["online"] as? Bool == true, "the next run that starts reviews the result and settles the notice")
+        print("PASS: a supervisor run that never starts counts for no breaker and makes nothing stuck; the lane retries, and only after 30 minutes of failures the user gets one notice that supervision can't start, settled when it runs again")
+
+        // 9. The plan-level breaker counts only applied runs, and only an item presented in each of them can be stuck by it.
+        let breaker = try world(base, "breaker")
+        try propose(breaker); _ = try step(breaker)
+        try finish(breaker.store, jobs(breaker, "t1").first?["id"] as? String ?? "", result: "R1")
+        _ = try step(breaker)
+        try mode(breaker, "hold")
+        await tick(breaker); await tick(breaker)
+        let stageOneID = ((try breaker.plans.plan(id: breaker.planID))?["stages"] as? [[String: Any]] ?? []).first?["id"] as? String ?? ""
+        let extra = try breaker.plans.addTasks(stageId: stageOneID, tasks: [["key": "x", "title": "Collect the appendix", "assignee": vera, "kind": "research", "brief": "Collect it.", "deliverable": "appendix.pdf"]], by: chief, members: members).first ?? ""
+        _ = try step(breaker)
+        try finish(breaker.store, breaker.store.jobs.first { ($0["requestId"] as? String ?? "").hasPrefix("plan:\(extra):") }?["id"] as? String ?? "", result: "The appendix")
+        _ = try step(breaker)
+        await tick(breaker)
+        let firstKey = "result:\(breaker.keys["t1"] ?? ""):1", newKey = "result:\(extra):1"
+        require(Set(calls(breaker).last?["items"] as? [String] ?? []) == Set([firstKey, newKey]), "the third run presents both results: \(calls(breaker).last?["items"] ?? "")")
+        let firstItem = try itemState(breaker, firstKey), newItem = try itemState(breaker, newKey)
+        require(firstItem.state == "stuck" && newItem.state == "open" && newItem.presented == 1, "the result held three times is stuck, the one seen once is not: \(firstItem) \(newItem)")
+        require(((try notices(breaker, "stuck")).first?["refs"] as? [String: Any])?["itemKeys"] as? [String] == [firstKey], "the stuck notice names only the item that was held three times")
+        print("PASS: the plan-level breaker counts only applied runs and never makes an item stuck for other items' history")
+
+        // 10. After the update: the database as the user's Buddy left it (the lane's tables without the refusal column; a result marked stuck by the run
+        // that never started, with its stuck notice). The lane adds the column, reopens that item and closes the notice once; an item stuck by an
+        // applied run stays stuck.
+        let repairWorker = base.appendingPathComponent("repair/Worker", isDirectory: true)
+        try FileManager.default.createDirectory(at: repairWorker, withIntermediateDirectories: true)
+        do {
+            let old = try BuddyOperationsDB(directory: repairWorker)
+            try old.run("""
+                CREATE TABLE supervisor_runs(id TEXT PRIMARY KEY, workspace TEXT NOT NULL, plan_id TEXT NOT NULL DEFAULT '', items TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK(status IN ('running','applying','applied','failed')), output TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+                  cost REAL NOT NULL DEFAULT 0, started_at TEXT NOT NULL, finished_at TEXT, effective INTEGER NOT NULL DEFAULT 0)
+                """)
+            try old.run("""
+                CREATE TABLE supervisor_items(key TEXT PRIMARY KEY, workspace TEXT NOT NULL, presented INTEGER NOT NULL DEFAULT 0,
+                  state TEXT NOT NULL CHECK(state IN ('open','handled','forwarded','stuck')), last_run TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)
+                """)
+        }
+        let repair = try world(base, "repair")
+        try propose(repair); _ = try step(repair)
+        try finish(repair.store, jobs(repair, "t1").first?["id"] as? String ?? "", result: "R1: the first Stage 2 table.")
+        _ = try step(repair)
+        let repairKey = "result:\(repair.keys["t1"] ?? ""):1", failedRun = "86804BCA-0000-4000-8000-000000000001", appliedRun = "6A1D0000-0000-4000-8000-000000000002"
+        let raw = try BuddyOperationsDB(directory: repair.worker, existing: true)
+        try raw.run("INSERT INTO supervisor_runs(id, workspace, plan_id, items, status, error, started_at, finished_at, effective) VALUES(?, ?, ?, ?, 'failed', 'Subprocess initialization did not complete within 30000ms — check authentication and network connectivity', '2026-10-20T17:25:40Z', '2026-10-20T17:26:10Z', 0)",
+                    [.text(failedRun), .text(w), .text(repair.planID), .text("[{\"key\":\"\(repairKey)\",\"kind\":\"result\"}]")])
+        try raw.run("INSERT INTO supervisor_runs(id, workspace, plan_id, items, status, output, started_at, finished_at, effective) VALUES(?, ?, ?, '[{\"key\":\"stage:old:0\",\"kind\":\"stage_check\"}]', 'applied', '{\"actions\":[]}', '2026-10-20T16:45:41Z', '2026-10-20T16:46:00Z', 0)",
+                    [.text(appliedRun), .text(w), .text(repair.planID)])
+        try raw.run("INSERT INTO supervisor_items(key, workspace, presented, state, last_run, updated_at) VALUES(?, ?, 1, 'stuck', ?, '2026-10-20T17:26:10Z')", [.text(repairKey), .text(w), .text(failedRun)])
+        try raw.run("INSERT INTO supervisor_items(key, workspace, presented, state, last_run, updated_at) VALUES('stage:old:0', ?, 3, 'stuck', ?, '2026-10-20T16:46:00Z')", [.text(w), .text(appliedRun)])
+        _ = try repair.plans.addNotice(planId: repair.planID, kind: "stuck", text: "The team is stuck on Stage 1 — Reproduce: Chief chose add_tasks. Tell me how to proceed.", chat: true, refs: ["itemKeys": ["stage:old:0"], "runId": appliedRun])
+        _ = try repair.plans.addNotice(planId: repair.planID, kind: "stuck", text: "The team is stuck on Rerun the pipeline: Subprocess initialization did not complete within 30000ms — check authentication and network connectivity. Tell me how to proceed.", chat: true, refs: ["itemKeys": [repairKey], "runId": failedRun])
+        try mode(repair, "auto")
+        await tick(repair)
+        require(try (calls(repair).last?["items"] as? [String]) == [repairKey] && (try planTask(repair, "t1"))["status"] as? String == "done", "after the update the result a run that never started marked stuck is reviewed: \(calls(repair).last?["items"] ?? "")")
+        let repairedNotices = try notices(repair, "stuck")
+        require(repairedNotices.map { $0["status"] as? String ?? "" } == ["open", "closed"], "its stuck notice is closed; the one about an item stuck after applied runs is not: \(repairedNotices)")
+        require(try itemState(repair, "stage:old:0").state == "stuck" && (try itemState(repair, repairKey)).state == "handled", "an item stuck by an applied run stays stuck")
+        require(try rows(repair, "PRAGMA table_info(supervisor_items)").contains { $0[1].string == "refusal" }, "the lane adds its refusal column to an older database, without a new version")
+        let repairCalls = calls(repair).count
+        let again = try world(base, "repair")
+        again.planID = repair.planID; again.keys = repair.keys
+        await tick(again)
+        require(try calls(again).count == repairCalls && (try itemState(again, "stage:old:0")).state == "stuck" && (try notices(again, "stuck")).map { $0["status"] as? String ?? "" } == ["open", "closed"], "a second start repairs nothing more")
+        print("PASS: at its start the lane reopens, once, the items an earlier Buddy marked stuck after a run that never started, and closes their stuck notice")
     }
 }

@@ -38,6 +38,23 @@ test('the banner says in plain words what is happening for every state of a plan
  assert.equal(P.banner(null),'');
 });
 
+test('an authorized stage with no tasks yet reads as the supervisor planning it, never as being checked',()=>{
+ const through2={through:2,quote:'get stage 2 done',at:'2026-10-20T16:43:00Z',status:'active'},one=stage(1,'done',[task('t1','done')]);
+ // Whatever the worker reports: a current Buddy says the plan waits on Chief; an older one said idle, or had sent the empty stage to its check.
+ for(const [status,state] of [['working','waiting_on_supervisor'],['approved','waiting_on_supervisor'],['working','idle'],['review','waiting_on_supervisor']]){
+  const p=plan('active',{state},{scope:through2,stages:[one,stage(2,status),stage(3,'proposed')]});
+  assert.equal(P.banner(p,pulse({}),names,NOW),'Chief is planning Stage 2',`${status} / ${state}`);
+  const html=P.stripHTML(p,pulse({}),names,{open:true,now:NOW});
+  assert.match(html,/Chief is planning Stage 2/);assert.doesNotMatch(html,/is checking that|Being checked/,`${status} / ${state}`);
+ }
+ assert.equal(P.banner(plan('active',{state:'waiting_on_supervisor'},{scope:through2,stages:[one,stage(2,'working'),stage(3,'proposed')]}),pulse({}),{chief:'Ada'},NOW),'Ada is planning Stage 2','in the supervisor’s own name');
+ assert.equal(P.stageChip(stage(2,'working')).label,'Planning');assert.equal(P.stageChip(stage(2,'review')).label,'Planning','a stage with no tasks is never shown as being checked');
+ assert.equal(P.stageChip(stage(2,'review',[task('t9','done')])).label,'Being checked','a stage whose tasks are all done is');
+ assert.equal(P.stageChip(stage(2,'proposed')).label,'Not started');assert.equal(P.stageChip(stage(2,'done')).label,'Done');
+ const later=plan('active',{state:'working'},{scope:{...through2,through:1},stages:[stage(1,'working',[task('t1','dispatched',{workerTaskId:'w1'})]),stage(2,'proposed'),stage(3,'proposed')]});
+ assert.doesNotMatch(P.banner(later,pulse({}),names,NOW),/planning/,'a stage outside the authorization is not being planned');
+});
+
 test('stage and task chips say where each piece of work stands',()=>{
  assert.deepEqual(['proposed','approved','working','review','done'].map(s=>P.stageChip({status:s}).label),['Not started','Up next','Working','Being checked','Done']);
  const chip=(t,p)=>P.taskChip(t,pulse(p||{}),'Chief').label;

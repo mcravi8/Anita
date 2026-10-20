@@ -258,6 +258,73 @@ import Foundation
             for _ in 0..<2 { require(try step(store7, reopened).isEmpty, "nothing starts after a stop") }
         }
 
+        // 10. An authorized stage with no tasks is planned, never checked (the user's Stage 2): the supervisor gets a planning item, the stage keeps
+        // working and nothing can mark it done. Tasks added to it name what they depend on by key, id or title.
+        do {
+            let (store10, plans10, directory10) = try fresh(root, "empty-stage")
+            let plan10 = try plans10.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Reproduce and extend the Omori results", stages: stages, tasks: [tasks[0]], members: members, by: chief)
+            let (planID10, stageIDs10, keys10) = ids(plan10)
+            let p1 = keys10["t1"] ?? "", s1 = stageIDs10.first ?? "", s2 = stageIDs10.last ?? ""
+            _ = try plans10.authorize(planId: planID10, through: 1, quote: "get stage 1 done", messageId: "m1", viaButton: false, now: Date())
+            try finish(store10, try step(store10, plans10).first ?? "", result: "R1: the baseline reproduces.")
+            _ = try step(store10, plans10)
+            try plans10.accept(taskId: p1, attempt: 1, by: chief, reason: "Matches the paper.")
+            _ = try step(store10, plans10)
+            _ = try plans10.stageDone(stageId: s1, evidence: ["task:\(p1)"], report: "Stage 1 is done.", by: chief, attemptOutcome: { _, _ in nil })
+            _ = try plans10.authorize(planId: planID10, through: 2, quote: "get stage 2 done", messageId: "m2", viaButton: false, now: Date())
+            for _ in 0..<3 { require(try step(store10, plans10).isEmpty, "a stage with no tasks starts nothing") }
+            let status10 = try stage(plans10, planID10, 2)["status"] as? String ?? ""
+            require(status10 == "working", "an authorized stage with no tasks keeps working; it is not sent to its check: \(status10)")
+            let items10 = try plans10.workItems(workspace: w)
+            require(items10.map { $0["kind"] as? String ?? "" } == ["stage_plan"] && items10.first?["key"] as? String == "stage_plan:\(s2)" && items10.first?["stageId"] as? String == s2
+                    && items10.first?["goal"] as? String == "Add the robustness checks" && (items10.first?["acceptance"] as? [String]) == ["Three robustness tables exist"],
+                    "the supervisor is asked to plan the stage, with its goal and acceptance, not to check it: \(items10)")
+            let run10 = (try plans10.summary(workspace: w, jobs: store10.jobs, names: names)).first?["run"] as? [String: Any] ?? [:]
+            require(run10["state"] as? String == "waiting_on_supervisor", "the plan waits on its supervisor while the stage is planned: \(run10)")
+            throwsCode("conflict", "a stage with no tasks cannot be completed") { _ = try plans10.stageDone(stageId: s2, evidence: ["task:\(p1)"], report: "Done.", by: chief, attemptOutcome: { _, _ in nil }) }
+            let raw10 = try BuddyOperationsDB(directory: directory10, existing: true)
+            try raw10.run("INSERT INTO plan_decisions(id, plan_id, stage_id, decided_by, kind, choice, created_at) VALUES('forged-done', ?, ?, ?, 'stage_done', 'done', '')", [.text(planID10), .text(s2), .text(chief)])
+            let noTasks = throwsAny("the database refuses to mark a stage with no tasks done, even with a recorded check") { try raw10.run("UPDATE plan_stages SET status = 'done' WHERE id = ?", [.text(s2)]) }
+            require(noTasks.contains("stage has no tasks"), "the database names the reason: \(noTasks)")
+            // A stage an earlier Buddy sent to its check with no tasks goes back to working, to be planned.
+            try raw10.run("UPDATE plan_stages SET status = 'review' WHERE id = ?", [.text(s2)])
+            _ = try step(store10, plans10)
+            let reopened10 = try stage(plans10, planID10, 2)["status"] as? String ?? ""
+            let kinds10 = try plans10.workItems(workspace: w).map { $0["kind"] as? String ?? "" }
+            require(reopened10 == "working" && kinds10 == ["stage_plan"], "a stage left in its check with no tasks is planned instead: \(reopened10) \(kinds10)")
+
+            // The tasks Chief sent: no keys, and the second names the first by its title (in another case, with spaces around it).
+            let first10 = "Freeze stage 2 rules, classify every shock and run the paired p-by-maturity test"
+            let added = try plans10.addTasks(stageId: s2, tasks: [
+                ["title": first10, "assignee": forge, "kind": "coding", "brief": "Freeze the rules and run the test.", "deliverable": "classification.csv"],
+                ["title": "Vera sign-off on the classification", "assignee": vera, "kind": "general", "brief": "Sign off or object.", "deliverable": "A note", "dependsOn": ["  FREEZE stage 2 rules, classify every shock and run the paired p-by-maturity test "]],
+                ["key": "tables", "title": "Robustness tables", "assignee": forge, "kind": "coding", "brief": "Build three tables.", "deliverable": "tables.csv", "dependsOn": [p1]],
+                ["title": "Compare with the baseline", "assignee": vera, "kind": "research", "brief": "Compare.", "deliverable": "A note", "dependsOn": ["rerun the pipeline", "tables"]],
+            ], by: chief, members: members)
+            let plan10b = try plans10.plan(id: planID10) ?? [:]
+            func deps(_ id: String) -> Set<String> { Set(row(in: plan10b, id)["dependsOn"] as? [String] ?? ["?"]) }
+            require(added.count == 4, "four tasks are added: \(added)")
+            if added.count == 4 {
+                require(deps(added[1]) == [added[0]], "a dependency named by the title of a task in the same batch resolves, whatever its case and spaces: \(deps(added[1]))")
+                require(deps(added[2]) == [p1], "a dependency named by task id resolves: \(deps(added[2]))")
+                require(deps(added[3]) == [p1, added[2]], "a dependency named by the title of an earlier stage's task, and one named by key, resolve: \(deps(added[3]))")
+            }
+            let count10 = (try stage(plans10, planID10, 2)["tasks"] as? [[String: Any]] ?? []).count
+            throwsCode("invalid_input", "an unknown dependency is refused") { _ = try plans10.addTasks(stageId: s2, tasks: [["title": "Write it up", "assignee": vera, "kind": "general", "brief": "Write.", "deliverable": "note.md", "dependsOn": ["The appendix tables"]]], by: chief, members: members) }
+            let unknown = throwsAny("an unknown dependency is refused") { _ = try plans10.addTasks(stageId: s2, tasks: [["title": "Write it up", "assignee": vera, "kind": "general", "brief": "Write.", "deliverable": "note.md", "dependsOn": ["The appendix tables"]]], by: chief, members: members) }
+            require(unknown.contains("“Write it up” can depend only on tasks of this or an earlier stage; “The appendix tables” is not one.") && unknown.contains("key, id or title"), "the refusal names the dependency and how to name one: \(unknown)")
+            throwsCode("invalid_input", "a task cannot depend on itself") { _ = try plans10.addTasks(stageId: s2, tasks: [["key": "self", "title": "Loop", "assignee": vera, "kind": "general", "brief": "Loop.", "deliverable": "note.md", "dependsOn": ["self"]]], by: chief, members: members) }
+            require((try stage(plans10, planID10, 2)["tasks"] as? [[String: Any]] ?? []).count == count10, "a refused batch adds nothing")
+            // The chat's plan tool (revise) adds through the same resolver.
+            let revised10 = try plans10.revise(planId: planID10, expectedRevision: nil, ops: [["op": "add_task", "stage": 2, "task": ["title": "Write the stage 2 note", "assignee": vera, "kind": "general", "brief": "Write it.", "deliverable": "note.md", "dependsOn": ["Robustness tables"]]]], by: chief, userWords: false, members: members)
+            let note10 = ((revised10["stages"] as? [[String: Any]] ?? []).last?["tasks"] as? [[String: Any]] ?? []).last ?? [:]
+            require(note10["title"] as? String == "Write the stage 2 note" && (note10["dependsOn"] as? [String]) == [added.count > 2 ? added[2] : "?"], "revise resolves a dependency by title too: \(note10["dependsOn"] ?? "")")
+            require(try plans10.workItems(workspace: w).isEmpty && (try stage(plans10, planID10, 2))["status"] as? String == "working", "once planned, the stage has nothing for the supervisor and keeps working")
+            let started10 = try step(store10, plans10)
+            require(started10.count == 2 && added.count == 4 && Set(started10.compactMap { id in store10.jobs.first { $0["id"] as? String == id }?["requestId"] as? String }) == ["plan:\(added[0]):1", "plan:\(added[2]):1"], "the tasks whose inputs are accepted start: \(started10)")
+            print("PASS: an authorized stage with no tasks is planned by the supervisor, never sent to its check or marked done (in code or in the database); added tasks name their dependencies by key, id or title, and an unknown one is refused with a clear message")
+        }
+
         // 8. Graceful read.
         let empty = root.appendingPathComponent("empty")
         _ = try BuddyWorkerStore(directory: empty.appendingPathComponent("Worker"))

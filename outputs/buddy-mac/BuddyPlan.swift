@@ -18,7 +18,7 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
 /// ready task of the current stage as an ordinary worker task, exactly once per dispatch (`plan:<task>:<n>` is the worker request ID), and
 /// stops at the last authorized stage. Plan task status follows the worker task's durable state (`reconcile`), so a crash at any point
 /// leaves nothing to replay. The database itself refuses a dispatch outside the authorized stages, a stage marked done without a recorded
-/// check, and a scope or objective decision made by anyone but the user.
+/// check or without any tasks, and a scope or objective decision made by anyone but the user.
 @MainActor final class BuddyPlanStore {
     static let live: Set<String> = ["draft", "active", "holding"]
     static let maxStages = 6, maxTasks = 24, maxCriteria = 5, maxDispatches = 6, maxReworks = 3, maxAddedPerStage = 12
@@ -74,6 +74,12 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         CREATE TRIGGER IF NOT EXISTS plan_stage_done_guard BEFORE UPDATE OF status ON plan_stages WHEN NEW.status='done' BEGIN
           SELECT RAISE(ABORT,'stage has unfinished tasks') WHERE EXISTS (SELECT 1 FROM plan_tasks t WHERE t.stage_id=NEW.id AND t.status NOT IN ('done','waived'));
           SELECT RAISE(ABORT,'stage completion needs a recorded decision') WHERE NOT EXISTS (SELECT 1 FROM plan_decisions d WHERE d.stage_id=NEW.id AND d.kind='stage_done');
+        END
+        """,
+        // A stage with no tasks has not been planned, so it is not done. Its own trigger, so a database made before it gets it too.
+        """
+        CREATE TRIGGER IF NOT EXISTS plan_stage_done_needs_tasks BEFORE UPDATE OF status ON plan_stages WHEN NEW.status='done' BEGIN
+          SELECT RAISE(ABORT,'stage has no tasks') WHERE NOT EXISTS (SELECT 1 FROM plan_tasks t WHERE t.stage_id=NEW.id);
         END
         """,
     ]
@@ -183,6 +189,7 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         if text.contains("only the user authorizes") { return refused("Only the user authorizes stages or changes the objective.") }
         if text.contains("stage has unfinished tasks") { return conflict("Some tasks of this stage are not finished.") }
         if text.contains("needs a recorded decision") { return conflict("A stage is done only with a recorded check.") }
+        if text.contains("stage has no tasks") { return conflict("A stage with no tasks is not done; plan its tasks first.") }
         return error
     }
     private func guarded<T>(_ body: () throws -> T) throws -> T { do { return try body() } catch { throw Self.translated(error) } }
@@ -253,6 +260,20 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         }
         return edges.keys.sorted().allSatisfy { visit($0) }
     }
+    /// What a new task's `dependsOn` entry names: the key of another task in its batch, the id of a task of this or an earlier stage, or the
+    /// title of either (whatever its case, without the spaces around it). It returns that key or id; anything else is refused.
+    private static func dependency(_ name: String, of spec: TaskSpec, batch: [TaskSpec], earlier: [TaskRow]) throws -> String {
+        guard name != spec.key else { throw invalid("“\(spec.title)” cannot depend on itself.") }
+        if batch.contains(where: { $0.key == name }) || earlier.contains(where: { $0.id == name }) { return name }
+        let title = { (text: String) in text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }, wanted = title(name)
+        let inBatch = batch.filter { $0.key != spec.key && title($0.title) == wanted }.map(\.key)
+        let found = inBatch.isEmpty ? earlier.filter { title($0.title) == wanted }.map(\.id) : inBatch
+        guard found.count < 2 else { throw invalid("“\(spec.title)” depends on “\(name)”, but more than one task has that title; name it by its key or id.") }
+        guard let dep = found.first else {
+            throw invalid("“\(spec.title)” can depend only on tasks of this or an earlier stage; “\(name)” is not one. Name each dependency by the key, id or title of a task in this batch or of this or an earlier stage.")
+        }
+        return dep
+    }
 
     private func insertStage(id: String, planId: String, n: Int, spec: StageSpec, now: String) throws {
         try db.run("INSERT INTO plan_stages(id, plan_id, ordinal, title, goal, acceptance, status, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, 'proposed', ?, ?)",
@@ -303,6 +324,7 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         let shown = active ?? (latest?.status == "achieved" ? latest : nil)
         var needsYou = 0, forSupervisor = false, lastChange = max(plan.updatedAt, active?.at ?? "")
         var working: [[String: Any]] = [], stages: [[String: Any]] = []
+        let current = plan.status == "active" ? try active.flatMap { try currentStage(planId, through: $0.through) } : nil
         for stage in try stageRows(planId) {
             var tasks: [[String: Any]] = []
             for task in try taskRows(stage: stage.id) {
@@ -318,7 +340,8 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
                 if detail { row["brief"] = task.brief }
                 tasks.append(row)
             }
-            if stage.status == "review" { forSupervisor = true }
+            // A stage to check, or the stage the team is on while it has no tasks: the supervisor plans it.
+            if stage.status == "review" || (tasks.isEmpty && stage.id == current?.id) { forSupervisor = true }
             lastChange = max(lastChange, stage.updatedAt)
             stages.append(["id": stage.id, "n": stage.n, "title": stage.title, "goal": stage.goal, "acceptance": stage.acceptance, "status": stage.status, "tasks": tasks])
         }
@@ -625,12 +648,18 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
             try db.run("UPDATE plan_stages SET status = 'working', updated_at = ? WHERE id = ? AND status = 'approved'", [.text(Self.stamp()), .text(stage.id)])
         }
     }
-    /// A working stage whose tasks are all done or waived (or that has none) is ready for its check.
+    /// A working stage whose tasks are all done or waived is ready for its check. A stage with no tasks is not finished: it keeps working until
+    /// its supervisor plans it (one an earlier Buddy sent to its check with no tasks goes back to working).
     func closeStages(workspace: String) throws {
         for plan in try activePlans(workspace: workspace) {
             guard let scope = try activeScope(plan.id) else { continue }
-            for stage in try stageRows(plan.id) where stage.status == "working" && stage.n <= scope.through {
-                guard try taskRows(stage: stage.id).allSatisfy({ ["done", "waived"].contains($0.status) }) else { continue }
+            for stage in try stageRows(plan.id) where ["working", "review"].contains(stage.status) && stage.n <= scope.through {
+                let tasks = try taskRows(stage: stage.id)
+                if tasks.isEmpty {
+                    try db.run("UPDATE plan_stages SET status = 'working', updated_at = ? WHERE id = ? AND status = 'review'", [.text(Self.stamp()), .text(stage.id)])
+                    continue
+                }
+                guard stage.status == "working", tasks.allSatisfy({ ["done", "waived"].contains($0.status) }) else { continue }
                 try db.run("UPDATE plan_stages SET status = 'review', updated_at = ? WHERE id = ? AND status = 'working'", [.text(Self.stamp()), .text(stage.id)])
             }
         }
@@ -721,8 +750,8 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
             }
         }
     }
-    /// Adds tasks to a stage that is not finished. Dependencies name existing tasks of this or an earlier stage, or keys of tasks in this batch.
-    /// At most 12 tasks are added to one stage.
+    /// Adds tasks to a stage that is not finished. Dependencies name tasks of this batch (by key or title) or existing tasks of this or an
+    /// earlier stage (by id or title). At most 12 tasks are added to one stage.
     func addTasks(stageId: String, tasks: [[String: Any]], by: String, members: [String]) throws -> [String] {
         guard let stage = try stageRow(stageId), let plan = try planRow(stage.planId), Self.live.contains(plan.status) else { throw Self.missing("That stage is not in an open plan.") }
         return try guarded { try db.transaction { try insertAdded(stage: stage, tasks: tasks, by: by, members: members) } }
@@ -731,17 +760,18 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         guard !["done", "superseded"].contains(stage.status) else { throw Self.conflict("Stage \(stage.n) is finished; add the work to a later stage.") }
         guard !tasks.isEmpty else { throw Self.invalid("Give the tasks to add.") }
         guard stage.added + tasks.count <= Self.maxAddedPerStage else { throw Self.conflict("At most \(Self.maxAddedPerStage) tasks can be added to one stage; stage \(stage.n) has \(stage.added).") }
-        let earlier = Set(try stageRows(stage.planId).filter { $0.n <= stage.n }.flatMap { try taskRows(stage: $0.id) }.map(\.id))
+        let earlier = try stageRows(stage.planId).filter { $0.n <= stage.n }.flatMap { try taskRows(stage: $0.id) }
         let specs = try tasks.enumerated().map { try Self.taskSpec($0.element, key: "new\($0.offset + 1)", members: members) }
         let batch = Set(specs.map(\.key))
         guard batch.count == specs.count else { throw Self.invalid("Give each new task its own key.") }
-        for spec in specs { for dep in spec.dependsOn where dep == spec.key || (!earlier.contains(dep) && !batch.contains(dep)) { throw Self.invalid("“\(spec.title)” can depend only on tasks of this or an earlier stage; “\(dep)” is not one.") } }
-        guard Self.acyclic(Dictionary(specs.map { ($0.key, $0.dependsOn.filter(batch.contains)) }, uniquingKeysWith: { first, _ in first })) else { throw Self.invalid("Some new tasks wait on each other in a circle.") }
+        // Each dependency as the key of a task in this batch or the id of an existing one.
+        let deps = try Dictionary(specs.map { spec in (spec.key, try spec.dependsOn.map { try Self.dependency($0, of: spec, batch: specs, earlier: earlier) }) }, uniquingKeysWith: { first, _ in first })
+        guard Self.acyclic(deps.mapValues { $0.filter(batch.contains) }) else { throw Self.invalid("Some new tasks wait on each other in a circle.") }
         let now = Self.stamp()
         var ordinal = Self.n(try db.rows("SELECT COALESCE(MAX(ordinal), 0) FROM plan_tasks WHERE stage_id = ?", [.text(stage.id)]).first ?? [], 0)
         var ids: [String: String] = [:], out: [String] = []
         for spec in specs { ordinal += 1; let id = UUID().uuidString; ids[spec.key] = id; out.append(id); try insertTask(id: id, stageId: stage.id, ordinal: ordinal, spec: spec, now: now) }
-        for spec in specs { for dep in spec.dependsOn { try db.run("INSERT OR IGNORE INTO plan_task_deps(task_id, depends_on) VALUES(?, ?)", [.text(ids[spec.key] ?? ""), .text(ids[dep] ?? dep)]) } }
+        for spec in specs { for dep in deps[spec.key] ?? [] { try db.run("INSERT OR IGNORE INTO plan_task_deps(task_id, depends_on) VALUES(?, ?)", [.text(ids[spec.key] ?? ""), .text(ids[dep] ?? dep)]) } }
         // New work reopens a stage that was waiting for its check.
         try db.run("UPDATE plan_stages SET added_tasks = added_tasks + ?, status = CASE WHEN status = 'review' THEN 'working' ELSE status END, updated_at = ? WHERE id = ?", [.int(Int64(specs.count)), .text(now), .text(stage.id)])
         _ = try recordDecision(planId: stage.planId, kind: "add_tasks", by: by, question: "", choice: specs.map(\.title).joined(separator: "; "), rationale: "", stageId: stage.id, taskId: "", workerTaskId: "")
@@ -752,8 +782,9 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
     /// (`attempt:<worker task>:<n>`). At the last authorized stage the authorization is achieved, the plan holds, and the user gets one report.
     func stageDone(stageId: String, evidence: [String], report: String, by: String, attemptOutcome: (String, Int) -> String?) throws -> [String: Any] {
         guard let stage = try stageRow(stageId), let plan = try planRow(stage.planId), Self.live.contains(plan.status) else { throw Self.missing("That stage is not in an open plan.") }
-        guard stage.status == "review" else { throw Self.conflict("Stage \(stage.n) is not waiting for its check.") }
         let tasks = try taskRows(stage: stageId)
+        guard !tasks.isEmpty else { throw Self.conflict("Stage \(stage.n) has no tasks yet, so it is not done; plan its tasks with add_tasks.") }
+        guard stage.status == "review" else { throw Self.conflict("Stage \(stage.n) is not waiting for its check.") }
         guard tasks.allSatisfy({ ["done", "waived"].contains($0.status) }) else { throw Self.conflict("Some tasks of stage \(stage.n) are not finished.") }
         guard !evidence.isEmpty else { throw Self.invalid("Cite evidence for the acceptance criteria: task:<id> or attempt:<worker task>:<n> from the record.") }
         for ref in evidence {
@@ -804,12 +835,19 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
                    [.text(id), .text(planId), .text(kind), .text(String(text.prefix(8000))), .text(try BuddyOperationsDB.encode(refs)), .int(chat ? 1 : 0), .text(Self.stamp())])
         return id
     }
+    /// Closes the "stuck" notices raised after these supervisor runs, once what they were about moves again.
+    func closeStuckNotices(runIds: [String]) throws {
+        for id in runIds { try db.run("UPDATE plan_notices SET status = 'closed' WHERE kind = 'stuck' AND status = 'open' AND json_extract(refs, '$.runId') = ?", [.text(id)]) }
+    }
 
     /// What waits for the supervisor in a workspace's open plans. Each key changes when the item does, so a handled item is never presented
-    /// again and a new result of the same task is a new item.
+    /// again and a new result of the same task is a new item. The authorized stage the team is on, while it has no tasks, is a stage to plan;
+    /// only a stage with tasks, all done or waived, is a stage to check.
     func workItems(workspace: String) throws -> [[String: Any]] {
-        var results: [[String: Any]] = [], blocked: [[String: Any]] = [], checks: [[String: Any]] = []
-        for planID in try db.rows("SELECT id FROM plans WHERE workspace = ? AND status IN ('draft', 'active', 'holding') ORDER BY created_at, id", [.text(workspace)]).compactMap({ $0.first?.string }) {
+        var results: [[String: Any]] = [], blocked: [[String: Any]] = [], planning: [[String: Any]] = [], checks: [[String: Any]] = []
+        for row in try db.rows("SELECT id, status FROM plans WHERE workspace = ? AND status IN ('draft', 'active', 'holding') ORDER BY created_at, id", [.text(workspace)]) {
+            let planID = Self.s(row, 0)
+            let current = Self.s(row, 1) == "active" ? try activeScope(planID).flatMap { try currentStage(planID, through: $0.through) } : nil
             for stage in try stageRows(planID) {
                 let tasks = try taskRows(stage: stage.id)
                 for task in tasks {
@@ -818,13 +856,17 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
                     if task.status == "review" { results.append(base.merging(["key": "result:\(task.id):\(task.reviewAttempt)", "kind": "result", "attempt": task.reviewAttempt, "resultSummary": task.resultSummary] as [String: Any]) { $1 }) }
                     if task.status == "blocked" && task.workerTaskId.isEmpty { blocked.append(base.merging(["key": "blocked:\(task.id):\(task.dispatches)", "kind": "dispatch_blocked", "reason": task.blockedReason] as [String: Any]) { $1 }) }
                 }
-                if stage.status == "review" {
+                if tasks.isEmpty {
+                    if stage.id == current?.id, ["approved", "working", "review"].contains(stage.status) {
+                        planning.append(["key": "stage_plan:\(stage.id)", "kind": "stage_plan", "planId": planID, "stageId": stage.id, "stage": stage.n, "title": stage.title, "goal": stage.goal, "acceptance": stage.acceptance])
+                    }
+                } else if stage.status == "review" {
                     let finished = tasks.filter { ["done", "waived"].contains($0.status) }.count
                     checks.append(["key": "stage:\(stage.id):\(finished)", "kind": "stage_check", "planId": planID, "stageId": stage.id, "stage": stage.n, "title": stage.title, "goal": stage.goal, "acceptance": stage.acceptance])
                 }
             }
         }
-        return results + blocked + checks
+        return results + blocked + planning + checks
     }
     /// Whether a workspace has authorized work in progress (the worker keeps the Mac awake for it).
     func hasLiveWork(workspace: String) throws -> Bool {

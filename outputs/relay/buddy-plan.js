@@ -26,6 +26,14 @@
     return stages.find(s=>s.status!=='done'&&s.n<=through)||stages.filter(s=>s.status==='done').at(-1)||stages[0]||null;
   }
   const firstOpen=plan=>stagesOf(plan).find(s=>s.status!=='done')||null;
+  // A stage known to have no tasks yet has not been planned, so it is never being checked.
+  const unplanned=stage=>Array.isArray(stage?.tasks)&&!stage.tasks.length;
+  // The authorized stage the team is on, while it has no tasks: the supervisor is planning it.
+  function planningStage(plan){
+    if(plan?.status!=='active'||!scopeActive(plan))return null;
+    const s=currentStage(plan);
+    return s&&['approved','working','review'].includes(s.status)&&s.n<=(Number(plan.scope.through)||0)&&unplanned(s)?s:null;
+  }
 
   // The group chat shows the group's plan; an agent's own chat shows the plan that agent supervises. A live plan wins over one achieved earlier.
   function planFor(state,view,plans){
@@ -37,7 +45,10 @@
   }
 
   const STAGES={proposed:['Not started','idle'],approved:['Up next','ready'],working:['Working','working'],review:['Being checked','review'],done:['Done','done'],superseded:['Replaced','idle']};
-  function stageChip(stage){const [label,tone]=STAGES[stage?.status]||STAGES.proposed;return {label,tone};}
+  function stageChip(stage){
+    if(['working','review'].includes(stage?.status)&&unplanned(stage))return {label:'Planning',tone:'review'};
+    const [label,tone]=STAGES[stage?.status]||STAGES.proposed;return {label,tone};
+  }
   // What the agent is doing according to the pulse, as far as it concerns this task: busy with another task means this one waits its turn.
   function liveState(task,pulse){
     const p=pulse?.agents?.[task?.assignee];if(!p)return '';
@@ -83,6 +94,7 @@
       return done?`Stage ${done.n} is done — what next?`:'Which stage should the team get done?';
     }
     if(state==='needs_you'){const items=needsList(plan,names),n=Math.max(Number(run.needsYou)||0,items.length,1);return `Needs you (${n})${items[0]?': '+items[0]:''}`;}
+    const planning=planningStage(plan);if(planning)return `${sup} is planning Stage ${planning.n}`;
     const tasks=allTasks(plan);
     if(state==='waiting_on_supervisor'){
       const review=tasks.find(t=>t.status==='review');if(review)return `${sup} is reviewing ${quoted(review.title)}`;

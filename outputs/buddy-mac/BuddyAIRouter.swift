@@ -132,5 +132,30 @@ import Foundation
         }
         return ["models":catalog.models,"agents":selections.mapValues(\.payload),"errors":catalog.errors,"defaultProvider":try settings.current(workspace).provider,"saved":payload["operation"] as? String=="set"]
     }
+    /// "Switch all agents to Claude / ChatGPT". A preview (`dryRun`) saves nothing; the switch saves every agent's new model in one write, makes
+    /// `target` the starting provider for new agents and stamps the switch so scheduled routines follow it. Nothing running is stopped: a reply
+    /// under way keeps its model, and each agent's next reply and next task use the new one. Coding sessions and the supervisor's lane stay on Claude.
+    func switchProvider(workspace:String,to target:String,agents:[String],dryRun:Bool,supervisor:String?=nil) async throws -> [String:Any] {
+        guard ["chatgpt","claude"].contains(target) else{throw BuddyFailure(message:"Choose ChatGPT or Claude.")}
+        let refusal=BuddyFailure(message:"Connect \(target=="claude" ? "Claude":"ChatGPT") in Settings → AI provider first.")
+        func connected() throws -> Bool {try settings.current(workspace).enabled(target) && (target != "claude" || keyReader(workspace) != nil)}
+        guard try connected() else{throw refusal}
+        try ensureAgentDefaults(workspace:workspace,agents:agents)
+        let catalog=await modelCatalog(workspace:workspace,refresh:false)
+        // Checked again after the catalogs load: a disconnect or a removed agent in the meantime wins.
+        guard try connected(),catalog.models.contains(where:{$0["provider"] as? String==target}) else{throw refusal}
+        let team=agents.filter{chatgpt.agentPermission?(workspace,[workspace+":"+$0])==true}
+        let selections=try agentModels.ensure(workspace:workspace,agents:team,provider:settings.current(workspace).provider)
+        guard let moves=BuddyProviderSwitch.plan(agents:team,selections:selections,target:target,catalog:catalog.models) else{throw refusal}
+        if !dryRun {
+            try agentModels.setAll(workspace:workspace,selections:Dictionary(uniqueKeysWithValues:moves.filter{$0.how != "unchanged"}.map{($0.agent,$0.to)}))
+            _ = try settings.update(workspace,provider:target,teamSwitch:true)
+        }
+        func describe(_ s:BuddyAgentModelSelection)->[String:Any] {
+            let name=catalog.models.first{$0["provider"] as? String==s.provider && $0["id"] as? String==s.model}?["name"] as? String
+            return ["provider":s.provider,"model":s.model,"name":name ?? (s.model.isEmpty ? "Account default":s.model)]
+        }
+        return ["provider":target,"dryRun":dryRun,"applied":!dryRun,"agents":moves.map{["agentId":$0.agent,"from":describe($0.from),"to":describe($0.to),"how":$0.how]},"note":BuddyProviderSwitch.note(supervisor:supervisor)]
+    }
     func shutdown(){claude.shutdown();chatgpt.shutdown()}
 }

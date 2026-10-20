@@ -42,7 +42,8 @@ enum BuddyRoutineAuthorization {
     }
 }
 
-/// Which model a scheduled run uses. A routine pins its provider when it is saved, so it never switches provider on its own; the model is the agent's. An
+/// Which model a scheduled run uses. A routine pins its provider when it is saved, so it never switches provider on its own (only "Switch all agents"
+/// moves it, see `BuddyRoutineStore.follow`); the model is the agent's. An
 /// inbox agent switched to a small model kept running its scheduled scans on the larger one it had when they were saved, at many times the cost.
 enum BuddyRoutineModel {
     static func resolve(pinned:String?,provider:String,current:(provider:String,model:String)?)->String? {
@@ -1101,6 +1102,25 @@ enum BuddyRoutineGoals {
         let old=routines;routines[index]["lastTaskID"]=saved["id"]
         do{try persist()}catch{routines=old;throw error}
         return saved
+    }
+    /// After "Switch all agents to …" (a new `switchID` in the AI settings) each routine of the workspace moves, once, to its agent's provider and
+    /// model. Otherwise a routine keeps the provider it was saved with: changing one agent's model never moves its routines to another provider.
+    /// Returns whether this switch was new to the store.
+    @discardableResult func follow(workspace:String,switchID:String,agentModel:(String) throws->(provider:String,model:String)?) throws -> Bool {
+        let key="routines.followedSwitch."+workspace
+        guard !switchID.isEmpty,try db.meta(key) != switchID else {return false}
+        let original=routines
+        do {
+            for i in routines.indices where routines[i]["workspace"] as? String==workspace {
+                guard let agent=routines[i]["agentId"] as? String,let now=try agentModel(agent),["chatgpt","claude"].contains(now.provider),now.provider != routines[i]["provider"] as? String else {continue}
+                let budget:Double=now.provider=="claude" ? BuddyRunLimit.none:0
+                routines[i]["provider"]=now.provider;routines[i]["budgetUSD"]=budget
+                if now.model.isEmpty {routines[i].removeValue(forKey:"model")} else {routines[i]["model"]=now.model}
+            }
+            if !NSArray(array:original).isEqual(to:routines) {try persist()}
+            try db.setMeta(key,switchID)
+            return true
+        } catch {routines=original;try? persist();throw error}
     }
     func resumeBlockedBy(_ job:[String:Any],now:Date=Date()) throws {
         let original=routines

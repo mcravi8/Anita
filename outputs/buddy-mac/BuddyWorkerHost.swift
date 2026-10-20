@@ -375,6 +375,7 @@ import Darwin
                 // A private sign-in holds only its own agent's browser profile: only a routine that would use that profile waits for it.
                 let saved=routines.routines.first{$0["id"] as? String==rid}
                 guard privateAgent==nil || (saved?["browserAgentId"] as? String ?? saved?["agentId"] as? String ?? id) != privateAgent else{throw BuddyWorkerFailure(message:"Finish this agent's private sign-in first: the routine uses the same browser profile.")}
+                followTeamSwitch(workspace:current)
                 return ["task":try routines.runNow(rid,workspace:current,agent:id,requestID:request["requestId"] as? String ?? "",store:store)]
             }
             if let source=args["browserAgentId"] as? String {let owner=try agent(source,workspace:current);guard (owner["tools"] as? [String:Bool])?["desktop"] != false,(owner["tools"] as? [String:Bool])?["web"] != false else{throw BuddyWorkerFailure(message:"The source agent's browser access is off.")}}
@@ -507,7 +508,8 @@ import Darwin
         if provider == "claude" { guard keyReader(current) != nil, budget > 0 else { throw BuddyWorkerFailure(message: "Connect your Claude API key first.") } }
         let requestID = request["requestId"] as? String ?? ""
         let repeated = store.jobs.contains { $0["workspace"] as? String == current && $0["agentId"] as? String == id && $0["requestId"] as? String == requestID }
-        let job = try store.create(workspace: current, agent: id, requestId: requestID, title: request["title"] as? String ?? "", goal: request["goal"] as? String ?? "", kind: request["kind"] as? String ?? "general", provider: provider, budget: budget,model:provider==selected.provider ? selected.model:BuddyAgentModelSelection.initial(provider).model)
+        // A coding session runs on Claude whatever the agent chats on; after a switch to ChatGPT it keeps the Claude model the agent had.
+        let job = try store.create(workspace: current, agent: id, requestId: requestID, title: request["title"] as? String ?? "", goal: request["goal"] as? String ?? "", kind: request["kind"] as? String ?? "general", provider: provider, budget: budget,model:selected.model(on:provider))
         // A new task records who supervises the team now, so its questions and stops can go to them rather than the person.
         if !repeated, let state = try? state(), let supervisor = (try? monitor.store.policy(state))?["supervisorId"] as? String, !supervisor.isEmpty,
            (state["agents"] as? [[String: Any]] ?? []).contains(where: { $0["id"] as? String == supervisor }), let jobID = job["id"] as? String {
@@ -812,6 +814,7 @@ import Darwin
         let current=try? state(),space=current?["conversationWorkspace"] as? String ?? ""
         if let current {await monitor.tick(state:current,jobs:store.jobs,paused:store.paused)}
         sweepOrphans(now:now)
+        followTeamSwitch(workspace: space)
         // Due routines are queued even while another task runs, so they are not skipped because the worker was busy at their time.
         if !store.paused { do { try routines.enqueueDue(store:store,workspace:space);try? FileManager.default.removeItem(at:root.appendingPathComponent("schedule-error.txt")) } catch { try? Data(error.localizedDescription.utf8).write(to:root.appendingPathComponent("schedule-error.txt"),options:.atomic) } }
         await watchActive(now:now)
@@ -1165,6 +1168,13 @@ import Darwin
                 try? store.update(id, values); cleanup()
             } else if Date().timeIntervalSince(lastProgressSave) > 0.5 { lastProgressSave = Date(); _ = try? store.update(id, values) }
         }
+    }
+    /// After "Switch all agents to …" in Settings, each routine moves once to its agent's new provider and model, before anything else is queued.
+    private func followTeamSwitch(workspace: String) {
+        guard UUID(uuidString: workspace) != nil, let id = (try? providerSettings.current(workspace))?.teamSwitch else { return }
+        let models = agentModels
+        // An unreadable agent-models.json fails the pass, so it is tried again rather than recorded as followed.
+        _ = try? routines.follow(workspace: workspace, switchID: id) { agent in try models.selection(workspace: workspace, agent: agent).map { ($0.provider, $0.model) } }
     }
     /// The model a run uses: a scheduled run uses its agent's current model (its routine only pins the provider), anything else the model it was started with.
     private func modelForRun(_ job:[String:Any],agentID:String,workspace:String)->String {

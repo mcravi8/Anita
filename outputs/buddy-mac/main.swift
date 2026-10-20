@@ -600,6 +600,16 @@ import AppKit
         let operation = payload["operation"] as? String ?? "status", provider = payload["provider"] as? String ?? "chatgpt"
         var status: [String: Any]
         if operation == "status" { return try await ai.status(workspace: workspace) }
+        if operation == "switch" {
+            // "Switch all agents to …": a preview unless the page explicitly confirms with `dryRun: false`.
+            let state = try workspaceState(), agents = (state["agents"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
+            let lead = BuddyAutonomy.policySupervisor(support: supportURL, workspace: workspace, state: state)
+            let leadName = (state["agents"] as? [[String: Any]] ?? []).first { $0["id"] as? String == lead }.flatMap { ($0["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+            var result = try await ai.switchProvider(workspace: workspace, to: provider, agents: agents, dryRun: payload["dryRun"] as? Bool != false, supervisor: leadName)
+            guard result["applied"] as? Bool == true else { return result }
+            let status = try await ai.status(workspace: workspace)
+            deliver(status.merging(["type": "connection"]) { _, new in new }); result["status"] = status; return result
+        }
         if operation == "select" { status = try await ai.select(workspace: workspace, provider: provider, budget: payload["claudeBudgetUSD"] as? Double) }
         else if operation == "disconnect" {if provider=="claude"{agentSetup.shutdown()};status = try await ai.disconnect(workspace: workspace, provider: provider) }
         else if ["connect", "reconnect"].contains(operation) {

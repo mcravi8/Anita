@@ -256,6 +256,18 @@ import Foundation
         require(calls(ignored).count == 3 && ignored.lane.status["online"] as? Bool == true && (ignored.lane.status["lastError"] as? String ?? "x").isEmpty, "the next run that is applied brings it back online: \(ignored.lane.status)")
         print("PASS: the lane is online only while it was ticked in the last 30 seconds, has a Claude supervisor able to run, and its last run did not fail")
 
+        // After "Switch all agents to ChatGPT" the supervisor chats on ChatGPT and keeps supervising on the Claude model it had.
+        let switched = try world(base, "switched")
+        // agent-models.json as the switch leaves it: Chief on ChatGPT, remembering its Claude model.
+        try Data("{\"version\":1,\"workspaces\":{\"\(w)\":{\"\(chief)\":{\"provider\":\"chatgpt\",\"model\":\"gpt-5\",\"alternates\":{\"claude\":\"fixture-switched-model\"}}}}}".utf8).write(to: switched.root.appendingPathComponent("agent-models.json"))
+        try mode(switched, "auto"); try propose(switched); _ = try step(switched)
+        try finish(switched.store, jobs(switched, "t1")[0]["id"] as? String ?? "", result: "R1: the baseline reproduces.")
+        _ = try step(switched); await tick(switched)
+        let switchedCalls = calls(switched)
+        require(switched.lane.status["online"] as? Bool == true && switchedCalls.count == 1, "a supervisor switched to ChatGPT keeps supervising: \(switched.lane.status)")
+        require(switchedCalls.first?["model"] as? String == "fixture-switched-model", "on the Claude model it had before the switch: \(switchedCalls)")
+        print("PASS: after a switch to ChatGPT the supervisor's background lane keeps running on Claude, on the supervisor's remembered Claude model")
+
         // 4. Gates, then the no-progress breaker.
         let hold = try world(base, "hold")
         try propose(hold)

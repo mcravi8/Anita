@@ -118,10 +118,12 @@ import Foundation
         guard UUID(uuidString: workspace) != nil, let supervisor = supervisor(state, workspace: workspace) else { online = false; lastError = ""; return }
         let model: String
         do {
-            let chosen = try BuddyAgentModels(support: support).selection(workspace: workspace, agent: supervisor.id)
             let settings = try BuddyAISettings(support: support).current(workspace)
-            guard (chosen?.provider ?? settings.provider) == "claude", settings.claudeEnabled, keyReader(workspace) != nil else { throw BuddyWorkerFailure(message: "") }
-            model = chosen.flatMap { $0.model.isEmpty ? nil : $0.model } ?? BuddyAgentModelSelection.initial("claude").model
+            let chosen = try BuddyAgentModels(support: support).selection(workspace: workspace, agent: supervisor.id) ?? .initial(settings.provider)
+            // The lane runs only on Claude. A supervisor that "Switch all agents to ChatGPT" moved keeps supervising on the Claude model it had.
+            guard chosen.provider == "claude" || chosen.alternates?["claude"] != nil, settings.claudeEnabled, keyReader(workspace) != nil else { throw BuddyWorkerFailure(message: "") }
+            let own = chosen.model(on: "claude")
+            model = own.isEmpty ? BuddyAgentModelSelection.initial("claude").model : own
         } catch {
             online = false; lastError = "The supervisor runs on Claude; connect Claude or choose a Claude model for \(supervisor.name)."
             return

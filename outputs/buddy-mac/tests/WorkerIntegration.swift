@@ -117,6 +117,15 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
         _ = try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"routine","agentId":agent,"arguments":["action":"pause","routineID":r["id"]!]])
         require(try BuddyRoutineStore(directory:support.appendingPathComponent("Worker")).routines.first?["status"] as? String=="paused","direct routine pause reaches durable storage")
         print("PASS: native IPC routine creation, actual next-run receipt, status discovery and durable pause")
+        // "Switch all agents to Claude": the running worker moves the routine saved on ChatGPT to its agent's Claude model by itself. The agent
+        // then goes back to ChatGPT remembering that Claude model, which its coding session below must keep.
+        try BuddyAgentModels(support:support).setAll(workspace:workspace,selections:[agent:.init(provider:"claude",model:"claude-fixture-switched")])
+        _ = try BuddyAISettings(support:support).update(workspace,teamSwitch:true)
+        var moved:[String:Any]=[:]
+        for _ in 0..<60 {moved=try BuddyRoutineStore(directory:support.appendingPathComponent("Worker")).routines.first ?? [:];if moved["provider"] as? String=="claude" {break};try await Task.sleep(nanoseconds:100_000_000)}
+        require(moved["provider"] as? String=="claude" && moved["model"] as? String=="claude-fixture-switched","after a team switch the worker moves the saved routine to its agent's provider and model: \(moved)")
+        try BuddyAgentModels(support:support).setAll(workspace:workspace,selections:[agent:.init(provider:"chatgpt",model:"",alternates:["claude":"claude-fixture-switched"])])
+        print("PASS: the running worker moves a saved routine to its agent's new provider and model after a team switch")
         print("PASS: private Unix IPC, accepted/queued/running/completed worker journey, idempotent enqueue, subscription protocol, real saved file and preview, durable completion")
         func call(_ arguments:[String:Any],agentID:String?=nil,requestID:String="coding-once") async throws -> [String:Any] {
             try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"coding","agentId":agentID ?? agent,"requestId":requestID,"arguments":arguments])
@@ -130,6 +139,7 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
             };require(false,"coding task reaches \(status)");return [:]
         }
         let queued=try await call(["action":"start","title":"Coding fixture","goal":"Build and syntax-check the fixture."])["task"] as! [String:Any],codingID=queued["id"] as! String
+        require(queued["provider"] as? String=="claude" && queued["model"] as? String=="claude-fixture-switched","an agent on ChatGPT still codes on Claude, on the Claude model it had before the switch: \(queued["provider"] ?? "") \(queued["model"] ?? "")")
         let same=try await call(["action":"start","title":"Coding fixture","goal":"Build and syntax-check the fixture."])["task"] as! [String:Any]
         require(same["id"] as? String==codingID,"coding enqueue is idempotent")
         let done=try await wait(codingID,for:"completed"),commands=done["commands"] as? [[String:Any]] ?? []

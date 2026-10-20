@@ -4,7 +4,21 @@ import Darwin
 
 struct BuddyWorkerFailure: LocalizedError {
     let message: String
+    /// What kind of refusal this is, so a caller can tell "wrong input" from "needs the user" from "retry": failed, invalid_input, not_authorized,
+    /// not_found, conflict, needs_user, outside_approved_scope or unsupported_in_background.
+    var code = "failed"
+    var retryable = false
     var errorDescription: String? { message }
+}
+
+/// Who may act on another agent's work: the agent itself, the team's supervisor, or the agent that manages it. Read from native state only,
+/// never from prompt text.
+enum BuddyAuthority {
+    static func may(_ actor: String, actOn target: String, state: [String: Any], supervisor: String?) -> Bool {
+        guard !actor.isEmpty else { return false }
+        return actor == target || supervisor == actor
+            || (state["agents"] as? [[String: Any]] ?? []).contains { $0["id"] as? String == target && $0["managedBy"] as? String == actor }
+    }
 }
 
 enum BuddyRoutineAuthorization {
@@ -184,9 +198,11 @@ struct BuddyLease: Equatable {
     let resource: String, generation: Int64, holder: String
 }
 
-/// One try at a task. `outcome` is nil while the attempt is still going.
+/// One try at a task. `outcome` is nil while the attempt is still going. `result` is what the task's result said when this attempt ended, so a
+/// later attempt can never erase what an earlier one found.
 struct BuddyAttempt {
     let taskID: String, number: Int, runID: String, provider: String, model: String, startedAt: String, endedAt: String?, outcome: String?
+    var result: String? = nil
 }
 
 @MainActor final class BuddyWorkerStore {
@@ -196,6 +212,10 @@ struct BuddyAttempt {
     private(set) var paused: Bool
     static let interrupted = Set(["running", "waiting_review", "stopping"])
     static let terminal = Set(["completed", "cancelled"])
+    /// The tasks that count against the limit on unfinished work: those the worker is doing or will do. A failed or interrupted run occupies
+    /// nothing until someone resumes it, so a string of failed scans can never stop new work being accepted. A paused task still counts, as it
+    /// is meant to carry on.
+    static let occupying: Set<String> = ["queued", "starting", "running", "waiting_review", "waiting_user", "paused"]
     /// Finished tasks are set aside once the history gets long, so a routine that runs every hour never fills it up. They stay in the database.
     static let archiveTrigger = 900, archiveKeep = 600, archiveSizeTrigger = 24 * 1024 * 1024
     /// One task may not grow past this, however long its history gets.
@@ -215,6 +235,7 @@ struct BuddyAttempt {
         try reconcileDecisions()
         try backfillActions()
         var interrupted: [(old: [String: Any], new: [String: Any])] = []
+        let today = BuddyBudget.day(Date()), restartedAt = Self.stamp()
         for i in jobs.indices where Self.interrupted.contains(jobs[i]["status"] as? String ?? "") {
             let before = jobs[i]
             let rows = try actionStates(of: jobs[i]["id"] as? String ?? "")
@@ -222,8 +243,16 @@ struct BuddyAttempt {
             jobs[i]["reviews"] = reviews
             let unsure = reviews.filter { $0["status"] as? String == "uncertain" }
             jobs[i]["status"] = "interrupted"
-            jobs[i]["progress"] = unsure.isEmpty ? "The worker restarted. Review the last result and any external action before continuing. Nothing was automatically retried."
-                : "The worker restarted while \(Self.describe(unsure)) may have been sent. Check whether it went through before continuing. Nothing was automatically retried."
+            jobs[i]["stopCause"] = "worker.restart"
+            if unsure.isEmpty {
+                // Nothing can have been sent, so the work is continued by itself from its saved progress (the host does it, a few times a day).
+                let prior = before["recovery"] as? [String: Any]
+                let tries = prior?["cause"] as? String == "worker.restart" && prior?["day"] as? String == today ? (prior?["tries"] as? Int ?? 0) : 0
+                jobs[i]["recovery"] = ["cause": "worker.restart", "state": "pending", "tries": tries, "day": today, "nextAt": restartedAt]
+                jobs[i]["progress"] = "The worker restarted. Buddy will continue this task automatically from its saved progress."
+            } else {
+                jobs[i]["progress"] = "The worker restarted while \(Self.describe(unsure)) may have been sent. Check whether it went through before continuing. Nothing was automatically retried."
+            }
             interrupted.append((before, jobs[i]))
         }
         if !interrupted.isEmpty { try db.transaction { for change in interrupted { try Self.commit(change.new, from: change.old, cause: "worker.restart", in: db) } } }
@@ -296,17 +325,47 @@ struct BuddyAttempt {
         if values["reviews"] != nil { merged = try keepingActionProgress(merged) }
         jobs[i] = merged
         let saved = merged
-        do { try db.transaction { try Self.commit(saved, from: old, cause: cause, in: db) } } catch { jobs[i] = old; throw error }; return jobs[i]
+        // A run that finishes ends the older runs of the same work that stopped without finishing, in the same transaction.
+        let stale = Self.superseded(by: saved, from: old, among: jobs)
+        do {
+            try db.transaction {
+                try Self.commit(saved, from: old, cause: cause, in: db)
+                for s in stale { try Self.commit(s.new, from: s.old, cause: "superseded", in: db) }
+            }
+        } catch { jobs[i] = old; throw error }
+        for s in stale { jobs[s.index] = s.new }
+        return jobs[i]
+    }
+    /// The older runs of the same work (the same plan task, else the same routine series or routine) that a run finishing now makes stale: ones that
+    /// failed, were interrupted or paused, and that left nothing that may have been sent. They become cancelled, saying which run superseded them.
+    static func superseded(by new: [String: Any], from old: [String: Any], among jobs: [[String: Any]]) -> [(index: Int, old: [String: Any], new: [String: Any])] {
+        guard new["status"] as? String == "completed", old["status"] as? String != "completed" else { return [] }
+        func key(_ job: [String: Any]) -> String? {
+            if let plan = job["planTaskId"] as? String, !plan.isEmpty { return "plan:" + plan }
+            if let routine = (job["routineSeriesID"] ?? job["routineID"]) as? String, !routine.isEmpty { return "routine:" + routine }
+            return nil
+        }
+        guard let mine = key(new), let position = jobs.firstIndex(where: { $0["id"] as? String == new["id"] as? String }) else { return [] }
+        let now = stamp()
+        return jobs.enumerated().compactMap { i, job in
+            guard i < position, job["workspace"] as? String == new["workspace"] as? String, key(job) == mine, ["failed", "interrupted", "paused"].contains(job["status"] as? String ?? ""),
+                  !(job["reviews"] as? [[String: Any]] ?? []).contains(where: { ["uncertain", "dispatched"].contains($0["status"] as? String ?? "") }) else { return nil }
+            var next = job
+            next["status"] = "cancelled"; next["stopCause"] = "superseded"; next["supersededBy"] = new["id"]; next["updatedAt"] = now
+            next["progress"] = "Superseded: a later run of the same work finished."
+            return (i, job, next)
+        }
     }
     func create(workspace: String, agent: String, requestId: String, title: String, goal: String, kind: String, provider: String, budget: Double, model:String?=nil) throws -> [String: Any] {
         guard UUID(uuidString: workspace) != nil, UUID(uuidString: agent) != nil, !requestId.isEmpty, requestId.count <= 200,
               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, title.count <= 150,
               !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, goal.count <= 30000,
               ["research", "applications", "email", "general", "coding"].contains(kind), ["chatgpt", "claude"].contains(provider), (kind != "coding" || provider=="claude"), budget.isFinite, budget >= 0, budget <= BuddyRunLimit.none else { throw BuddyWorkerFailure(message: "Add a short task title, a clear brief, and a supported provider.") }
-        if let old = jobs.first(where: { $0["workspace"] as? String == workspace && $0["agentId"] as? String == agent && $0["requestId"] as? String == requestId }) { return old }
+        // The same request again returns the task it already made, marked so the caller can tell (the mark is never saved).
+        if let old = jobs.first(where: { $0["workspace"] as? String == workspace && $0["agentId"] as? String == agent && $0["requestId"] as? String == requestId }) { var found = old; found["deduplicated"] = true; return found }
         let heavy = liveBytes > Self.archiveSizeTrigger
         if jobs.count >= Self.archiveTrigger || heavy { try? archiveFinished(keeping: heavy ? 200 : Self.archiveKeep) }
-        guard jobs.count < 1000, jobs.filter({ !Self.terminal.contains($0["status"] as? String ?? "") }).count < 30 else { throw BuddyWorkerFailure(message: "Finish or cancel some background tasks before adding more.") }
+        guard jobs.count < 1000, jobs.filter({ Self.occupying.contains($0["status"] as? String ?? "") }).count < 30 else { throw BuddyWorkerFailure(message: "Finish or cancel some background tasks before adding more.") }
         let now = ISO8601DateFormatter().string(from: Date())
         var job: [String: Any] = ["id": UUID().uuidString, "workspace": workspace, "agentId": agent, "requestId": requestId, "title": title, "goal": goal, "kind": kind, "provider": provider, "budgetUSD": budget, "status": "queued", "progress": "Queued", "createdAt": now, "updatedAt": now, "attempt": 0, "events": [[String: Any]](), "result": "", "files": [[String: Any]]()]
         if let model,!model.isEmpty {guard model.range(of:#"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"#,options:.regularExpression) != nil else{throw BuddyWorkerFailure(message:"Invalid task model.")};job["model"]=model}
@@ -353,7 +412,9 @@ struct BuddyAttempt {
         let id = new["id"] as? String ?? "", before = old["status"] as? String ?? "", after = new["status"] as? String ?? ""
         let oldAttempt = old["attempt"] as? Int ?? 0, newAttempt = new["attempt"] as? Int ?? 0
         if before != after, attemptEnds.contains(after) {
-            let closed = try db.run("UPDATE attempts SET ended_at = ?, outcome = ? WHERE task_id = ? AND outcome IS NULL", [.text(stamp()), .text(after), .text(id)])
+            // Each attempt keeps its own result, so a later attempt that comes back empty cannot erase what an earlier one found.
+            let closed = try db.run("UPDATE attempts SET ended_at = ?, outcome = ?, result = ? WHERE task_id = ? AND outcome IS NULL",
+                                    [.text(stamp()), .text(after), .text(String((new["result"] as? String ?? "").suffix(100000))), .text(id)])
             if closed > 0 { try appendEvent("attempt.ended", task: new, attempt: oldAttempt, cause: cause, payload: ["n": oldAttempt, "outcome": after], in: db) }
         }
         if before != after { try appendEvent("task.status", task: new, attempt: newAttempt, cause: cause, payload: ["from": before, "to": after], in: db) }
@@ -399,9 +460,9 @@ struct BuddyAttempt {
         try db.rows("SELECT \(Self.eventColumns) FROM events e WHERE e.task_id = ? AND e.seq > ? ORDER BY e.seq", [.text(taskID), .int(Int64(seq))]).compactMap(Self.event)
     }
     func attempts(of taskID: String) throws -> [BuddyAttempt] {
-        try db.rows("SELECT n, run_id, provider, model, started_at, ended_at, outcome FROM attempts WHERE task_id = ? ORDER BY n", [.text(taskID)]).compactMap { row in
+        try db.rows("SELECT n, run_id, provider, model, started_at, ended_at, outcome, result FROM attempts WHERE task_id = ? ORDER BY n", [.text(taskID)]).compactMap { row in
             guard let n = row[0].int else { return nil }
-            return BuddyAttempt(taskID: taskID, number: Int(n), runID: row[1].string ?? "", provider: row[2].string ?? "", model: row[3].string ?? "", startedAt: row[4].string ?? "", endedAt: row[5].string, outcome: row[6].string)
+            return BuddyAttempt(taskID: taskID, number: Int(n), runID: row[1].string ?? "", provider: row[2].string ?? "", model: row[3].string ?? "", startedAt: row[4].string ?? "", endedAt: row[5].string, outcome: row[6].string, result: row[7].string)
         }
     }
     var eventCount: Int { Int((try? db.rows("SELECT COUNT(*) FROM events").first?.first?.int) ?? 0) }
@@ -664,12 +725,16 @@ struct BuddyAttempt {
 
     // MARK: what needs you
 
-    struct DecisionSpec { let id: String, kind: String, title: String, question: String, label: String, payload: [String: Any] }
+    /// `audience` is who has to act: "user" (the person) or "supervisor" (the agent the task names as its supervisor).
+    struct DecisionSpec { let id: String, kind: String, title: String, question: String, label: String, payload: [String: Any]; var audience = "user" }
     /// The blockers a task's state implies right now, each with the identity that makes it the same blocker next time. One sign-in problem is one
-    /// entry, however many places show it. An allowance beats a plain "stopped", because choosing the allowance is what ends it.
+    /// entry, however many places show it. Every stop is seen by someone: a stop the person made needs nobody, a stop being retried by itself needs
+    /// nobody yet, and any other stop goes to the task's supervisor if it names one, else to the person. Reviews, sign-ins, unconfirmed actions
+    /// and daily limits are always the person's.
     static func desiredDecisions(_ job: [String: Any]) -> [DecisionSpec] {
         let id = job["id"] as? String ?? "", status = job["status"] as? String ?? "", attempt = job["attempt"] as? Int ?? 0, title = job["title"] as? String ?? "Background task"
-        let progress = String((job["progress"] as? String ?? "").prefix(300))
+        let progress = String((job["progress"] as? String ?? "").prefix(300)), cause = job["stopCause"] as? String ?? ""
+        let watcher = (job["supervisorId"] as? String ?? "").isEmpty ? "user" : "supervisor"
         var out: [DecisionSpec] = []
         for review in job["reviews"] as? [[String: Any]] ?? [] {
             guard let reviewID = review["id"] as? String else { continue }
@@ -685,34 +750,50 @@ struct BuddyAttempt {
             default: break
             }
         }
-        // Runs have no limit of their own any more, so a task is never waiting for an allowance.
-        let needsAllowance = false
         if status == "waiting_user" {
-            out.append(DecisionSpec(id: "waiting:\(id):\(attempt)", kind: "waiting", title: title, question: progress.isEmpty ? "This task is waiting for you." : progress, label: "Open task", payload: ["taskId": id]))
+            if cause == "review.parked" {
+                out.append(DecisionSpec(id: "waiting:\(id):\(attempt)", kind: "waiting", title: title, question: "Buddy set this aside so other work could run. Resume it when you can review the step it was waiting for.", label: "Open task", payload: ["taskId": id]))
+            } else {
+                let routed = (job["checkpoint"] as? [String: Any])?["routedTo"] as? String == "supervisor" ? "supervisor" : "user"
+                out.append(DecisionSpec(id: "waiting:\(id):\(attempt)", kind: "waiting", title: title, question: progress.isEmpty ? "This task is waiting for you." : progress, label: "Open task", payload: ["taskId": id], audience: routed))
+            }
         }
-        if needsAllowance {
-            out.append(DecisionSpec(id: "allowance:\(id):\(attempt)", kind: "allowance", title: "Choose an allowance to continue", question: "\(title): the last attempt used its allowance or its cost is unconfirmed. Choose an additional Claude allowance to continue.", label: "Choose allowance", payload: ["taskId": id]))
-        } else if status == "failed" || status == "interrupted" {
-            out.append(DecisionSpec(id: "stopped:\(id):\(attempt):\(status)", kind: "stopped", title: title, question: progress.isEmpty ? "This task stopped before finishing." : progress, label: "Open task", payload: ["taskId": id]))
+        if status == "failed" || status == "interrupted" {
+            // While the stop is being retried by itself there is nothing to decide; once the tries are used up it is a stopped task again.
+            let retrying = ["pending", "queued"].contains((job["recovery"] as? [String: Any])?["state"] as? String ?? "")
+            if !retrying {
+                out.append(DecisionSpec(id: "stopped:\(id):\(attempt):\(status)", kind: "stopped", title: title, question: progress.isEmpty ? "This task stopped before finishing." : progress, label: "Open task", payload: ["taskId": id], audience: watcher))
+            }
         }
-        if status == "paused", job["blockedBy"] as? String == "limit" {
-            out.append(DecisionSpec(id: "limit:\(id):\(job["blockedAt"] as? String ?? "")", kind: "limit", title: "Daily limit reached", question: progress, label: "Open task", payload: ["taskId": id]))
+        if status == "paused" {
+            if job["blockedBy"] as? String == "limit" {
+                out.append(DecisionSpec(id: "limit:\(id):\(job["blockedAt"] as? String ?? "")", kind: "limit", title: "Daily limit reached", question: progress, label: "Open task", payload: ["taskId": id]))
+            } else if !(cause.hasPrefix("user") || cause == "routine.paused" || cause == "superseded") {
+                out.append(DecisionSpec(id: "paused:\(id):\(attempt):\(cause.isEmpty ? "unknown" : cause)", kind: "paused", title: title, question: progress.isEmpty ? "This task stopped by itself." : progress, label: "Open task", payload: ["taskId": id], audience: watcher))
+            }
+        }
+        if status == "completed", !(job["reportsTo"] as? String ?? "").isEmpty, (job["acceptedAt"] as? String ?? "").isEmpty {
+            let result = String((job["result"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
+            out.append(DecisionSpec(id: "result:\(id):\(attempt)", kind: "result", title: "Result to review: \(title)", question: result.isEmpty ? "This task finished. Review what it delivered." : result, label: "Review result", payload: ["taskId": id], audience: "supervisor"))
         }
         return out
     }
-    private static let derivedKinds = "('review', 'signin', 'waiting', 'allowance', 'stopped', 'unconfirmed', 'limit')"
+    /// Kinds kept equal to a task's state. `allowance` is no longer opened, but stays here so rows left from before are still resolved.
+    private static let derivedKinds = "('review', 'signin', 'waiting', 'allowance', 'stopped', 'unconfirmed', 'limit', 'paused', 'result')"
     /// Keeps the open blockers of one task equal to what its state implies, in the transaction that saves it: new ones are opened, ones whose cause
     /// has ended are resolved, and each is an event, so a consumer can follow them.
     private static func syncDecisions(_ task: [String: Any], in db: BuddyOperationsDB) throws {
         let taskID = task["id"] as? String ?? "", desired = Dictionary(desiredDecisions(task).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        var open = Set<String>()
-        for row in try db.rows("SELECT id FROM decisions WHERE task_id = ? AND status = 'open' AND kind IN \(derivedKinds)", [.text(taskID)]) { if let id = row[0].string { open.insert(id) } }
-        for (id, spec) in desired where !open.contains(id) {
-            let added = try db.run("INSERT OR IGNORE INTO decisions(id, workspace, agent_id, task_id, kind, title, question, label, payload, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                   [.text(id), .text(task["workspace"] as? String ?? ""), .text(task["agentId"] as? String ?? ""), .text(taskID), .text(spec.kind), .text(spec.title), .text(spec.question), .text(spec.label), .text((try? BuddyOperationsDB.encode(spec.payload)) ?? "{}"), .text(stamp())])
+        var open: [String: String] = [:]
+        for row in try db.rows("SELECT id, audience FROM decisions WHERE task_id = ? AND status = 'open' AND kind IN \(derivedKinds)", [.text(taskID)]) { if let id = row[0].string { open[id] = row[1].string ?? "user" } }
+        for (id, spec) in desired where open[id] == nil {
+            let added = try db.run("INSERT OR IGNORE INTO decisions(id, workspace, agent_id, task_id, kind, title, question, label, payload, created_at, audience) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                   [.text(id), .text(task["workspace"] as? String ?? ""), .text(task["agentId"] as? String ?? ""), .text(taskID), .text(spec.kind), .text(spec.title), .text(spec.question), .text(spec.label), .text((try? BuddyOperationsDB.encode(spec.payload)) ?? "{}"), .text(stamp()), .text(spec.audience)])
             if added > 0 { try appendEvent("decision.opened", task: task, attempt: task["attempt"] as? Int, cause: spec.kind, payload: ["id": id, "kind": spec.kind], in: db) }
         }
-        for id in open where desired[id] == nil {
+        // The same blocker whose audience has changed (a supervisor was named, a question was routed) moves in place.
+        for (id, spec) in desired { if let current = open[id], current != spec.audience { try db.run("UPDATE decisions SET audience = ? WHERE id = ?", [.text(spec.audience), .text(id)]) } }
+        for id in open.keys where desired[id] == nil {
             try db.run("UPDATE decisions SET status = 'resolved', resolution = 'state_changed', resolved_at = ? WHERE id = ?", [.text(stamp()), .text(id)])
             try appendEvent("decision.resolved", task: task, attempt: task["attempt"] as? Int, cause: "state_changed", payload: ["id": id], in: db)
         }
@@ -724,12 +805,12 @@ struct BuddyAttempt {
     /// What needs the person now, for one workspace, oldest first.
     func openDecisions(workspace: String) throws -> [[String: Any]] {
         var out: [[String: Any]] = []
-        for row in try db.rows("SELECT id, agent_id, task_id, kind, title, question, label, payload, created_at FROM decisions WHERE workspace = ? AND status = 'open' ORDER BY created_at, id", [.text(workspace)]) {
+        for row in try db.rows("SELECT id, agent_id, task_id, kind, title, question, label, payload, created_at, audience FROM decisions WHERE workspace = ? AND status = 'open' ORDER BY created_at, id", [.text(workspace)]) {
             var item: [String: Any] = [:]
             item["id"] = row[0].string ?? ""; item["agentId"] = row[1].string ?? ""; item["taskId"] = row[2].string ?? ""; item["kind"] = row[3].string ?? ""
             item["title"] = row[4].string ?? ""; item["question"] = row[5].string ?? ""; item["actionLabel"] = row[6].string ?? ""
             item["payload"] = (try? BuddyOperationsDB.decode(row[7].string ?? "{}")) ?? [String: Any]()
-            item["createdAt"] = row[8].string ?? ""
+            item["createdAt"] = row[8].string ?? ""; item["audience"] = row[9].string ?? "user"
             out.append(item)
         }
         return out
@@ -758,7 +839,8 @@ struct BuddyAttempt {
 
     private static func number(_ value: Any?) -> Double { (value as? Double) ?? (value as? NSNumber)?.doubleValue ?? 0 }
     private static func appendBudget(_ kind: String, amount: Double, task: [String: Any], attempt: Int?, cause: String, idem: String? = nil, day: String? = nil, in db: BuddyOperationsDB) throws {
-        guard amount > 1e-9 else { return }
+        // The "no limit" number is not money: it is never authorized, set aside or given back in the ledger.
+        guard amount > 1e-9, amount < BuddyRunLimit.none / 2 else { return }
         let attemptColumn: BuddyOperationsDB.Bind
         if let attempt { attemptColumn = .int(Int64(attempt)) } else { attemptColumn = .null }
         let idemColumn: BuddyOperationsDB.Bind
@@ -844,22 +926,59 @@ struct BuddyAttempt {
         try db.transaction { try Self.appendEvent("budget.refused", task: job, attempt: job["attempt"] as? Int, cause: "budget.limit", payload: ["limitUSD": limit, "scope": scope, "usedUSD": exposure.total, "wantedUSD": wanted], in: db) }
     }
 
+    /// Queues a stopped task to carry on, and clears why it stopped. Runs have no allowance of their own any more, so the last two arguments (an
+    /// extra allowance an older caller may still send) are ignored; they stay only so those callers keep working.
     func resume(_ id: String, continuingCoding:Bool=false,additionalBudgetUSD:Double?=nil,authorizationID:String?=nil) throws -> [String: Any] {
         let job = try self.job(id)
-        let authorizations=job["budgetAuthorizations"] as? [[String:Any]] ?? []
-        if let authorizationID,let prior=authorizations.first(where:{$0["id"] as? String==authorizationID}) {guard prior["amountUSD"] as? Double==additionalBudgetUSD else{throw BuddyWorkerFailure(message:"The saved allowance differs from this request. Reopen the task to check it before continuing.")};return job}
         guard ["paused", "failed", "interrupted", "waiting_user"].contains(job["status"] as? String ?? "") || (continuingCoding && job["kind"] as? String=="coding" && job["status"] as? String=="completed") else { throw BuddyWorkerFailure(message: "This task can’t be resumed in its current state.") }
-        var fields:[String:Any] = ["status": "queued", "progress": "Queued to continue from saved progress. Check existing external state before any send or submission.", "blockedBy": ""]
-        if let amount=additionalBudgetUSD {
-            guard job["provider"] as? String=="claude",amount.isFinite,(0.1...10).contains(amount),(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0,let authorizationID,UUID(uuidString:authorizationID) != nil,authorizations.count<100 else{throw BuddyWorkerFailure(message:"Choose an additional Claude allowance from $0.10 to $10 for this paused task.")}
-            fields["budgetAuthorizations"]=authorizations+[["id":authorizationID,"amountUSD":amount,"at":ISO8601DateFormatter().string(from:Date())]]
-            fields["uncertainBudgetUSD"]=(job["uncertainBudgetUSD"] as? Double ?? 0)+(job["reservedBudgetUSD"] as? Double ?? 0)
-            fields["reservedBudgetUSD"]=0.0;fields["remainingBudgetUSD"]=amount
-        } else if job["provider"] as? String=="claude",(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0 {
+        var fields:[String:Any] = ["status": "queued", "progress": "Queued to continue from saved progress. Check existing external state before any send or submission.", "blockedBy": "", "stopCause": ""]
+        if job["provider"] as? String=="claude",(job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)<=0 {
             // A task from the time runs had an allowance, stopped with none left: it simply carries on, with no limit.
             fields["remainingBudgetUSD"]=BuddyRunLimit.none;fields["reservedBudgetUSD"]=0.0
         }
         return try update(id,fields,cause:"resume")
+    }
+}
+
+/// How a routine's own recent runs went. Health is judged per routine, so one routine's bad run never freezes the others in its series.
+enum BuddyRoutineHealth {
+    static let attentionError = "The previous run needs attention. Review it before resuming this routine."
+    private static let stopped: Set<String> = ["failed", "interrupted", "paused"]
+    /// A run that stopped by itself, with nothing that may have been sent: the next run can safely happen.
+    static func endedHarmlessly(_ prior: [String: Any]?) -> Bool {
+        guard let prior, stopped.contains(prior["status"] as? String ?? ""), !(prior["stopCause"] as? String ?? "").hasPrefix("user") else { return false }
+        return !(prior["reviews"] as? [[String: Any]] ?? []).contains { ["uncertain", "dispatched"].contains($0["status"] as? String ?? "") }
+    }
+    /// Still being worked on, or waiting to be: another run of the same work would overlap it.
+    static func inFlight(_ job: [String: Any]?) -> Bool {
+        guard let status = job?["status"] as? String else { return false }
+        return !["completed", "cancelled"].contains(status) && !stopped.contains(status)
+    }
+    /// Ended without finishing: stopped, or superseded by another run of the series that did.
+    static func unclean(_ job: [String: Any]) -> Bool {
+        let status = job["status"] as? String ?? ""
+        return stopped.contains(status) || (status == "cancelled" && job["stopCause"] as? String == "superseded")
+    }
+    /// Whether a routine has to wait for someone, from its own runs (oldest first): its last run waits for the person, or stopped in a way that
+    /// is not harmless, or its last three runs in a row did not finish. Runs up to `clearedAfter` (the last run when someone set it going again)
+    /// no longer count toward three in a row.
+    static func needsAttention(_ own: [[String: Any]], clearedAfter: String? = nil) -> Bool {
+        guard let last = own.last else { return false }
+        let status = last["status"] as? String ?? ""
+        if status == "waiting_user" { return (last["checkpoint"] as? [String: Any])?["routedTo"] as? String != "supervisor" }
+        if stopped.contains(status), !endedHarmlessly(last) { return true }
+        var counted = own[...]
+        if let clearedAfter, !clearedAfter.isEmpty, let cut = own.lastIndex(where: { $0["id"] as? String == clearedAfter }) { counted = own[(cut + 1)...] }
+        let recent = counted.suffix(3)
+        return recent.count == 3 && recent.allSatisfy(unclean)
+    }
+}
+
+/// Goals a scheduled run cannot carry out: a background run can use files, the browser and status tools, but cannot start coding sessions or
+/// give teammates work.
+enum BuddyRoutineGoals {
+    static func unsupported(_ goal: String) -> Bool {
+        goal.range(of: #"(?i)\b(buddy_coding_session|buddy_computer_task|start (?:the )?(?:next )?coding session|via check_in|give each agent (?:its|their) next)\b"#, options: .regularExpression) != nil
     }
 }
 
@@ -939,6 +1058,7 @@ struct BuddyAttempt {
                 if index==nil,let model,!model.isEmpty {value["model"]=model}
                 for field in ["title","goal","hour","minute","weekdays","timeZone","query","kind","browserAgentId","browserOrigin"] { if let v=args[field],!(v is NSNull) { value[field]=v } }
                 try Self.validate(value)
+                if BuddyRoutineGoals.unsupported(value["goal"] as? String ?? "") { throw BuddyWorkerFailure(message:"A scheduled run is a background task: it can use files, the browser and status tools, but it cannot start coding sessions or give teammates work. Put team work in the team plan instead.",code:"unsupported_in_background") }
                 let timingChanged=index.map {i in ["hour","minute","weekdays","timeZone"].contains{field in !NSDictionary(dictionary:["value":routines[i][field]!]).isEqual(to:["value":value[field]!])}} ?? true
                 if timingChanged {value["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:value))}
                 if index==nil {value["status"]="active";value["lastError"]=""}
@@ -951,9 +1071,16 @@ struct BuddyAttempt {
             if action=="delete" { routines.remove(at:i);try persist();return ["deleted":true] }
             guard ["pause","resume"].contains(action) else { throw BuddyWorkerFailure(message:"Choose create, update, pause, resume, delete or list.") }
             routines[i]["status"]=action=="pause" ? "paused":"active";routines[i]["lastError"]=""
-            if action=="resume" { routines[i]["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:routines[i])) }
+            if action=="resume" { routines[i]["nextRun"]=try Self.resumedNext(routines[i],now:now);routines[i]["attentionClearedAfter"]=routines[i]["lastTaskID"] as? String ?? "" }
             try persist();return ["saved":true,"routine":routines[i]]
         } catch { routines=old;try? persist();throw error }
+    }
+    /// Where a routine that is set going again picks up: a slot it missed within the last day still runs, once; an older one is skipped, never
+    /// caught up in a burst.
+    static func resumedNext(_ rule:[String:Any],now:Date) throws -> String {
+        let f=ISO8601DateFormatter()
+        if let stamp=rule["nextRun"] as? String,let due=f.date(from:stamp),due<=now,now.timeIntervalSince(due)<24*3600 { return stamp }
+        return f.string(from:try next(after:now,rule:rule))
     }
     func browserScope(for job:[String:Any])->[String:Any]? {
         guard let rule=routines.first(where:{$0["id"] as? String==job["routineID"] as? String && $0["workspace"] as? String==job["workspace"] as? String && $0["agentId"] as? String==job["agentId"] as? String}),let owner=rule["browserAgentId"] as? String,let origin=rule["browserOrigin"] as? String else{return nil}
@@ -980,8 +1107,9 @@ struct BuddyAttempt {
         do {
             for i in routines.indices where routines[i]["status"] as? String=="needs_attention" && routines[i]["workspace"] as? String==job["workspace"] as? String && routines[i]["agentId"] as? String==job["agentId"] as? String {
                 let same=routines[i]["lastTaskID"] as? String==job["id"] as? String || job["routineSeriesID"] != nil && routines[i]["routineSeriesID"] as? String==job["routineSeriesID"] as? String
-                guard same,routines[i]["lastError"] as? String=="The previous run needs attention. Review it before resuming this routine." else{continue}
-                routines[i]["status"]="active";routines[i]["lastError"]="";routines[i]["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:routines[i]))
+                guard same,routines[i]["lastError"] as? String==BuddyRoutineHealth.attentionError else{continue}
+                routines[i]["status"]="active";routines[i]["lastError"]="";routines[i]["nextRun"]=try Self.resumedNext(routines[i],now:now)
+                routines[i]["attentionClearedAfter"]=routines[i]["lastTaskID"] as? String ?? ""
             }
             if !NSArray(array:original).isEqual(to:routines){try persist()}
         } catch {routines=original;throw error}
@@ -989,29 +1117,29 @@ struct BuddyAttempt {
     func enqueueDue(store:BuddyWorkerStore,workspace:String,now:Date=Date()) throws {
         let original=routines
         do {
-            /// A scheduled email check is read-only. If its last run simply failed and left no action uncertain (it ran out of something, or lost its connection), the
-            /// next one should still happen: waiting for the person to review a failed read would silently end the monitoring.
-            func failedHarmlessly(_ prior:[String:Any]?,_ r:[String:Any])->Bool {
-                guard let prior,r["kind"] as? String=="email",prior["status"] as? String=="failed" else {return false}
-                return !(prior["reviews"] as? [[String:Any]] ?? []).contains{["uncertain","dispatched"].contains($0["status"] as? String ?? "")}
-            }
+            /// The latest run of the routine's series (or of the routine): what the next run builds on, and what it must not overlap.
             func lastRun(_ r:[String:Any])->[String:Any]? {
                 let id=r["id"] as? String ?? "",series=r["routineSeriesID"] as? String
                 return store.jobs.last{$0["workspace"] as? String==workspace && $0["agentId"] as? String==r["agentId"] as? String && ($0["routineID"] as? String==id || series != nil && $0["routineSeriesID"] as? String==series)}
             }
-            // Routines that were stopped for exactly that reason are set going again.
-            for i in routines.indices where routines[i]["workspace"] as? String==workspace && routines[i]["status"] as? String=="needs_attention" && routines[i]["lastError"] as? String=="The previous run needs attention. Review it before resuming this routine." && failedHarmlessly(lastRun(routines[i]),routines[i]) {
-                routines[i]["status"]="active";routines[i]["lastError"]="";routines[i]["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:routines[i]))
+            /// The routine's own runs, oldest first. Its health is judged on these alone.
+            func ownRuns(_ r:[String:Any])->[[String:Any]] {
+                let id=r["id"] as? String ?? ""
+                return store.jobs.filter{$0["workspace"] as? String==workspace && $0["agentId"] as? String==r["agentId"] as? String && $0["routineID"] as? String==id}
+            }
+            func healthy(_ r:[String:Any])->Bool { !BuddyRoutineHealth.needsAttention(ownRuns(r),clearedAfter:r["attentionClearedAfter"] as? String) }
+            // Routines that were stopped for exactly that reason are set going again once their own runs no longer need anyone, keeping a slot they
+            // missed in the meantime.
+            for i in routines.indices where routines[i]["workspace"] as? String==workspace && routines[i]["status"] as? String=="needs_attention" && routines[i]["lastError"] as? String==BuddyRoutineHealth.attentionError && healthy(routines[i]) {
+                routines[i]["status"]="active";routines[i]["lastError"]="";routines[i]["nextRun"]=try Self.resumedNext(routines[i],now:now)
             }
             for i in routines.indices where routines[i]["workspace"] as? String==workspace && routines[i]["status"] as? String=="active" {
                 let r=routines[i],id=r["id"] as! String
                 let series=r["routineSeriesID"] as? String
                 let prior=lastRun(r)
-                if let prior,!failedHarmlessly(prior,r) {
-                    let status=prior["status"] as? String ?? ""
-                    if ["failed","interrupted","waiting_user","paused"].contains(status) { routines[i]["status"]="needs_attention";routines[i]["lastError"]="The previous run needs attention. Review it before resuming this routine.";continue }
-                    if !BuddyWorkerStore.terminal.contains(status) { continue }
-                }
+                if !healthy(r) { routines[i]["status"]="needs_attention";routines[i]["lastError"]=BuddyRoutineHealth.attentionError;continue }
+                // The series' latest run only keeps two runs of the same work from overlapping; another routine's stop is not this one's.
+                if BuddyRoutineHealth.inFlight(prior) || BuddyRoutineHealth.inFlight(ownRuns(r).last) { continue }
                 guard let due=r["nextRun"] as? String,let date=ISO8601DateFormatter().date(from:due),date<=now else { continue }
                 let job=try store.create(workspace:workspace,agent:r["agentId"] as! String,requestId:"routine:"+id+":"+due,title:r["title"] as! String,goal:r["goal"] as! String,kind:r["kind"] as! String,provider:r["provider"] as! String,budget:r["provider"] as? String=="claude" ? BuddyRunLimit.none:(r["budgetUSD"] as? Double ?? 0),model:r["model"] as? String)
                 // Queue creation is idempotent if the process dies before saving nextRun.
@@ -1020,7 +1148,9 @@ struct BuddyAttempt {
                 if let owner=r["browserAgentId"] as? String,let origin=r["browserOrigin"] as? String {try store.update(job["id"] as! String,["browserAgentId":owner,"browserOrigin":origin])}
                 routines[i]["lastTaskID"]=job["id"];routines[i]["lastScheduledFor"]=due
                 routines[i]["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:r))
-                if let series {for j in routines.indices where j != i && routines[j]["routineSeriesID"] as? String==series && routines[j]["workspace"] as? String==workspace && routines[j]["agentId"] as? String==r["agentId"] as? String {
+                // Active siblings that also missed their slot move on, so a wake never sends a burst. A paused or parked sibling keeps the slot it
+                // missed, so setting it going again within the day still runs it.
+                if let series {for j in routines.indices where j != i && routines[j]["routineSeriesID"] as? String==series && routines[j]["workspace"] as? String==workspace && routines[j]["agentId"] as? String==r["agentId"] as? String && routines[j]["status"] as? String=="active" {
                     if let stamp=routines[j]["nextRun"] as? String,let missed=ISO8601DateFormatter().date(from:stamp),missed<=now {routines[j]["nextRun"]=ISO8601DateFormatter().string(from:try Self.next(after:now,rule:routines[j]))}
                 }}
             }
@@ -1208,6 +1338,23 @@ enum BuddyAgentChanges {
         let q = normalized(quote)
         return q.count >= 8 && !isFiller(q) && normalized(text).contains(q)
     }
+    /// Whether the person's quoted words are about a spending limit at all: they give an amount and speak of money or a limit. "Try setting up its
+    /// agents again" is a real request, but not one that sets a limit.
+    static func limitQuote(_ quote: String) -> Bool {
+        quote.range(of: #"\d"#, options: .regularExpression) != nil && quote.range(of: #"(?i)\$|dollar|bucks|usd|limit|cap|budget|spend"#, options: .regularExpression) != nil
+    }
+    /// Settings whose narrowing the supervisor, or an agent's manager, may decide on its own judgement. Limits are never among them.
+    static let judgementFields: Set<String> = ["tools.web", "tools.projectFiles", "tools.desktop", "hidden", "model", "proactive", "teamCheckInIntervalMinutes"]
+    /// A change that only takes reach away: a tool switched off, being hidden or shown, a different model, proactive updates off, check-ins less often.
+    static func narrows(field: String, old: Any?, new: Any?) -> Bool {
+        switch field {
+        case "tools.web", "tools.projectFiles", "tools.desktop": return (old as? Bool) != false && (new as? Bool) == false
+        case "hidden", "model": return true
+        case "proactive": return (new as? Bool) == false
+        case "teamCheckInIntervalMinutes": guard let before = number(old), let after = number(new) else { return false }; return after > before
+        default: return false
+        }
+    }
     private static func boolean(_ value: Any?, _ field: String) throws -> Bool {
         if let flag = value as? Bool { return flag }
         if let text = value as? String, ["true", "on", "yes"].contains(text.lowercased()) { return true }
@@ -1354,13 +1501,28 @@ extension BuddyWorkerStore {
         }
     }
     /// A question or notice that is not about a task (a change waiting for the person's OK, a rule that has earned its freedom).
-    func openDecision(workspace: String, id: String, agent: String, kind: String, title: String, question: String, label: String, payload: [String: Any]) throws {
-        guard ["confirm", "notice"].contains(kind) else { throw BuddyWorkerFailure(message: "Unknown kind of notice.") }
-        try db.run("INSERT OR IGNORE INTO decisions(id, workspace, agent_id, task_id, kind, title, question, label, payload, created_at) VALUES(?, ?, ?, '', ?, ?, ?, ?, ?, ?)",
-                   [.text(id), .text(workspace), .text(agent), .text(kind), .text(String(title.prefix(300))), .text(String(question.prefix(1200))), .text(label), .text((try? BuddyOperationsDB.encode(payload)) ?? "{}"), .text(Self.stamp())])
+    /// `audience` is who has to act on it: "user" (the person) or "supervisor".
+    func openDecision(workspace: String, id: String, agent: String, kind: String, title: String, question: String, label: String, payload: [String: Any], audience: String = "user") throws {
+        guard ["confirm", "notice", "escalation"].contains(kind) else { throw BuddyWorkerFailure(message: "Unknown kind of notice.") }
+        guard ["user", "supervisor"].contains(audience) else { throw BuddyWorkerFailure(message: "A notice is for the user or the supervisor.", code: "invalid_input") }
+        try db.run("INSERT OR IGNORE INTO decisions(id, workspace, agent_id, task_id, kind, title, question, label, payload, created_at, audience) VALUES(?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)",
+                   [.text(id), .text(workspace), .text(agent), .text(kind), .text(String(title.prefix(300))), .text(String(question.prefix(1200))), .text(label), .text((try? BuddyOperationsDB.encode(payload)) ?? "{}"), .text(Self.stamp()), .text(audience)])
     }
     func closeDecision(id: String, resolution: String) throws {
         try db.run("UPDATE decisions SET status = 'resolved', resolution = ?, resolved_at = ? WHERE id = ? AND status = 'open'", [.text(resolution), .text(Self.stamp()), .text(id)])
+    }
+    /// Someone (the person, or an agent such as the supervisor) settled an open entry. A blocker that a task's state implies stays settled until that
+    /// state changes; resolving one that is already resolved changes nothing.
+    func resolveDecision(id: String, by: String, resolution: String) throws {
+        guard !id.isEmpty, !by.isEmpty, by.count <= 200, !resolution.isEmpty, resolution.count <= 200 else { throw BuddyWorkerFailure(message: "Say which entry, who resolved it and how.", code: "invalid_input") }
+        try db.transaction {
+            guard let row = try db.rows("SELECT task_id, status FROM decisions WHERE id = ?", [.text(id)]).first else { throw BuddyWorkerFailure(message: "This entry is no longer available.", code: "not_found") }
+            guard row[1].string == "open" else { return }
+            try db.run("UPDATE decisions SET status = 'resolved', resolution = ?, resolved_by = ?, resolved_at = ? WHERE id = ? AND status = 'open'", [.text(resolution), .text(by), .text(Self.stamp()), .text(id)])
+            if let taskID = row[0].string, !taskID.isEmpty, let task = jobs.first(where: { $0["id"] as? String == taskID }) {
+                try Self.appendEvent("decision.resolved", task: task, attempt: task["attempt"] as? Int, cause: resolution, payload: ["id": id, "by": by], in: db)
+            }
+        }
     }
 
     // MARK: rules
@@ -1371,18 +1533,22 @@ extension BuddyWorkerStore {
         return BuddyRule(id: id, workspace: row[1].string ?? "", agentID: row[2].string ?? "", kind: row[3].string ?? "", text: row[4].string ?? "", quote: row[5].string ?? "", params: (try? BuddyOperationsDB.decode(row[6].string ?? "{}")) ?? [:],
                          status: row[7].string ?? "", graduated: row[8].int == 1, actor: row[9].string ?? "", createdAt: row[10].string ?? "")
     }
-    func addRule(workspace: String, agent: String, text: String, quote: String, params: [String: Any], status: String, actor: String) throws -> String {
+    /// `kind` is "review_gate" (a check the person asked for) or "directive" (how the person wants the agent, or with `agent` set to the workspace
+    /// id the whole team, to work).
+    func addRule(workspace: String, agent: String, text: String, quote: String, params: [String: Any], status: String, actor: String, kind: String = "review_gate") throws -> String {
         guard UUID(uuidString: workspace) != nil, UUID(uuidString: agent) != nil, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 600 else { throw BuddyWorkerFailure(message: "Give the rule in plain words, up to 600 characters.") }
+        guard ["review_gate", "directive"].contains(kind) else { throw BuddyWorkerFailure(message: "Unknown kind of rule.", code: "invalid_input") }
         guard try db.rows("SELECT COUNT(*) FROM rules WHERE workspace = ? AND agent_id = ? AND status <> 'revoked'", [.text(workspace), .text(agent)]).first?.first?.int ?? 0 < 30 else { throw BuddyWorkerFailure(message: "This agent already has 30 rules. Remove one first.") }
         let id = UUID().uuidString, now = Self.stamp()
-        try db.run("INSERT INTO rules(id, workspace, agent_id, kind, text, quote, params, status, graduated, actor, created_at, updated_at) VALUES(?, ?, ?, 'review_gate', ?, ?, ?, ?, 0, ?, ?, ?)",
-                   [.text(id), .text(workspace), .text(agent), .text(text), .text(String(quote.prefix(500))), .text((try? BuddyOperationsDB.encode(params)) ?? "{}"), .text(status), .text(actor), .text(now), .text(now)])
+        try db.run("INSERT INTO rules(id, workspace, agent_id, kind, text, quote, params, status, graduated, actor, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+                   [.text(id), .text(workspace), .text(agent), .text(kind), .text(text), .text(String(quote.prefix(500))), .text((try? BuddyOperationsDB.encode(params)) ?? "{}"), .text(status), .text(actor), .text(now), .text(now)])
         return id
     }
     func rule(_ id: String) throws -> BuddyRule? { try db.rows("SELECT \(Self.ruleColumns) FROM rules WHERE id = ?", [.text(id)]).first.flatMap(Self.rule) }
+    /// The rules for one agent include the team's (stored under the workspace id), oldest first.
     func rules(workspace: String, agent: String? = nil, includeRevoked: Bool = false) throws -> [BuddyRule] {
-        let all = try db.rows("SELECT \(Self.ruleColumns) FROM rules WHERE workspace = ? ORDER BY created_at", [.text(workspace)]).compactMap(Self.rule)
-        return all.filter { (agent == nil || $0.agentID == agent) && (includeRevoked || $0.status != "revoked") }
+        let all = try db.rows("SELECT \(Self.ruleColumns) FROM rules WHERE workspace = ? ORDER BY created_at, rowid", [.text(workspace)]).compactMap(Self.rule)
+        return all.filter { (agent == nil || $0.agentID == agent || $0.agentID == workspace) && (includeRevoked || $0.status != "revoked") }
     }
     func setRule(_ id: String, status: String) throws {
         guard ["pending", "active", "paused", "revoked"].contains(status) else { throw BuddyWorkerFailure(message: "Unknown rule state.") }
@@ -1425,7 +1591,11 @@ extension BuddyWorkerStore {
     /// Standing rules as the agent is told them. They are also enforced natively; the telling only lets the agent do its part (showing the work).
     func rulesGuidance(workspace: String, agent: String) -> String {
         guard let all = try? rules(workspace: workspace, agent: agent).filter({ $0.status == "active" }), !all.isEmpty else { return "" }
-        let lines = all.map { rule -> String in
+        let directives = all.filter { $0.kind == "directive" }.reversed().map { (quote: $0.quote, rule: $0.text) }, gates = all.filter { $0.kind != "directive" }
+        var parts: [String] = []
+        if !directives.isEmpty { parts.append(BuddyRulesReader.directives(directives)) }
+        guard !gates.isEmpty else { return parts.joined(separator: "\n\n") }
+        let lines = gates.map { rule -> String in
             var line = "- [\(rule.id.prefix(8))] \(rule.text)"
             if rule.relaxes && rule.reviewFirst > 0 {
                 let done = (try? approvals(rule: rule.id)) ?? 0
@@ -1434,16 +1604,26 @@ extension BuddyWorkerStore {
             }
             return line
         }
-        return "Standing rules from the user for you (they are enforced natively; follow them exactly):\n" + lines.joined(separator: "\n")
+        parts.append("Standing rules from the user for you (they are enforced natively; follow them exactly):\n" + lines.joined(separator: "\n"))
+        return parts.joined(separator: "\n\n")
     }
 }
 
 /// The standing rules a reader outside the worker needs: the guidance an agent is told. Read-only.
 enum BuddyRulesReader {
+    /// The person's standing directives, newest first, as every agent is told them: ahead of everything else, and above the saved configuration.
+    static func directives(_ items: [(quote: String, rule: String)]) -> String {
+        "Standing directives from the user, newest first. They are newer than your saved configuration and override it wherever they conflict:\n"
+            + items.map { $0.quote.isEmpty ? "- \($0.rule)" : "- “\($0.quote)” → \($0.rule)" }.joined(separator: "\n")
+    }
     @MainActor static func guidance(support: URL, workspace: String, agent: String) -> String {
         let directory = support.appendingPathComponent("Worker")
         guard FileManager.default.fileExists(atPath: directory.appendingPathComponent(BuddyOperationsDB.fileName).path), let db = try? BuddyOperationsDB(directory: directory, existing: true),
-              let rows = try? db.rows("SELECT id, text, params, graduated FROM rules WHERE workspace = ? AND agent_id = ? AND status = 'active' ORDER BY created_at", [.text(workspace), .text(agent)]), !rows.isEmpty else { return "" }
+              let all = try? db.rows("SELECT id, text, params, graduated, kind, quote FROM rules WHERE workspace = ? AND agent_id IN (?, ?) AND status = 'active' ORDER BY created_at, rowid", [.text(workspace), .text(agent), .text(workspace)]), !all.isEmpty else { return "" }
+        let directives = all.filter { $0[4].string == "directive" }.reversed().map { (quote: $0[5].string ?? "", rule: $0[1].string ?? "") }, rows = all.filter { $0[4].string != "directive" }
+        var parts: [String] = []
+        if !directives.isEmpty { parts.append(Self.directives(directives)) }
+        guard !rows.isEmpty else { return parts.joined(separator: "\n\n") }
         let lines = rows.map { row -> String in
             let id = row[0].string ?? "", params = (try? BuddyOperationsDB.decode(row[2].string ?? "{}")) ?? [:], first = params["reviewFirst"] as? Int ?? 0, graduated = row[3].int == 1
             var line = "- [\(id.prefix(8))] \(row[1].string ?? "")"
@@ -1453,7 +1633,8 @@ enum BuddyRulesReader {
             }
             return line
         }
-        return "Standing rules from the user for you (they are enforced natively; follow them exactly):\n" + lines.joined(separator: "\n")
+        parts.append("Standing rules from the user for you (they are enforced natively; follow them exactly):\n" + lines.joined(separator: "\n"))
+        return parts.joined(separator: "\n\n")
     }
 }
 
@@ -1522,12 +1703,23 @@ enum BuddyRulesReader {
         return target
     }
 
+    /// Whether `actor` oversees `target`: the supervisor oversees everyone and the workspace, a manager the agents it manages.
+    private func oversees(_ actor: String, scope: String, target: String) throws -> Bool {
+        guard !actor.isEmpty else { return false }
+        if supervisor() == actor { return true }
+        guard scope == "agent" else { return false }
+        return try agents().first { $0["id"] as? String == target }?["managedBy"] as? String == actor
+    }
     func change(actor: String?, text: String, args: [String: Any], source: String? = nil) throws -> [String: Any] {
         let scope = args["scope"] as? String ?? "agent"
         guard ["agent", "workspace"].contains(scope) else { throw fail("Choose agent or workspace.") }
         let target = try targetAgent(args, actor: actor, scope: scope), quote = args["quote"] as? String ?? ""
-        try authorize(actor: actor, text: text, quote: quote, scope: scope, target: target)
         let field = args["field"] as? String ?? ""
+        // The supervisor, or a teammate's manager, may narrow that teammate's reach on its own judgement, without the person's words. Its own
+        // settings, anything that widens, and every limit still need them.
+        var judgement = false
+        if let actor, actor != target, BuddyAgentChanges.judgementFields.contains(field), !BuddyAgentChanges.quoteAuthorized(quote, in: text), try oversees(actor, scope: scope, target: target) { judgement = true }
+        if !judgement { try authorize(actor: actor, text: text, quote: quote, scope: scope, target: target) }
         var wantedValue = args["value"]
         if field == "teamSupervisor" {
             // The person says who by name; the setting holds the agent's id.
@@ -1540,9 +1732,13 @@ enum BuddyRulesReader {
         if field == "name", let wanted = new as? String, try agents().contains(where: { $0["id"] as? String != target && ($0["name"] as? String)?.lowercased() == wanted.lowercased() }) { throw fail("Another agent already has that name. Choose a different one.") }
         let old = try current(scope, target, field)
         if same(old, new) { return ["saved": true, "unchanged": true, "message": "That is already the setting: " + line(scope, target, field, from: old, to: new)] }
-        let by = actor == nil ? "user" : "chat", risk = actor == nil ? "low" : BuddyAgentChanges.risk(field: field, old: old, new: new), origin = source ?? (actor == nil ? "screen" : "chat")
+        if judgement, !BuddyAgentChanges.narrows(field: field, old: old, new: new) { try authorize(actor: actor, text: text, quote: quote, scope: scope, target: target) }
+        let by = actor == nil ? "user" : "chat", risk = actor == nil || judgement ? "low" : BuddyAgentChanges.risk(field: field, old: old, new: new)
+        let origin = source ?? (judgement ? "supervisor-judgement" : actor == nil ? "screen" : "chat"), said = judgement ? "" : quote
+        // Only the person sets a daily limit: an agent adding or lowering one has to quote the person's own words about it, with the amount.
+        if actor != nil, ["dailyLimitUSD", "teamDailyLimitUSD"].contains(field), risk != "confirm", !BuddyAgentChanges.limitQuote(said) { throw fail("Quote the user's own words that set this limit, with the amount.") }
         if risk == "confirm" {
-            let id = try store.recordChange(workspace: workspace, scope: scope, agent: target, field: field, old: old, new: new, actor: by, source: origin, quote: quote, status: "pending", risk: risk)
+            let id = try store.recordChange(workspace: workspace, scope: scope, agent: target, field: field, old: old, new: new, actor: by, source: origin, quote: said, status: "pending", risk: risk)
             try store.openDecision(workspace: workspace, id: "change:" + id, agent: target, kind: "confirm", title: "Allow this change?", question: "You asked for this in chat: " + line(scope, target, field, from: old, to: new) + ". It gives more access or room to spend, so it waits for your OK.", label: "Allow", payload: ["changeId": id])
             announce()
             return ["saved": false, "needsConfirmation": true, "changeId": id, "message": "This gives more access or room to spend, so nothing has changed yet. A card in Notifications is waiting for the user’s OK. Do not say it is done."]
@@ -1550,8 +1746,8 @@ enum BuddyRulesReader {
         // A setting the app itself holds is written after the journal entry says "applying" and confirmed after, so being stopped half way is
         // sorted out by reconcile(). A field someone else carries home is applied by the entry itself.
         let direct = BuddyAgentChanges.adopter(scope: scope, field: field).isEmpty
-        let id = try store.recordChange(workspace: workspace, scope: scope, agent: target, field: field, old: old, new: new, actor: by, source: origin, quote: quote, status: direct ? "applying" : "applied", risk: risk)
-        if direct { do { try put(scope, target, field, new, by: by, quote: quote); try store.setChange(id, status: "applied") } catch { try? store.setChange(id, status: "failed"); throw error } }
+        let id = try store.recordChange(workspace: workspace, scope: scope, agent: target, field: field, old: old, new: new, actor: by, source: origin, quote: said, status: direct ? "applying" : "applied", risk: risk)
+        if direct { do { try put(scope, target, field, new, by: by, quote: said); try store.setChange(id, status: "applied") } catch { try? store.setChange(id, status: "failed"); throw error } }
         announce()
         return ["saved": true, "changeId": id, "canUndo": true, "message": "Done. " + line(scope, target, field, from: old, to: new) + ". It can be undone from the agent’s settings or by asking."]
     }
@@ -1626,6 +1822,7 @@ enum BuddyRulesReader {
         return out
     }
     func addRule(actor: String?, text: String, args: [String: Any]) throws -> [String: Any] {
+        if args["kind"] as? String == "directive" { return try addDirective(actor: actor, text: text, args: args) }
         let target = try targetAgent(args, actor: actor, scope: "agent"), quote = args["quote"] as? String ?? ""
         try authorize(actor: actor, text: text, quote: quote, scope: "agent", target: target)
         guard let rule = (args["rule"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), rule.count >= 8, rule.count <= 600 else { throw fail("Write the rule in plain words, 8 to 600 characters.") }
@@ -1648,6 +1845,20 @@ enum BuddyRulesReader {
         let detail = proceed ? "The first \(first) time\(first == 1 ? "" : "s"), \(name(of: target)) will show you the work first and wait for your OK (a card appears in Notifications). Once you have approved \(first), \(name(of: target)) continues at that step without asking. Sign-ins, passwords, payments and emails still always ask."
                                 : "\(name(of: target)) will show you the work first every time."
         return ["saved": true, "ruleId": id, "message": "Saved for \(name(of: target)): “\(rule)”. " + detail, "checkpointInstruction": "Before you begin the covered work, call buddy_review_checkpoint with rule \"\(id)\"."]
+    }
+    /// A standing directive: how the person wants an agent (scope "agent") or the whole team (scope "team", recorded by the supervisor) to work, in
+    /// their own quoted words. It is told first, above the agent's saved configuration, and never relaxes a check.
+    private func addDirective(actor: String?, text: String, args: [String: Any]) throws -> [String: Any] {
+        let scope = args["scope"] as? String ?? "agent", quote = args["quote"] as? String ?? ""
+        guard ["agent", "team"].contains(scope) else { throw fail("Choose agent or team for a directive.") }
+        let target: String
+        if scope == "team" { try authorize(actor: actor, text: text, quote: quote, scope: "workspace", target: ""); target = workspace }
+        else { target = try targetAgent(args, actor: actor, scope: "agent"); try authorize(actor: actor, text: text, quote: quote, scope: "agent", target: target) }
+        guard let rule = (args["rule"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), rule.count >= 8, rule.count <= 600 else { throw fail("Write the directive in plain words, 8 to 600 characters.") }
+        let id = try store.addRule(workspace: workspace, agent: target, text: rule, quote: quote, params: ["scope": scope], status: "active", actor: actor == nil ? "user" : "chat", kind: "directive")
+        announce()
+        let who = scope == "team" ? "the whole team" : name(of: target)
+        return ["saved": true, "ruleId": id, "message": "Saved as a standing directive for \(who): “\(rule)”. It is told first, above saved instructions. It never relaxes a check that needs the person."]
     }
     func manageRule(actor: String?, text: String, args: [String: Any]) throws -> [String: Any] {
         guard let id = args["ruleId"] as? String, let rule = try store.rule(id), rule.workspace == workspace, rule.status != "revoked" else { throw fail("Choose a rule from the list.") }

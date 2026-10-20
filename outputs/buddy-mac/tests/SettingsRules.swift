@@ -298,5 +298,74 @@ import Foundation
         require(undoBack["saved"] as? Bool == true && world.supervisorID == sage, "the newest hand-over can be undone")
 
         print("PASS: settings change only on the person’s own quoted words and only by someone allowed to; each value is checked; every change keeps old and new and can be undone newest-first; access and spending increases wait for one tap; readers see changes before they are carried home; interrupted changes are sorted out; standing rules count only the person’s approvals, once each, earn their freedom at the number asked, apply to the right agent, kind and workspace, and can be paused, restarted or removed")
+
+        // 17. A daily limit is set only on the person's own words about it, with the amount.
+        let money = try World(support: root.appendingPathComponent("c"))
+        require(refuses("a limit on words about something else") { _ = try money.say(money.chief, "try setting up its agents again", ["agentId": money.mia, "field": "dailyLimitUSD", "value": 10, "quote": "try setting up its agents again"]) }, "words that are not about money cannot set a limit")
+        require(refuses("an own limit on words about something else") { _ = try money.say(money.sage, "try setting up its agents again", ["field": "dailyLimitUSD", "value": 10, "quote": "try setting up its agents again"]) }, "not even an agent's own")
+        require(try money.store.limits(workspace: money.w).isEmpty, "and nothing was set")
+        let bucks = (try? money.say(money.chief, "Spending limits should be 10 bucks a day", ["agentId": money.mia, "field": "dailyLimitUSD", "value": 10, "quote": "Spending limits should be 10 bucks a day"])) ?? [:]
+        let bucksSet = try money.store.limits(workspace: money.w).contains { $0["id"] as? String == money.mia && $0["amountUSD"] as? Double == 10.0 }
+        require(bucks["saved"] as? Bool == true && bucksSet, "the person's own words with the amount set it: \(bucks)")
+        require(refuses("lowering on words with no amount") { _ = try money.say(money.chief, "Please lower the cap for Mia", ["agentId": money.mia, "field": "dailyLimitUSD", "value": 5, "quote": "Please lower the cap for Mia"]) }, "lowering also needs the amount in the person's words")
+        require(refuses("a limit on the supervisor's judgement") { _ = try money.say(money.chief, "", ["agentId": money.mia, "field": "dailyLimitUSD", "value": 5]) }, "a limit is never the supervisor's own judgement")
+        require(refuses("a team limit on words about something else") { _ = try money.say(money.chief, "make the check-ins work again please", ["scope": "workspace", "field": "teamDailyLimitUSD", "value": 1, "quote": "make the check-ins work again please"]) }, "nor the team's")
+        let raise = try money.say(money.chief, "Raise Mia's limit to $20", ["agentId": money.mia, "field": "dailyLimitUSD", "value": 20, "quote": "Raise Mia's limit to $20"])
+        require(raise["needsConfirmation"] as? Bool == true, "raising one still waits for the person")
+
+        // 18. The supervisor, or an agent's manager, may narrow its access on their own judgement; widening it still needs the person.
+        let judged = try World(support: root.appendingPathComponent("d"))
+        _ = try judged.say(nil, "", ["agentId": judged.mia, "field": "tools.desktop", "value": true])
+        let off = (try? judged.say(judged.chief, "", ["agentId": judged.mia, "field": "tools.desktop", "value": false])) ?? [:]
+        require(off["saved"] as? Bool == true && off["canUndo"] as? Bool == true, "the supervisor turns a teammate's Mac access off without a quote: \(off)")
+        let offChange = (off["changeId"] as? String).flatMap { try? judged.store.change($0) }
+        require(offChange?.source == "supervisor-judgement" && offChange?.quote == "" && offChange?.risk == "low" && offChange?.status == "applied", "it is recorded as the supervisor's own judgement: \(String(describing: offChange?.source))")
+        require(try judged.engine.list(agent: judged.mia).contains { $0["id"] as? String == off["changeId"] as? String && $0["canUndo"] as? Bool == true }, "and it can be undone")
+        let backOn = try? judged.say(judged.chief, "", ["agentId": judged.mia, "field": "tools.desktop", "value": true])
+        require(backOn == nil || backOn?["saved"] as? Bool == false, "turning it back on is never the supervisor's judgement")
+        let hide = (try? judged.say(judged.sage, "", ["agentId": judged.rex, "field": "hidden", "value": true])) ?? [:]
+        let show = (try? judged.say(judged.sage, "", ["agentId": judged.rex, "field": "hidden", "value": false])) ?? [:]
+        require(hide["saved"] as? Bool == true && show["saved"] as? Bool == true, "a manager may hide or show the agent it manages")
+        let modelByJudgement = (try? judged.say(judged.chief, "", ["agentId": judged.sage, "field": "model", "value": "{\"provider\":\"claude\",\"model\":\"claude-haiku-5-5\"}"])) ?? [:]
+        require(modelByJudgement["saved"] as? Bool == true, "the supervisor may change a teammate's model")
+        _ = try judged.say(nil, "", ["agentId": judged.mia, "field": "proactive", "value": true])
+        let quiet = (try? judged.say(judged.chief, "", ["agentId": judged.mia, "field": "proactive", "value": false])) ?? [:]
+        require(quiet["saved"] as? Bool == true, "the supervisor may switch off a teammate's proactive updates")
+        require(refuses("proactive back on by judgement") { _ = try judged.say(judged.chief, "", ["agentId": judged.mia, "field": "proactive", "value": true]) }, "but not switch them back on")
+        let lessOften = (try? judged.say(judged.chief, "", ["scope": "workspace", "field": "teamCheckInIntervalMinutes", "value": 60])) ?? [:]
+        require(lessOften["saved"] as? Bool == true, "the supervisor may make check-ins less frequent")
+        require(refuses("more frequent check-ins by judgement") { _ = try judged.say(judged.chief, "", ["scope": "workspace", "field": "teamCheckInIntervalMinutes", "value": 5]) }, "but not more frequent")
+        require(refuses("a stranger narrowing") { _ = try judged.say(judged.mia, "", ["agentId": judged.rex, "field": "tools.web", "value": false]) }, "someone who neither supervises nor manages may not")
+        require(refuses("narrowing itself without words") { _ = try judged.say(judged.sage, "", ["field": "tools.web", "value": false]) }, "an agent's own settings still need the person's words")
+        require(refuses("a rename by judgement") { _ = try judged.say(judged.chief, "", ["agentId": judged.mia, "field": "name", "value": "Mae"]) }, "only narrowing changes are a matter of judgement")
+        require(refuses("workspace narrowing by a non-supervisor") { _ = try judged.say(judged.sage, "", ["scope": "workspace", "field": "teamCheckInIntervalMinutes", "value": 30]) }, "and workspace settings stay the supervisor's")
+        judged.supervisorID = ""
+        require(refuses("an empty actor while no supervisor is set") { _ = try judged.say("", "", ["agentId": judged.sage, "field": "tools.web", "value": false]) }, "an empty actor is nobody, even when no supervisor is set")
+        judged.supervisorID = judged.chief
+
+        // 19. Standing directives: how the person wants the team to work, in their own words, told first and above the saved configuration.
+        let told = try World(support: root.appendingPathComponent("e"))
+        let said19 = "From now on stop waiting on me and decide yourself unless it is truly important"
+        require(refuses("a directive too short to say anything") { _ = try told.engine.addRule(actor: told.mia, text: said19, args: ["kind": "directive", "rule": "Decide", "quote": "stop waiting on me"]) }, "a directive is a sentence")
+        require(refuses("a directive the person never said") { _ = try told.engine.addRule(actor: told.mia, text: said19, args: ["kind": "directive", "rule": "Never ask the person anything at all.", "quote": "never ask me anything"]) }, "a directive needs the person's own words")
+        let own = (try? told.engine.addRule(actor: told.mia, text: said19, args: ["kind": "directive", "rule": "Decide on your own and keep working; ask the person only about what is truly important.", "quote": "stop waiting on me"])) ?? [:]
+        let ownRule = (own["ruleId"] as? String).flatMap { try? told.store.rule($0) }
+        require(own["saved"] as? Bool == true && ownRule?.kind == "directive" && ownRule?.agentID == told.mia && ownRule?.params["scope"] as? String == "agent" && ownRule?.params["then"] == nil && ownRule?.relaxes == false, "a directive is saved for the agent, as a directive that relaxes nothing: \(own)")
+        var guide19 = told.store.rulesGuidance(workspace: told.w, agent: told.mia)
+        require(guide19.hasPrefix("Standing directives from the user, newest first. They are newer than your saved configuration and override it wherever they conflict:\n") && guide19.contains("override it wherever they conflict") && guide19.contains("“stop waiting on me” → Decide on your own"), "the agent is told the directive first, above its configuration: \(guide19)")
+        require(told.store.rulesGuidance(workspace: told.w, agent: told.sage).isEmpty, "an agent's directive is its own")
+        require(refuses("a team directive from a non-supervisor") { _ = try told.engine.addRule(actor: told.mia, text: "Everyone: stop mentioning the assessments unless something changed", args: ["kind": "directive", "scope": "team", "rule": "Do not repeat an assessment that has not changed.", "quote": "stop mentioning the assessments unless something changed"]) }, "a team directive is the supervisor's to record")
+        let team = (try? told.engine.addRule(actor: told.chief, text: "Everyone: stop mentioning the assessments unless something changed", args: ["kind": "directive", "scope": "team", "rule": "Do not repeat an assessment that has not changed.", "quote": "stop mentioning the assessments unless something changed"])) ?? [:]
+        require(team["saved"] as? Bool == true && (team["ruleId"] as? String).flatMap { try? told.store.rule($0) }?.agentID == told.w, "a team directive belongs to the whole workspace: \(team)")
+        guide19 = told.store.rulesGuidance(workspace: told.w, agent: told.sage)
+        require(guide19.contains("“stop mentioning the assessments unless something changed” → Do not repeat an assessment that has not changed."), "a team directive shows in another agent's guidance: \(guide19)")
+        require(BuddyRulesReader.guidance(support: told.support, workspace: told.w, agent: told.sage).contains("“stop mentioning the assessments unless something changed” → Do not repeat"), "and in what the chat reads")
+        _ = try told.engine.addRule(actor: nil, text: "", args: ["agentId": told.mia, "rule": "Always show me the cover letter first."])
+        for (label, text) in [("worker", told.store.rulesGuidance(workspace: told.w, agent: told.mia)), ("chat", BuddyRulesReader.guidance(support: told.support, workspace: told.w, agent: told.mia))] {
+            let teamAt = text.range(of: "stop mentioning")?.lowerBound, ownAt = text.range(of: "stop waiting on me")?.lowerBound, reviewAt = text.range(of: "Standing rules from the user for you")?.lowerBound
+            require(teamAt != nil && ownAt != nil && reviewAt != nil && teamAt! < ownAt! && ownAt! < reviewAt! && text.contains("Always show me the cover letter first."), "\(label): directives come first, newest first, and review rules follow unchanged: \(text)")
+        }
+        require(try told.store.autoApprovingRule(for: ["workspace": told.w, "agentId": told.mia, "kind": "applications", "checkpoints": [own["ruleId"] as? String ?? ""]]) == nil && told.store.reviewRules(workspace: told.w, agent: told.mia, kind: "applications").isEmpty, "a directive never lets anything through a check")
+        print("PASS: limits only on the person's words with an amount; the supervisor or a manager may narrow a teammate's access on their own judgement, recorded and undoable, never widen it or touch a limit; directives for an agent or the team are told first, newest first, above the saved configuration")
     }
 }

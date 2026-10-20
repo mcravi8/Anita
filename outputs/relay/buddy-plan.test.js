@@ -1,0 +1,105 @@
+const {test}=require('node:test'),assert=require('node:assert/strict'),P=require('./buddy-plan');
+// Fixtures follow the plan summary the worker puts in its status reply (C-7) and the pulse beside it (C-8).
+const NOW=Date.parse('2026-10-19T10:30:00Z'),names={chief:'Chief',lyra:'Lyra',forge:'Forge'};
+const task=(id,status,extra={})=>({id,title:'Task '+id,assignee:'lyra',kind:'research',status,workerTaskId:'',workerStatus:'',blockedOn:'none',resultSummary:'',updatedAt:'2026-10-19T10:00:00Z',...extra});
+const stage=(n,status,tasks=[])=>({id:'s'+n,n,title:['Research','Build','Launch'][n-1],goal:'Goal of stage '+n,acceptance:['Criterion '+n+'a','Criterion '+n+'b'],status,tasks});
+const plan=(status,run,extra={})=>({id:'p1',groupId:'team',objective:'Ship the portfolio',supervisorId:'chief',status,revision:1,scope:null,notices:[],
+ stages:[stage(1,'proposed',[task('t1','pending'),task('t2','pending',{assignee:'forge'}),task('t3','pending')]),stage(2,'proposed'),stage(3,'proposed')],run:{working:[],needsYou:0,idleSince:null,...run},...extra});
+const scope={through:1,quote:'get stage 1 done',at:'2026-10-19T09:00:00Z',status:'active'};
+const active=(stage1,run,extra={})=>plan('active',run,{scope,stages:[stage(1,'working',stage1),stage(2,'proposed'),stage(3,'proposed')],...extra});
+const pulse=agents=>({agents,queuePaused:false,privateSignIn:null,idleSince:null});
+
+test('the banner says in plain words what is happening for every state of a plan',()=>{
+ assert.equal(P.banner(plan('draft',{state:'draft'}),pulse({}),names,NOW),'Plan ready — which stage should the team get done?');
+ const working=active([task('t1','done'),task('t2','dispatched',{assignee:'forge',workerTaskId:'w2',workerStatus:'running',updatedAt:'2026-10-19T10:18:00Z'}),task('t3','pending')],{state:'working',working:[{agentId:'forge',title:'Task t2',since:'2026-10-19T10:18:00Z'}]});
+ assert.equal(P.banner(working,pulse({forge:{state:'working',taskId:'w2',title:'Task t2',since:'2026-10-19T10:18:00Z'}}),names,NOW),'Working on Stage 1 of 3 — 1 of 3 tasks done — Forge is working on “Task t2” (12 min)');
+ assert.equal(P.banner(working,pulse({}),names,Date.parse('2026-10-19T11:23:00Z')),'Working on Stage 1 of 3 — 1 of 3 tasks done — Forge is working on “Task t2” (1 h 5 min)','longer work reads in hours');
+ const two=active([task('t1','dispatched',{workerTaskId:'w1'}),task('t2','dispatched',{assignee:'forge',workerTaskId:'w2'}),task('t3','pending')],{state:'working'});
+ assert.match(P.banner(two,pulse({}),names,NOW),/Lyra is working on “Task t1” \(30 min\), plus 1 more$/);
+ const review=active([task('t1','review',{resultSummary:'Found five sources.'}),task('t2','pending'),task('t3','pending')],{state:'waiting_on_supervisor'});
+ assert.equal(P.banner(review,pulse({}),names,NOW),'Chief is reviewing “Task t1”');
+ assert.equal(P.banner(review,pulse({}),{},NOW),'Chief is reviewing “Task t1”','the supervisor is called Chief when the name is unknown');
+ const checking=plan('active',{state:'waiting_on_supervisor'},{scope,stages:[stage(1,'review',[task('t1','done')]),stage(2,'proposed')]});
+ assert.equal(P.banner(checking,pulse({}),names,NOW),'Chief is checking that Stage 1 is done');
+ const needs=active([task('t1','blocked',{blockedOn:'user',title:'Sign in to the portal'}),task('t2','pending'),task('t3','pending')],{state:'needs_you',needsYou:1});
+ assert.equal(P.banner(needs,pulse({}),names,NOW),'Needs you (1): “Sign in to the portal” (Lyra)');
+ const escalated=active([task('t1','dispatched'),task('t2','pending'),task('t3','pending')],{state:'needs_you',needsYou:2},{notices:[{id:'e1',kind:'escalation',text:'Should I spend $40 on the domain? I recommend yes.',chat:true,status:'open',at:'2026-10-19T10:00:00Z'}]});
+ assert.equal(P.banner(escalated,pulse({}),names,NOW),'Needs you (2): Should I spend $40 on the domain? I recommend yes.');
+ const retry=active([task('t1','dispatched',{workerTaskId:'w1',blockedOn:'retry'}),task('t2','pending'),task('t3','pending')],{state:'working',working:[{agentId:'lyra',title:'Task t1',since:'2026-10-19T10:00:00Z'}]});
+ assert.equal(P.banner(retry,pulse({lyra:{state:'retrying',taskId:'w1'}}),names,NOW),'Retrying “Task t1”');
+ const holding=plan('holding',{state:'stage_done'},{scope:{...scope,status:'achieved'},stages:[stage(1,'done',[task('t1','done')]),stage(2,'proposed'),stage(3,'proposed')]});
+ assert.equal(P.banner(holding,pulse({}),names,NOW),'Stage 1 is done — what next?');
+ const idle=active([task('t1','done'),task('t2','pending'),task('t3','pending')],{state:'idle',idleSince:'2026-10-19T10:05:00Z'});
+ assert.match(P.banner(idle,pulse({}),names,NOW),/^Idle since \S.* — nothing queued$/);
+ const stopped=plan('holding',{state:'stopped'},{stages:[stage(1,'working',[task('t1','done')]),stage(2,'proposed')]});
+ assert.match(P.banner(stopped,pulse({}),names,NOW),/^Stopped — nothing new will start/);
+ const finished=plan('achieved',{state:'stage_done'},{stages:[stage(1,'done'),stage(2,'done'),stage(3,'done')]});
+ assert.equal(P.banner(finished,pulse({}),names,NOW),'All 3 stages are done');
+ assert.equal(P.banner(null),'');
+});
+
+test('stage and task chips say where each piece of work stands',()=>{
+ assert.deepEqual(['proposed','approved','working','review','done'].map(s=>P.stageChip({status:s}).label),['Not started','Up next','Working','Being checked','Done']);
+ const chip=(t,p)=>P.taskChip(t,pulse(p||{}),'Chief').label;
+ assert.equal(chip(task('a','pending')),'Waiting');assert.equal(chip(task('a','done')),'Done');assert.equal(chip(task('a','waived')),'Skipped');assert.equal(chip(task('a','review')),'Being reviewed');
+ assert.equal(chip(task('a','dispatched',{workerTaskId:'w'})),'Working');
+ assert.equal(chip(task('a','dispatched',{workerTaskId:'w'}),{lyra:{state:'retrying',taskId:'w'}}),'Retrying');
+ assert.equal(chip(task('a','dispatched',{workerTaskId:'w'}),{lyra:{state:'with_supervisor',taskId:'w'}}),'Asking Chief');
+ assert.equal(chip(task('a','dispatched',{workerTaskId:'w'}),{lyra:{state:'working',taskId:'other'}}),'Queued','the agent is busy with another task');
+ assert.equal(chip(task('a','blocked',{blockedOn:'user'})),'Needs you');assert.equal(chip(task('a','blocked',{blockedOn:'supervisor'})),'With Chief');
+});
+
+test('the group chat shows the group’s plan, and a direct chat shows the plan that agent supervises',()=>{
+ const state={agents:[{id:'chief',name:'Chief'},{id:'lyra',name:'Lyra'}],groups:[{id:'team',members:['chief','lyra']},{id:'other',members:['lyra']}]};
+ const old={...plan('achieved',{state:'stage_done'}),id:'old',updatedAt:'2026-10-18T00:00:00Z'},live={...plan('active',{state:'working'}),id:'live',updatedAt:'2026-10-17T00:00:00Z'},elsewhere={...plan('draft',{state:'draft'}),id:'elsewhere',groupId:'other',supervisorId:'lyra'};
+ const plans=[old,live,elsewhere];
+ assert.equal(P.planFor(state,{kind:'chat',target:'team'},plans).id,'live','a live plan wins over one achieved earlier');
+ assert.equal(P.planFor(state,{kind:'chat',target:'other'},plans).id,'elsewhere');
+ assert.equal(P.planFor(state,{kind:'chat',target:'chief'},plans).id,'live','the supervisor’s own chat shows the plan they run');
+ assert.equal(P.planFor(state,{kind:'chat',target:'lyra'},[old,live]),null,'an agent who supervises nothing has no strip');
+ assert.equal(P.planFor(state,{kind:'tasks'},plans),null);assert.equal(P.planFor(state,{kind:'chat',target:'gone'},plans),null);assert.equal(P.planFor(state,{kind:'chat',target:'team'},undefined),null);
+});
+
+test('“Get stage N done” is offered only while no stage is authorized: in a draft, or once a stage is done',()=>{
+ const draft=P.stripHTML(plan('draft',{state:'draft'}),pulse({}),names,{open:true,now:NOW});
+ assert.match(draft,/>Get stage 1 done</);assert.match(draft,/>Get stages 1–2 done</);assert.match(draft,/>Get stages 1–3 done</);
+ assert.match(draft,/data-plan-authorize="1"/);assert.match(draft,/Done when/);assert.match(draft,/Criterion 1a/);assert.match(draft,/Ship the portfolio/);
+ const holding=P.stripHTML(plan('holding',{state:'stage_done'},{stages:[stage(1,'done',[task('t1','done')]),stage(2,'proposed'),stage(3,'proposed')]}),pulse({}),names,{open:true,now:NOW});
+ assert.doesNotMatch(holding,/Get stage 1 done/);assert.match(holding,/>Get stage 2 done</);assert.match(holding,/>Get stages 2–3 done</);
+ const working=P.stripHTML(active([task('t1','dispatched')]),pulse({}),names,{open:true,now:NOW});
+ assert.doesNotMatch(working,/Get stage/);assert.match(working,/data-plan-stop/,'an active plan can be stopped');
+ assert.doesNotMatch(draft,/data-plan-stop/,'a draft has nothing to stop');
+ const closed=P.stripHTML(plan('draft',{state:'draft'}),pulse({}),names,{open:false,now:NOW});
+ assert.match(closed,/aria-expanded="false"/);assert.match(closed,/plan-strip-body[^>]*hidden/);assert.match(closed,/Plan ready/);
+ assert.match(P.stripHTML({...plan('draft',{state:'draft'}),objective:'<img src=x onerror=alert(1)>'},pulse({}),names,{open:true}),/&lt;img/,'plan text is escaped');
+});
+
+test('a stage counts as started only when the worker’s reply confirms it; an error reply is shown as it is',()=>{
+ const ask={action:'authorize',planId:'p1',through:2,quote:'Get stages 1–2 done'},reply=s=>({plan:{id:'p1',status:'active',scope:s}});
+ assert.equal(P.replyOutcome(reply({through:2,status:'active'}),ask).ok,true);
+ assert.equal(P.replyOutcome(reply({through:2,status:'active'}),ask).plan.id,'p1');
+ assert.equal(P.replyOutcome(reply({through:3,status:'active'}),ask).ok,true,'a wider scope covers it');
+ for(const r of [reply({through:1,status:'active'}),reply({through:2,status:'withdrawn'}),reply(null),{},null,undefined,'ok']){const o=P.replyOutcome(r,ask);assert.equal(o.ok,false,JSON.stringify(r));assert.match(o.message,/hasn’t started/);assert.equal(o.plan,undefined,'nothing is shown as started');}
+ const refused=P.replyOutcome({error:'Stage 1 is already done. Say “get stage 2 done” to continue.'},ask);
+ assert.deepEqual(refused,{ok:false,message:'Stage 1 is already done. Say “get stage 2 done” to continue.'},'the worker’s own words, plainly');
+ assert.equal(P.replyOutcome({error:'This plan is closed.'},{action:'stop',planId:'p1'}).ok,false);
+ assert.equal(P.replyOutcome({plan:{id:'p1',status:'holding',scope:null}},{action:'stop',planId:'p1'}).ok,true);
+ const html=P.stripHTML(plan('draft',{state:'draft'}),pulse({}),names,{open:false,error:'Stage 1 is <already> done.'});
+ assert.match(html,/<p class="plan-error" role="alert">Stage 1 is &lt;already&gt; done\.<\/p>/,'and stays on the strip until the next try, even folded');
+ assert.doesNotMatch(P.stripHTML(plan('draft',{state:'draft'}),pulse({}),names,{open:false}),/plan-error/);
+});
+test('chat notices arrive once, in the group or the supervisor’s chat, and never twice',()=>{
+ const state={agents:[{id:'chief',name:'Chief'},{id:'lyra',name:'Lyra'}],groups:[{id:'team',members:['chief','lyra']}],messages:{team:[{id:'hello',who:'you',body:'hi'}]}};
+ const notices=[{id:'n1',kind:'authorized',text:'Stage 1 authorized. The team is working on Stage 1 — Research.',chat:true,status:'open',at:'2026-10-19T10:00:00Z'},{id:'n2',kind:'stage_report',text:'Shown only on the strip.',chat:false,status:'open',at:'2026-10-19T10:01:00Z'}];
+ const plans=[plan('active',{state:'working'},{notices}),{...plan('draft',{state:'draft'}),id:'dm',groupId:'',notices:[{id:'n3',kind:'proposal',text:'Here is the plan.',chat:true,at:'2026-10-19T10:02:00Z'}]},{...plan('draft',{state:'draft'}),id:'lost',groupId:'deleted',supervisorId:'gone',notices:[{id:'n4',kind:'proposal',text:'Nobody to tell.',chat:true}]}];
+ const first=P.noticesToDeliver(state,plans);
+ assert.deepEqual(first.map(i=>[i.target,i.message.id]),[['team','plan-notice-n1'],['chief','plan-notice-n3']]);
+ const m=first[0].message;assert.equal(m.who,'chief');assert.equal(m.body,notices[0].text);assert.equal(m.live,true);assert.equal(m.status,'completed');assert.equal(m.planNotice,true);assert.equal(m.createdAt,'2026-10-19T10:00:00Z');
+ assert.equal(state.messages.team.length,1,'finding them changes nothing');
+ assert.deepEqual(P.deliverNotices(state,plans),['team','chief']);
+ assert.equal(state.messages.team.length,2);assert.equal(state.messages.chief.length,1);
+ assert.deepEqual(P.noticesToDeliver(state,plans),[],'a second look finds nothing new');
+ assert.deepEqual(P.deliverNotices(state,plans),[]);
+ assert.deepEqual(P.noticesToDeliver(JSON.parse(JSON.stringify(state)),plans),[],'including after the workspace is saved and reopened');
+ assert.equal(P.noticesToDeliver({...state,messages:{}},[{...plans[0],supervisorId:'gone'}])[0].message.who,'team','with no supervisor left, the group itself speaks');
+});

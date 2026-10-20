@@ -99,6 +99,24 @@ import Foundation
         _ = try await router.didConnectClaude(workspace:workspace)
         let restored=try send("CLAUDE_RECONNECTED",options);await wait{terminal(restored)}
         require(events.contains{$0["runId"] as? String == restored && $0["status"] as? String == "completed"},"Claude reconnect restores the selected provider")
+        // The chat prompt follows the decision policy: it never says the person decided something they did not, and claims only receipts.
+        let echoed=try send("ECHO_INSTRUCTIONS",options);await wait{terminal(echoed)}
+        let system=events.last{$0["runId"] as? String==echoed && $0["status"] as? String=="completed"}?["text"] as? String ?? ""
+        require(system.contains("claim the user decided something they did not") && !system.contains("invent recipients, decisions or facts") && !system.contains("Ask for missing information in your reply"),"a Claude chat turn's system prompt does not send missing information or decisions to the user: \(system.suffix(500))")
+        require(system.contains("When information is missing, look for it with your tools first, then follow the decision policy.") && system.contains("unless a tool in this reply returned that receipt") && !system.contains("configured spending limit"),"the prompt looks things up first and claims Buddy's state only from receipts")
+        // A daily limit: the refusal says where to raise it, and a turn sets nothing aside, so a stopped one gives nothing back because it took nothing.
+        let ledger=try BuddyWorkerStore(directory:root.appendingPathComponent("Worker"))
+        try ledger.setLimit(workspace:workspace,scope:"agent",id:agent,amount:0,setBy:"user")
+        var refusal="";do{_ = try send("DAILY_LIMIT refused",options)}catch{refusal=error.localizedDescription}
+        require(refusal.contains("Raise it in this agent's settings") && !refusal.contains("Ask Chief"),"a used-up daily limit tells the person where to raise it: \(refusal)")
+        try ledger.setLimit(workspace:workspace,scope:"agent",id:agent,amount:5,setBy:"user")
+        func room()->Double {BuddyBudget.headroom(support:root,workspace:workspace,agent:agent)?.room ?? -1}
+        let roomBefore=room()
+        let held=try send("WAIT_CLAUDE DAILY_LIMIT",options);await wait{events.contains{$0["runId"] as? String==held && ($0["text"] as? String)?.contains("waiting")==true}}
+        let roomDuring=room()
+        _ = try await router.stop(held);await wait{terminal(held)}
+        let roomAfter=room()
+        require(roomBefore>4.5 && abs(roomDuring-roomBefore)<1e-9 && abs(roomAfter-roomBefore)<1e-9,"a running or stopped chat turn that never reported a cost leaves today's room unchanged (before \(roomBefore), during \(roomDuring), after \(roomAfter))")
         print("PASS: persistent provider selection, workspace isolation, budget validation, actual ChatGPT/Claude routing, shared conversation context, scoped file writes, structured group output, pinned group provider, disconnect/reconnect, stopped work and no automatic fallback")
         try Data("broken".utf8).write(to:root.appendingPathComponent("ai-providers.json"));invalid=false;do{_ = try settings.current(workspace)}catch{invalid=true};require(invalid,"corrupt provider settings fail closed")
     }

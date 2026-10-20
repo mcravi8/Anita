@@ -5,8 +5,12 @@ import json,sys
 def out(x):print(json.dumps({**x,"runId":config.get("runId")}),flush=True)
 for line in sys.stdin:
  config=json.loads(line);assert config['command']=='start' and config['apiKey']=='fixture-key'
- assert config['budget'] is None and all(t['name'].startswith('buddy_') for t in config['tools'])
  prompt=config['prompt']
+ # Only a daily limit gives a turn a ceiling, and then it is the room that limit leaves.
+ assert (config['budget'] is None)!=('DAILY_LIMIT' in prompt),config['budget']
+ assert all(t['name'].startswith('buddy_') for t in config['tools'])
+ if 'ECHO_INSTRUCTIONS' in prompt:
+  out({'type':'result','text':config['instructions'],'cost':0.01,'error':None});continue
  if 'COMPUTER_TASK' in prompt:
   assert 'buddy_computer_task' in [t['name'] for t in config['tools']]
   assert 'user does not need to say' in config['instructions']

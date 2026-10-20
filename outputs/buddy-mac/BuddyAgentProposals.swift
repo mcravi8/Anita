@@ -214,9 +214,15 @@ struct BuddyAgentProposal: Codable {
         guard data.count<12*1024*1024,let rows=try JSONSerialization.jsonObject(with:data) as? [[String:Any]],rows.count<=1000,rows.allSatisfy({r in ["id","workspace","runId"].allSatisfy{(r[$0] as? String).flatMap(UUID.init(uuidString:)) != nil} && !(r["actorId"] as? String ?? "").isEmpty && (r["actorId"] as? String ?? "").count<=80 && r["chat"] is String && r["revision"] is Int && r["label"] is String && r["draft"] is [String:Any] && ["pending","created","declined"].contains(r["status"] as? String ?? "")}) else{throw fail("Buddy couldn't verify saved team plans. Existing teams were kept.")};return rows
     }
     private func save(_ rows:[[String:Any]])throws {let data=try JSONSerialization.data(withJSONObject:rows,options:.sortedKeys);guard data.count<12*1024*1024 else{throw fail("Team plan history is full.")};try data.write(to:file,options:.atomic);try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:file.path)}
+    /// Each line or sentence the person wrote is judged by itself, so answers to a few questions followed by "create team" on its own line is a
+    /// request to create it. Quoted code blocks are never a request, wherever they are in the message.
     static func creationRequest(_ text:String)->Bool {
+        guard !text.contains("```") else{return false}
+        return text.components(separatedBy:CharacterSet(charactersIn:"\n;!?")).map{$0.trimmingCharacters(in:.whitespaces)}.filter{!$0.isEmpty}.contains(where:creationClause)
+    }
+    private static func creationClause(_ text:String)->Bool {
         guard text.range(of:#"(?i)\b(if|hypothetical|example|don't|do not|never|ability|able to|capability)\b|```"#,options:.regularExpression)==nil else{return false}
-        if let prefix=text.range(of:#"(?is)^\s*(?:first\s+)?(?:take|remove|delete|pause|stop|cancel|archive)\b.{0,400}?[,;\n]\s*(?:(?:and|then)\s+)?"#,options:.regularExpression) {return creationRequest(String(text[prefix.upperBound...]))}
+        if let prefix=text.range(of:#"(?is)^\s*(?:first\s+)?(?:take|remove|delete|pause|stop|cancel|archive)\b.{0,400}?[,;\n]\s*(?:(?:and|then)\s+)?"#,options:.regularExpression) {return creationClause(String(text[prefix.upperBound...]))}
         // Creating software/plans ABOUT agents is not authorization to add them.
         if text.range(of:#"(?is)^\s*(?:(?:@[A-Za-z][\w-]{0,30}[,:]?|[A-Za-z][\w-]{0,30}[,:])\s+)?(?:(?:yes|ok|okay|please|go ahead|let(?:'|’)?s)[,\s]*)*(?:(?:can|could|would|will) you(?: please)?\s+|i (?:want|need)(?: you)? to\s+|i(?:'|’)?d like(?: you)? to\s+|i would like(?: you)? to\s+)?(?:create|make|build|set up|setup|assemble|form|put together|add|hire)\s+(?:me\s+)?(?:(?:a|an|the|new|another)\s+)*(?:tool|app|application|website|feature|plan|proposal|design|template|no|zero|0)\b|\b(?:team|group|agent)\s+(?:plan|proposal|design|template)\b"#,options:.regularExpression) != nil{return false}
         return text.range(of:#"(?is)^\s*(?:(?:@[A-Za-z][\w-]{0,30}[,:]?|[A-Za-z][\w-]{0,30}[,:])\s+)?(?:(?:yes|ok|okay|please|go ahead|let(?:'|’)?s)[,\s]*)*(?:(?:can|could|would|will) you(?: please)?\s+|i (?:want|need)(?: you)? to\s+|i(?:'|’)?d like(?: you)? to\s+|i would like(?: you)? to\s+)?(?:create|make|build|set up|setup|assemble|form|put together|add|hire)\b.{0,2000}\b(?:team|group|agents?|bots?|budd(?:y|ies)|teammates?|specialists?)\b"#,options:.regularExpression) != nil
@@ -258,7 +264,7 @@ struct BuddyAgentProposal: Codable {
             let r=reconcile(rows[i],state:s);if r["status"] as? String=="created"{return receipt(r,state:s)}
             guard r["status"] as? String=="pending" else{throw fail("This plan has already been declined.")}
             let sole=rows.filter{$0["workspace"] as? String==scope.workspace && $0["chat"] as? String==scope.chat && reconcile($0,state:s)["status"] as? String=="pending"}.count==1
-            let assent=source?.text.range(of:#"(?i)^\s*(?:yes[,\s]*)?(?:go ahead|do it|create (?:it|them|the team)|approve (?:it|this|the plan))[.!\s]*$"#,options:.regularExpression) != nil
+            let assent=source?.text.range(of:#"(?i)^\s*(?:yes[,\s]*)?(?:go ahead|do it|create (?:it|them|(?:the )?team)|approve (?:it|this|the plan))[.!\s]*$"#,options:.regularExpression) != nil
             guard action=="create",exact,(Self.creationRequest(source?.text ?? "") || (sole && assent)) else{return receipt(r,state:s)}
             rows[i]["authorizationQuote"]=quote;return try commit(i,rows:rows,state:s,human:false)
         }

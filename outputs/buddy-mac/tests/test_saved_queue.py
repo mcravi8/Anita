@@ -25,7 +25,30 @@ class SavedQueueTests(unittest.TestCase):
     def test_a_database_that_has_not_imported_yet_does_not_hide_the_old_file(self):
         (self.root/'Worker/tasks.json').write_text(json.dumps({'version':1,'paused':False,'tasks':[{'status':'running'}]}))
         self.database(migrated=False);self.assertEqual(install.saved_queue()['tasks'],[{'status':'running'}])
-    def test_running_work_in_the_database_blocks_an_update(self):
-        self.database();(self.root/'workspace.json').write_text('{}')
-        with self.assertRaises(RuntimeError):install.ensure_idle()
+    def idle(self):
+        # The last step, "is Buddy itself still open", reads the process list; these fixtures are about the saved queue only.
+        saved=install.subprocess.check_output;install.subprocess.check_output=lambda *a,**k:''
+        try:return install.ensure_idle()
+        finally:install.subprocess.check_output=saved
+    def tasks(self,bodies,paused='0'):
+        connection=sqlite3.connect(self.root/'Worker/operations.sqlite');connection.executescript(SCHEMA)
+        connection.execute("INSERT INTO meta VALUES('migration','{}'),('paused',?)",(paused,))
+        for body in bodies:connection.execute('INSERT INTO tasks(id,workspace,archived,body) VALUES(?,?,?,?)',('x','w',0,json.dumps(body)))
+        connection.commit();connection.close();(self.root/'workspace.json').write_text('{}')
+    def test_running_queued_and_waiting_work_no_longer_blocks_an_update(self):
+        # The update restarts the worker, which carries this work on; nothing has to be paused first, and nothing stays parked afterwards.
+        self.tasks([{'status':'running','title':'Research'},{'status':'queued'},{'status':'waiting_user'},{'status':'waiting_review','reviews':[{'status':'pending'}]},{'status':'running','reviews':[{'status':'completed'},{'status':'uncertain'}]}])
+        self.idle()
+    def test_an_action_being_sent_blocks_an_update(self):
+        self.tasks([{'status':'running','title':'Reply to Acme','reviews':[{'status':'completed'},{'status':'dispatched'}]}])
+        with self.assertRaises(RuntimeError) as raised:self.idle()
+        self.assertEqual(str(raised.exception),'An approved action is being sent right now (Reply to Acme). Try the update again in a minute.')
+    def test_an_action_being_sent_blocks_in_the_old_file_too(self):
+        (self.root/'Worker/tasks.json').write_text(json.dumps({'version':1,'paused':False,'tasks':[{'status':'running','title':'Post the reply','reviews':[{'status':'dispatched'}]}]}))
+        with self.assertRaisesRegex(RuntimeError,r'being sent right now \(Post the reply\)'):self.idle()
+    def test_private_sign_in_and_active_chats_still_block(self):
+        self.tasks([{'status':'running'}]);(self.root/'Worker/PrivateSignIn.json').write_text('{}')
+        with self.assertRaisesRegex(RuntimeError,'private sign-in'):self.idle()
+        (self.root/'Worker/PrivateSignIn.json').unlink();(self.root/'workspace.json').write_text(json.dumps({'runs':{'r':{'status':'answering'}}}))
+        with self.assertRaisesRegex(RuntimeError,'active conversations'):self.idle()
 if __name__=='__main__':unittest.main()

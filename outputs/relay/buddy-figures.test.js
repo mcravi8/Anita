@@ -91,3 +91,15 @@ test('reduced motion drops the idle life but keeps every signal of state',()=>{
   const M=E.mkSim();for(let t=0;t<2;t+=1/60)E.stepSim(M,'ready',[.5,-.2],t,1/60,false,true);
   assert.ok(Math.abs(M.S.lx.x-.5)<.02,'gaze toward the user or another agent is information, so it stays');
 });
+
+test('a working group\'s ring always closes the circle, however many of its members are working',()=>{
+  // One of four members working used to cap the sweep at a quarter, two at half: the ring showed the members' average progress.
+  const members=working=>[0,1,2,3].map(k=>({work:k<working?1:0,prog:k<working?.6:0}));
+  for(const working of [1,2,3,4]){
+    let most=0,least=1;for(let t=0;t<12;t+=.02){const g=E.groupSweep(members(working),t);most=Math.max(most,g.gprog);least=Math.min(least,g.gprog);}
+    assert.equal(most,1,`${working} working: the sweep goes all the way round`);
+    assert.ok(least<.02,`${working} working: and starts again from the top`);
+    assert.equal(E.groupSweep(members(working),1).group,1,`${working} working: the ring shows at full strength`);
+  }
+  assert.equal(E.groupSweep(members(0),1).group,0,'nobody working: no ring');
+});

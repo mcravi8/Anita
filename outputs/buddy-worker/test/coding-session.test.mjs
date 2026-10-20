@@ -28,6 +28,22 @@ test('a coding run that ends in a failed result reports its cost first, in plain
   assert.equal(result.cost,0.5);assert.match(result.error,/spending limit/,'the reason is a sentence, not error_max_budget_usd');
 });
 
+test('a coding run stopped by the daily limit keeps its last words as the result, names how it ended, and says it continues by itself',async()=>{
+  const events=[];
+  const host=new CodingSession({query:()=>({async *[Symbol.asyncIterator](){yield {type:'system',subtype:'init',session_id:id};yield {type:'assistant',message:{content:[{type:'text',text:'Final: item 1 verified'}]}};yield {type:'result',subtype:'error_max_budget_usd',is_error:true,total_cost_usd:0.3};},close(){}}),tool:(n,d,s,call)=>({name:n,call}),createSdkMcpServer:x=>x,fromJSONSchema:()=>({shape:{}}),write:x=>events.push(x)});
+  await host.start(config);
+  const result=events.find(e=>e.type==='result');
+  assert.equal(result.text,'Final: item 1 verified','an empty SDK result falls back to the last thing the model said, so a verified result is never lost');
+  assert.equal(result.subtype,'error_max_budget_usd','the bridge says how the run ended, so a limit is not mistaken for a failure');
+  assert.equal(result.cost,0.3);
+  assert.equal(result.error,'Today’s spending limit for this agent was reached. It continues tomorrow or after the user raises the daily limit.');
+  assert.doesNotMatch(result.error,/task limit/,'there is no per-task limit to raise');
+  const ok=[],fine=new CodingSession({query:()=>({async *[Symbol.asyncIterator](){yield {type:'assistant',message:{content:[{type:'text',text:'Working notes'}]}};yield {type:'result',subtype:'success',result:'Built and checked.',total_cost_usd:0.01,is_error:false,session_id:id};},close(){}}),tool:(n,d,s,call)=>({name:n,call}),createSdkMcpServer:x=>x,fromJSONSchema:()=>({shape:{}}),write:x=>ok.push(x)});
+  await fine.start(config);
+  const done=ok.find(e=>e.type==='result');
+  assert.equal(done.text,'Built and checked.','the SDK result wins over earlier text');assert.equal(done.subtype,'success');assert.equal(done.error,null);assert.equal(done.sessionId,id);
+});
+
 test('a coding run streams activity so a long single turn is not mistaken for a stalled connection',async()=>{
   const events=[],calls=[];
   const host=new CodingSession({query:input=>{calls.push(input);return {async *[Symbol.asyncIterator](){yield {type:'system',subtype:'init',session_id:id};yield {type:'stream_event'};yield {type:'result',result:'Done.',total_cost_usd:0.01,is_error:false,session_id:id};},close(){}};},tool:(n,d,s,call)=>({name:n,call}),createSdkMcpServer:x=>x,fromJSONSchema:()=>({shape:{}}),write:x=>events.push(x)});

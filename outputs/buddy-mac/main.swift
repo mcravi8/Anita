@@ -61,7 +61,7 @@ import AppKit
             }
         }
         conversations.extraToolHandler = { [weak self] tool, args, context in
-            guard let self, ["buddy_start_background_task","buddy_computer_task","buddy_manage_routine","buddy_coding_session","buddy_team","buddy_agent_settings","buddy_agent_rules"].contains(tool), let id = context["agentId"] as? String else { throw BuddyWorkerFailure(message: "Background work is unavailable for this turn.") }
+            guard let self, ["buddy_start_background_task","buddy_computer_task","buddy_manage_routine","buddy_coding_session","buddy_team","buddy_agent_settings","buddy_agent_rules","buddy_plan"].contains(tool), let id = context["agentId"] as? String else { throw BuddyWorkerFailure(message: "Background work is unavailable for this turn.") }
             let workspace = try self.workspaceContext()
             guard workspace.agents.contains(id) else { throw BuddyWorkerFailure(message: "This agent is no longer available.") }
             _ = try await BuddyWorkerClient.start(support: self.supportURL, workspace: workspace.workspace)
@@ -71,11 +71,22 @@ import AppKit
                 return result
             }
             if tool=="buddy_team" {return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"team","workspace":workspace.workspace,"actorId":id,"authorizedText":context["authorizedUserText"] ?? "","arguments":args])}
+            if tool=="buddy_plan" {
+                // The agent acts as itself; the worker checks what it may do, and an authorization against the person's words in this turn.
+                let state=try self.workspaceState()
+                var arguments=args
+                // A turn in a group works on that group's plan unless the agent names one.
+                if (arguments["groupId"] as? String ?? "").isEmpty,let chat=BuddyPlanChat.chat(scope:(context["proposalScope"] as? BuddyProposalScope)?.chat,key:context["key"] as? String ?? "",workspace:workspace.workspace),(state["groups"] as? [[String:Any]] ?? []).contains(where:{$0["id"] as? String==chat}) {arguments["groupId"]=chat}
+                let replyRun=(context["replyRunId"] as? String).flatMap{$0.isEmpty ? nil:$0} ?? (context["proposalScope"] as? BuddyProposalScope)?.replyRunId ?? context["runId"] as? String ?? ""
+                var request:[String:Any]=["operation":"plan","workspace":workspace.workspace,"actorId":id,"authorizedText":context["authorizedUserText"] ?? "","requestId":(context["runId"] as? String ?? "")+":"+(context["callId"] as? String ?? ""),"arguments":arguments]
+                if let message=((state["runs"] as? [String:[String:Any]])?[replyRun])?["userId"] as? String {request["messageId"]=message}
+                return try await BuddyWorkerClient.call(support:self.supportURL,payload:request)
+            }
             if tool=="buddy_computer_task" {
-                return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"computer","workspace":workspace.workspace,"agentId":id,"requestId":(context["runId"] as? String ?? "")+":computer","arguments":args])
+                return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"computer","workspace":workspace.workspace,"agentId":id,"actorId":id,"requestId":(context["runId"] as? String ?? "")+":computer","arguments":args])
             }
             if tool=="buddy_coding_session" {
-                return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"coding","workspace":workspace.workspace,"agentId":id,"requestId":(context["runId"] as? String ?? "")+":"+(context["callId"] as? String ?? ""),"arguments":args])
+                return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"coding","workspace":workspace.workspace,"agentId":id,"actorId":id,"requestId":(context["runId"] as? String ?? "")+":"+(context["callId"] as? String ?? ""),"arguments":args])
             }
             if tool=="buddy_manage_routine" {
                 // In a group each agent's turn has its own run id, but the person's message and the reply on screen belong to the group's run.
@@ -86,7 +97,7 @@ import AppKit
                 return result
             }
             let choice = try self.ai.settings.current(workspace.workspace)
-            return try await BuddyWorkerClient.call(support: self.supportURL, payload: ["operation": "create", "workspace": workspace.workspace, "agentId": id, "requestId": (context["runId"] as? String ?? "") + ":" + (context["callId"] as? String ?? ""), "title": args["title"] ?? "", "goal": args["goal"] ?? "", "kind": args["kind"] ?? "general", "budgetUSD": choice.claudeBudgetUSD])
+            return try await BuddyWorkerClient.call(support: self.supportURL, payload: ["operation": "create", "workspace": workspace.workspace, "agentId": id, "actorId": id, "requestId": (context["runId"] as? String ?? "") + ":" + (context["callId"] as? String ?? ""), "title": args["title"] ?? "", "goal": args["goal"] ?? "", "kind": args["kind"] ?? "general", "budgetUSD": choice.claudeBudgetUSD])
         }
         teamwork.onEvent = { [weak self] event in self?.deliver(event) }
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in Task { @MainActor in await self?.adoptProfileChanges() } }
@@ -100,8 +111,15 @@ import AppKit
             if !self.teamwork.consume(event) { self.deliver(event) }
         }
         showWindow()
-        teamwork.extraTools=BuddyWorkerClient.groupTools
-        teamwork.agentInstructions={ [weak self] workspace,id in guard let self,let s=try? self.workspaceState(),s["conversationWorkspace"] as? String==workspace,let a=(s["agents"] as? [[String:Any]])?.first(where:{$0["id"] as? String==id}) else{return ""};return BuddyAgentMemory.guidance(a)+"\n"+BuddyWorkerClient.settingsGuidance+"\n"+BuddyRulesReader.guidance(support:self.supportURL,workspace:workspace,agent:id)}
+        teamwork.extraTools=BuddyWorkerClient.chatTools
+        teamwork.agentInstructions={ [weak self] workspace,id in guard let self,let s=try? self.workspaceState(),s["conversationWorkspace"] as? String==workspace,let a=(s["agents"] as? [[String:Any]])?.first(where:{$0["id"] as? String==id}) else{return ""}
+            let supervisor=BuddyAutonomy.supervisor(support:self.supportURL,workspace:workspace,state:s,agent:id)
+            var text=BuddyAgentMemory.guidance(a)+"\n"+BuddyWorkerClient.settingsGuidance+"\n"+BuddyRulesReader.guidance(support:self.supportURL,workspace:workspace,agent:id)+"\n"+BuddyAutonomy.chatGuidance(agent:id,supervisor:supervisor?.id,name:supervisor?.name)
+            // The plan this member works in, read fresh for each turn, and what the app did with the person's stage request in this reply.
+            // A note is used once (each member's instructions are built once per reply) and only while its reply is still running.
+            let note=self.planTurnNotes.removeValue(forKey:id).flatMap{note in self.teamwork.snapshots().contains(where:{$0["runId"] as? String==note.run && ["starting","answering","stopping"].contains($0["status"] as? String ?? "")}) ? note.text:nil} ?? ""
+            text+=self.planInstructions(plans:BuddyPlanStore.readOnlySummary(support:self.supportURL,workspace:workspace),agent:id,state:s,note:note)
+            return text}
         Task {if let context=try? workspaceContext(){_ = try? await BuddyWorkerClient.start(support:supportURL,workspace:context.workspace)}}
     }
 
@@ -201,6 +219,28 @@ import AppKit
     private func settingsChanged() {
         deliver(["type": "agent-settings-changed"])
         Task { await adoptProfileChanges() }
+    }
+    /// For each agent, what the app did with the person's stage request in one group reply ("you just authorized stage 1", or why it
+    /// failed). It is read once, and only while that reply is still running.
+    private var planTurnNotes: [String: (run: String, text: String)] = [:]
+    /// The person's own words authorize stages ("get stage 1 done"): the app records that itself, as the person, before any model reads the
+    /// message, so whether work starts never depends on what a model does with it. Returns the stage authorized through, or why it failed.
+    private func authorizeStages(_ stages: (planId: String, through: Int, remainder: String), workspace: String, text: String, runId: String, state: [String: Any]) async -> (through: Int?, error: String) {
+        let message = ((state["runs"] as? [String: [String: Any]])?[runId])?["userId"] as? String ?? runId
+        do {
+            _ = try await BuddyWorkerClient.start(support: supportURL, workspace: workspace)
+            let result = try await BuddyWorkerClient.call(support: supportURL, payload: ["operation": "plan", "workspace": workspace, "requestId": runId + ":authorize", "messageId": message,
+                "arguments": ["action": "authorize", "planId": stages.planId, "through": stages.through, "quote": String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))]])
+            // Only an authorization the worker reports back counts; anything else is a failure, never a claim.
+            let scope = (result["plan"] as? [String: Any])?["scope"] as? [String: Any]
+            guard let through = scope?["through"] as? Int, through >= stages.through, scope?["status"] as? String == "active" else { return (nil, "Buddy could not confirm the authorization.") }
+            return (through, "")
+        } catch { return (nil, error.localizedDescription) }
+    }
+    /// What one agent's chat turn is told about the plans it works in, and what the app did with the person's stage request, as text to append.
+    private func planInstructions(plans: [[String: Any]], agent: String, state: [String: Any], note: String) -> String {
+        let plan = BuddyPlanChat.context(plans: plans, agent: agent, names: BuddyPlanChat.names(state: state), members: BuddyPlanChat.members(state: state))
+        return (plan.isEmpty ? "" : "\n" + plan) + (note.isEmpty ? "" : "\n" + note)
     }
     private var adopting = false
     /// Role and instructions are kept in the agent’s saved profile, so the app itself carries a change to them there, then confirms it to the worker.
@@ -345,13 +385,32 @@ import AppKit
                     let state = try workspaceState()
                     var request = try BuddyTeamRequest.from(workspace: state, payload: payload)
                     let agents=state["agents"] as? [[String:Any]] ?? []
-                    let notReady=request.members.compactMap{member->String? in guard let a=agents.first(where:{$0["id"] as? String==member.id}),a["setupStatus"] as? String=="pending",!agentSetup.ready(workspace:request.workspace,agent:member.id) else{return nil};return a["name"] as? String ?? "An agent"}
+                    let plans=BuddyPlanStore.readOnlySummary(support:supportURL,workspace:request.workspace)
+                    let group=(state["groups"] as? [[String:Any]] ?? []).first{$0["id"] as? String==request.groupId}
+                    // One supervisor for the round: the saved team supervisor the members' prompts name, else the group plan's, else the group's manager.
+                    request.supervisorId=BuddyAutonomy.groupSupervisor(candidates:[BuddyAutonomy.policySupervisor(support:supportURL,workspace:request.workspace,state:state),BuddyPlanChat.livePlan(plans,group:request.groupId)?["supervisorId"] as? String,group?["managedBy"] as? String],members:request.members.map(\.id))
+                    // "get stage 1 done" is recorded by the app itself. With little else said, the supervisor alone answers.
+                    let stages=BuddyPlanChat.intercept(scope:BuddyPlanIntent.scope(request.text).map{($0.through,$0.remainder)},plans:plans,chat:request.groupId,agent:nil,isGroup:true)
+                    if let stages,BuddyPlanChat.supervisorOnly(remainder:stages.remainder),let lead=request.supervisorId,let only=request.members.first(where:{$0.id==lead}) {
+                        request=BuddyTeamRequest(runId:request.runId,key:request.key,workspace:request.workspace,groupId:request.groupId,name:request.name,objective:request.objective,text:request.text,members:[only],history:request.history,supervisorId:lead)
+                    }
+                    // A teammate its team plan briefed in full starts with that brief, as "Use their instructions" would; only the rest still wait.
+                    let notReady=try agentSetup.adoptTeamBriefs(workspace:request.workspace,members:request.members.map(\.id),agents:agents)
                     guard notReady.isEmpty else {
                         let names=notReady.count>1 ? notReady.dropLast().joined(separator:", ")+" and "+notReady.last! : notReady[0]
                         throw BuddyFailure(message:"\(names) \(notReady.count>1 ? "haven't":"hasn't") finished setup. Choose “Use their instructions” above the message box, or answer their first question in their own chat.")
                     }
                     request.fileScope = try conversations.projectFiles.scope(request.workspace)
-                    replyHandler(try teamwork.send(request), nil)
+                    guard let stages else { replyHandler(try teamwork.send(request), nil); return }
+                    let ready=request
+                    Task {
+                        let outcome=await self.authorizeStages(stages,workspace:ready.workspace,text:ready.text,runId:ready.runId,state:state)
+                        for member in ready.members {
+                            let lead=member.id==ready.supervisorId
+                            self.planTurnNotes[member.id]=(ready.runId,outcome.through.map{BuddyPlanChat.authorizedNote(through:$0,supervisor:lead)} ?? BuddyPlanChat.authorizeFailed(outcome.error,supervisor:lead))
+                        }
+                        do { replyHandler(try self.teamwork.send(ready), nil) } catch { replyHandler(nil, error.localizedDescription) }
+                    }
                     return
                 }
                 let context = try workspaceContext()
@@ -363,18 +422,30 @@ import AppKit
                 options.requiresProactive=BuddyWorkerClient.proactiveRequest(options.authorizedUserText)
                 options.fileScope = try conversations.projectFiles.scope(context.workspace)
                 options.actorId = agent
-                options.extraTools = BuddyWorkerClient.tools
+                options.extraTools = BuddyWorkerClient.chatTools
                 options.requiresRoutine = BuddyWorkerClient.recurringRequest(payload["text"] as? String ?? "")
                 options.requiresRule = BuddyWorkerClient.stagedRuleRequest(payload["text"] as? String ?? "")
                 options.instructions = "For explicit coding/build/test requests or requests to use Claude Code, call buddy_coding_session directly with a complete task brief; it is a native worker tool, not a connected service. Check status for real results. For an explicit recurring request (run this every morning/daily/weekly), call buddy_manage_routine now. Carry the relevant user brief from history into the goal. For email, choose a targeted search with follow-ups and an explicit lookback window. Default to 09:00 local for an unspecified morning, state that assumption and the saved next run. Do not create a one-off task instead. Never claim scheduled without saved=true and a routine ID. Do not schedule hypothetical examples or questions. Use list/update/pause/resume/delete for existing routines. Results and controls are in Background work. This Mac must be awake and online; a missed run catches up once. "
                 options.instructions += "\n"+BuddyWorkerClient.taskGuidance+"\n"+BuddyWorkerClient.teamGuidance+"\n"+BuddyWorkerClient.settingsGuidance+"\n"+BuddyAgentMemory.guidance(currentAgent ?? [:])+"\n"+BuddyRulesReader.guidance(support:supportURL,workspace:context.workspace,agent:agent)
+                let supervisor=BuddyAutonomy.supervisor(support:supportURL,workspace:context.workspace,state:try workspaceState(),agent:agent)
+                options.instructions += "\n"+BuddyAutonomy.chatGuidance(agent:agent,supervisor:supervisor?.id,name:supervisor?.name)
                 options.proposalScope = BuddyProposalScope(workspace: context.workspace, chat: agent, actorId: agent, replyRunId: payload["runId"] as? String ?? "")
                 try ai.ensureAgentDefaults(workspace:context.workspace,agents:context.agents)
                 options.historyScope=BuddyHistoryScope(workspace:context.workspace,agent:agent)
                 options.history = BuddyConversationHistory.context(try workspaceState(), target: agent, runId: payload["runId"] as? String ?? "")
                 var routed=payload
                 if let currentAgent {routed["agent"]=["name":currentAgent["name"] ?? "Buddy","role":currentAgent["role"] ?? "","description":currentAgent["description"] ?? ""]}
-                replyHandler(try ai.send(routed, options: options), nil)
+                // "get stage 1 done" to the plan's supervisor is recorded by the app itself; the turn then hears that it was (or why not).
+                let state=try workspaceState(), plans=BuddyPlanStore.readOnlySummary(support:supportURL,workspace:context.workspace)
+                let stages=BuddyPlanChat.intercept(scope:BuddyPlanIntent.scope(options.authorizedUserText).map{($0.through,$0.remainder)},plans:plans,chat:agent,agent:agent,isGroup:false)
+                guard let stages else { options.instructions+=planInstructions(plans:plans,agent:agent,state:state,note:""); replyHandler(try ai.send(routed, options: options), nil); return }
+                let base=options, message=routed
+                Task {
+                    let outcome=await self.authorizeStages(stages,workspace:context.workspace,text:base.authorizedUserText,runId:payload["runId"] as? String ?? "",state:state)
+                    var turn=base
+                    turn.instructions+=self.planInstructions(plans:BuddyPlanStore.readOnlySummary(support:self.supportURL,workspace:context.workspace),agent:agent,state:state,note:outcome.through.map{BuddyPlanChat.authorizedNote(through:$0,supervisor:true)} ?? BuddyPlanChat.authorizeFailed(outcome.error))
+                    do { replyHandler(try self.ai.send(message, options: turn), nil) } catch { replyHandler(nil, error.localizedDescription) }
+                }
             } catch { replyHandler(nil, error.localizedDescription) }
         case "stopMessage":
             guard let runID = body["runId"] as? String else { replyHandler(nil, "Invalid reply."); return }

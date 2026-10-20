@@ -9,6 +9,13 @@ for line in sys.stdin:
     assert 'NO tools' in c['instructions']
     prompt=json.loads(c['prompt']);answers=[m['text'] for m in prompt['conversation'] if m['speaker']=='user'];text=' '.join(answers)
     phase='questions' if 'ready' in c['outputSchema']['properties'] else 'instructions'
+    # The interview offers the default user list and never asks what the agent must "never decide without asking";
+    # the written instructions keep the user's own boundaries and never add "if in doubt, ask".
+    if phase=='questions':
+        assert 'offer the default list: money leaving their accounts, sign-ins and credentials, messages or submissions to other people, changes to the objective' in c['instructions'],c['instructions']
+        assert "Never ask what the agent should 'never decide without asking'." in c['instructions'],c['instructions']
+    else:
+        assert "Write boundaries in the user's own terms and only those they stated. Do not add 'if in doubt, ask' or 'check first when unsure'; where the user delegates judgement, write that the agent decides." in c['instructions'],c['instructions']
     directory=Path(c['cwd']).parent
     with (directory/'fixture-calls.jsonl').open('a') as f:f.write(json.dumps({'phase':phase,'model':c['model'],'budget':c['budget'],'repair':'draftToShorten' in prompt})+'\n')
     if phase=='questions':

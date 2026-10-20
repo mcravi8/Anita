@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,writeFile,readFile,symlink,rm} from 'node:fs/promises';
-import {CodingShell} from '../coding-shell.mjs';
+import {mkdtemp,mkdir,writeFile,readFile,symlink,rm,realpath} from 'node:fs/promises';
+import {createServer} from 'node:net';
+import {CodingShell,sandboxProfile} from '../coding-shell.mjs';
 test('real macOS sandbox runs builds with a clean environment and blocks outside reads/writes, symlinks and external network',{skip:process.platform!=='darwin'},async()=>{
  const root=await mkdtemp('/tmp/buddy-coding-test-'),shell=new CodingShell();
  try{
@@ -18,6 +19,24 @@ test('real macOS sandbox runs builds with a clean environment and blocks outside
   result=await shell.run({cwd:root+'/project',scratch:root+'/scratch',network:true,code:'node -e \'const s=require("http").createServer((q,r)=>r.end("local-ok")).listen(0,"127.0.0.1",()=>require("http").get("http://127.0.0.1:"+s.address().port,r=>{r.on("data",x=>console.log(String(x)));r.on("end",()=>s.close())}))\''});assert.equal(result.exitCode,0,result.output);assert.match(result.output,/local-ok/,'a reviewed command with network access can use local services');
   result=await shell.run({cwd:root+'/project',scratch:root+'/scratch',code:'node -e \'setInterval(()=>{},1000)\'',timeoutSeconds:1});assert.equal(result.timedOut,true);assert.notEqual(result.exitCode,0);
  }finally{shell.close();delete process.env.ANTHROPIC_API_KEY;delete process.env.BUDDY_SECRET_TEST;await rm(root,{recursive:true,force:true});}
+});
+
+test('a reviewed network command reaches the internet but never a Unix socket on this Mac, such as the worker control socket',{skip:process.platform!=='darwin'},async()=>{
+ const root=await realpath(await mkdtemp('/tmp/buddy-coding-unix-')),shell=new CodingShell(),socket=root+'/project/s.sock';
+ await mkdir(root+'/project');
+ const server=createServer(c=>c.end('socket-reached')).listen(socket);await new Promise(r=>server.once('listening',r));
+ try{
+  const code=`python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.connect('${socket}');print(s.recv(64).decode())"`;
+  let result=await shell.run({cwd:root+'/project',scratch:root+'/scratch',network:true,code});
+  assert.notEqual(result.exitCode,0,'network access is IP only: '+result.output);assert.doesNotMatch(result.output,/socket-reached/);
+  result=await shell.run({cwd:root+'/project',scratch:root+'/scratch',code});
+  assert.notEqual(result.exitCode,0,'and without network access there is no socket either');assert.doesNotMatch(result.output,/socket-reached/);
+  const profile=sandboxProfile(root+'/project',root+'/scratch',true);
+  assert.match(profile,/\(allow network-outbound \(remote ip "\*:\*"\)\)/,'outbound network is limited to IP addresses');
+  assert.match(profile,/\(allow network-outbound \(remote unix-socket \(path-literal "\/private\/var\/run\/mDNSResponder"\)\)\)/,'the one Unix socket allowed is the DNS resolver, so host names still resolve');
+  assert.doesNotMatch(profile,/\(allow network-outbound\)/,'never an unfiltered outbound rule');
+  assert.doesNotMatch(sandboxProfile(root+'/project',root+'/scratch',false),/network-outbound/,'no network rule at all without network access');
+ }finally{shell.close();server.close();await rm(root,{recursive:true,force:true});}
 });
 
 test('long command output keeps its end, where the error is, and says the middle was left out',{skip:process.platform!=='darwin'},async()=>{

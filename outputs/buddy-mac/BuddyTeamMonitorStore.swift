@@ -180,10 +180,34 @@ import CryptoKit
     func configuration(_ policy:[String:Any],agent:String)->[String:Any] {var p=(policy["agents"] as? [String:[String:Any]])?[agent] ?? [:];if p["proactive"]==nil{p["proactive"]=policy["supervisorId"] as? String==agent};if p["participates"]==nil{p["participates"]=true};return p}
     func enqueue(kind:String,workspace:String,agent:String,input:[String:Any],fingerprint:String,policy:[String:Any],selection:BuddyAgentModelSelection,now:Date,force:Bool=false)throws->[String:Any] {
         let input=kind=="memory" ? input:BuddyAgentMemory.privateValue(input) as! [String:Any]
-        if let job=checks.last(where:{$0["workspace"] as? String==workspace && $0["agentId"] as? String==agent && $0["kind"] as? String==kind && $0["fingerprint"] as? String==fingerprint && $0["status"] as? String != "cancelled" && (kind=="memory" || $0["policyRevision"] as? Int==policy["revision"] as? Int) && (!force || ["queued","running"].contains($0["status"] as? String ?? ""))}) {return job}
+        // A failed learning batch is over: the same messages may be tried again, or learning would wait on it for good. A check-in about the
+        // same work is still not repeated on its own; the planner paces its retries.
+        let terminal:Set<String>=kind=="memory" ? ["cancelled","failed"]:["cancelled"]
+        if let job=checks.last(where:{$0["workspace"] as? String==workspace && $0["agentId"] as? String==agent && $0["kind"] as? String==kind && $0["fingerprint"] as? String==fingerprint && !terminal.contains($0["status"] as? String ?? "") && (kind=="memory" || $0["policyRevision"] as? Int==policy["revision"] as? Int) && (!force || ["queued","running"].contains($0["status"] as? String ?? ""))}) {return job}
         guard checks.filter({["queued","running","budget"].contains($0["status"] as? String ?? "")}).count<100 else{throw BuddyWorkerFailure(message:"The check-in queue is full. Finish or cancel pending checks first.")}
         let job:[String:Any]=["id":UUID().uuidString,"workspace":workspace,"agentId":agent,"kind":kind,"input":input,"fingerprint":fingerprint,"policyRevision":policy["revision"] ?? 0,"provider":kind=="memory" ? "claude":selection.provider,"model":kind=="memory" ? "claude-sonnet-4-6":selection.model,"status":"queued","createdAt":Self.stamp(now),"force":force]
-        try mutate{var jobs=checks;if jobs.count>=800{let pending=jobs.filter{!["completed","cancelled"].contains($0["status"] as? String ?? "")},finished=jobs.filter{["completed","cancelled"].contains($0["status"] as? String ?? "")};jobs=Array(finished.suffix(500))+pending};jobs.append(job);value["checks"]=jobs};return job
+        try mutate{
+            var jobs=Self.compacted(checks,now:now)
+            // When the journal is full it keeps the newest 400 finished checks, in order, and every check that is still waiting to run.
+            if jobs.count>=800 {let dropped=Set(jobs.indices.filter{!Self.waiting.contains(jobs[$0]["status"] as? String ?? "")}.dropLast(400));jobs=jobs.indices.filter{!dropped.contains($0)}.map{jobs[$0]}}
+            jobs.append(job);value["checks"]=jobs
+        };return job
+    }
+    /// Checks that have not run yet, or are running: trimming never drops them.
+    static let waiting:Set<String>=["queued","running","budget"]
+    /// What a finished check keeps of its input after a day: who asked what (the agent-message history) and which check-ins a summary covered.
+    static let keptInput:Set<String>=["requesterId","question","checkinIds","agent"]
+    /// Keeps the journal from outgrowing what Buddy will load: a check that finished over a day ago drops the evidence it was given, and a failed or
+    /// interrupted check over a week old is dropped.
+    static func compacted(_ jobs:[[String:Any]],now:Date)->[[String:Any]] {
+        let plain=ISO8601DateFormatter(),fractional=ISO8601DateFormatter();fractional.formatOptions=[.withInternetDateTime,.withFractionalSeconds]
+        func age(_ job:[String:Any])->TimeInterval {let text=(job["finishedAt"] ?? job["createdAt"]) as? String ?? "";return now.timeIntervalSince(plain.date(from:text) ?? fractional.date(from:text) ?? .distantPast)}
+        return jobs.compactMap{job in
+            let status=job["status"] as? String ?? ""
+            if ["failed","interrupted"].contains(status),age(job)>7*86400 {return nil}
+            guard ["completed","cancelled","failed"].contains(status),let input=job["input"] as? [String:Any],input.keys.contains(where:{!keptInput.contains($0)}),age(job)>86400 else{return job}
+            var out=job;out["input"]=input.filter{keptInput.contains($0.key)};return out
+        }
     }
     func update(_ id:String,_ fields:[String:Any])throws {try mutate{var jobs=checks;guard let i=jobs.firstIndex(where:{$0["id"] as? String==id}) else{throw BuddyWorkerFailure(message:"This check-in is unavailable.")};jobs[i].merge(fields){_,n in n};value["checks"]=jobs}}
     func reserve(_ job:[String:Any],policy:[String:Any],limit:Double,now:Date)throws->Bool {

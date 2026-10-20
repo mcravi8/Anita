@@ -1,4 +1,5 @@
-const stopReasons={error_max_budget_usd:'It reached its spending limit before it could finish. Raise the Claude task limit in Settings and continue.',error_max_turns:'It reached its limit on steps before it could finish. Continue it to keep going.',error_during_execution:'Claude hit an error while working.'};
+// A run has no limit of its own: error_max_budget_usd means the agent's daily limit ran out, which is a pause that continues by itself.
+const stopReasons={error_max_budget_usd:'Today’s spending limit for this agent was reached. It continues tomorrow or after the user raises the daily limit.',error_max_turns:'It reached its limit on steps before it could finish. Continue it to keep going.',error_during_execution:'Claude hit an error while working.'};
 const stopText=message=>message.errors?.length?message.errors.join('\n'):(message.subtype&&message.subtype!=='success'?(stopReasons[message.subtype]||message.subtype):(message.result||'Claude stopped before finishing.'));
 // A ready SDK process is single use: every turn keeps its own budget and context.
 // Preparing the next process performs the SDK handshake, never a model query.
@@ -36,7 +37,8 @@ export class ClaudeSession {
     if(typeof config.runId!=='string'||!config.runId.trim())throw Error('This Claude task is missing its run ID. No work was started.');
     // A run has no ceiling of its own (budget is null); a number here is only what a daily limit leaves room for.
     if(!config.apiKey||(config.budget!=null&&(!Number.isFinite(config.budget)||config.budget<=0)))throw Error('Connect Claude API credits first.');
-    this.busy=true;this.runId=config.runId;let result,lastActivity=0;
+    // lastText is the last thing the model said: a run that stops without a final result (a limit, an error) still reports what it had done.
+    this.busy=true;this.runId=config.runId;let result,lastActivity=0,lastText='';
     try {
       await this.prepare(config);
       const warm=await this.warm;this.warm=null;this.signature=null;
@@ -44,9 +46,9 @@ export class ClaudeSession {
       for await(const message of this.session){
         if(message.type==='stream_event'&&Date.now()-lastActivity>2000){lastActivity=Date.now();this.emit({type:'activity'});}
         if(message.type==='assistant'){
-          const text=message.message.content.filter(x=>x.type==='text').map(x=>x.text).join('\n');if(text)this.emit({type:'progress',text});
+          const text=message.message.content.filter(x=>x.type==='text').map(x=>x.text).join('\n');if(text){lastText=text;this.emit({type:'progress',text});}
         }
-        if(message.type==='result')result={type:'result',text:message.structured_output?JSON.stringify(message.structured_output):message.result||'',error:message.is_error?stopText(message):null,cost:message.total_cost_usd||0};
+        if(message.type==='result')result={type:'result',text:message.structured_output?JSON.stringify(message.structured_output):message.result||lastText,subtype:message.subtype||'',error:message.is_error?stopText(message):null,cost:message.total_cost_usd||0,sessionId:message.session_id};
       }
     } catch(error){
       // A run that ended in a failed result (turn or budget limit) has already been charged. The error that follows ends the task, so

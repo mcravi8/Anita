@@ -170,5 +170,87 @@ import Foundation
         require(singleFake.calls[0].options.toolsEnabled && singleFake.calls[0].options.outputSchema == nil, "single-member groups answer directly with allowed reading tools")
         singleFake.complete(0, text: "Simple reply"); await wait { singleTeam.snapshots()[0]["status"] as? String == "completed" }
         print("PASS: simple one-agent group requests avoid unnecessary coordination")
+
+        // The group's supervisor answers first; what it decides reaches the teammates it directs before they start.
+        let omori = [BuddyTeamAgent(id: "chief", name: "Chief", role: "Chief of staff", description: "Supervise the study"), BuddyTeamAgent(id: "forge", name: "Forge", role: "Engineer", description: "Run the pipeline"), BuddyTeamAgent(id: "lyra", name: "Lyra", role: "Researcher", description: "Review literature")]
+        var supervised = request(members: omori, text: "keep working on the study"); supervised.supervisorId = "chief"
+        let (supFake, supTeam) = fixture(); _ = try supTeam.send(supervised); await wait { supFake.calls.count == 1 }
+        let parallel = BuddyTeamPlan(leadId: "chief", tasks: [BuddyTeamTask(agentId: "forge", task: "Re-run the pipeline", dependsOn: []), BuddyTeamTask(agentId: "lyra", task: "Review the literature", dependsOn: []), BuddyTeamTask(agentId: "chief", task: "Decide what comes next", dependsOn: [])])
+        supFake.complete(0, text: String(data: try JSONEncoder().encode(parallel), encoding: .utf8)!)
+        await wait { supFake.calls.count == 2 }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        func speaker(_ call: FakeConversations.Call) -> String { (call.payload["agent"] as? [String: String])?["name"] ?? "" }
+        require(supFake.calls.count == 2 && speaker(supFake.calls[1]) == "Chief", "nothing goes to Forge or Lyra before the supervisor has answered: \(supFake.calls.map(speaker))")
+        supFake.complete(1, text: "CHIEF_DECIDED: Forge re-runs v2 only")
+        await wait { supFake.calls.count == 4 }
+        let forgeIndex = supFake.calls.firstIndex { speaker($0) == "Forge" }!, lyraIndex = supFake.calls.firstIndex { speaker($0) == "Lyra" }!
+        require((supFake.calls[forgeIndex].payload["text"] as? String)?.contains("CHIEF_DECIDED: Forge re-runs v2 only") == true && (supFake.calls[lyraIndex].payload["text"] as? String)?.contains("Chief’s completed contribution") == true, "the teammates are handed the supervisor's decision")
+        supFake.complete(forgeIndex, text: "FORGE_DONE"); supFake.complete(lyraIndex, text: "LYRA_DONE")
+        await wait { supTeam.snapshots()[0]["status"] as? String == "completed" }
+        let supervisorPlan = BuddyTeamService.supervisorFirst(parallel, supervisor: "chief")
+        require(supervisorPlan.tasks.first { $0.agentId == "chief" }?.dependsOn == [] && supervisorPlan.tasks.filter { $0.agentId != "chief" }.allSatisfy { $0.dependsOn == ["chief"] } && BuddyTeamService.supervisorFirst(parallel, supervisor: "nobody") == parallel && BuddyTeamService.supervisorFirst(parallel, supervisor: nil) == parallel, "only a supervisor who has an assignment is ordered first")
+        let reviewFirst = BuddyTeamPlan(leadId: "chief", tasks: [BuddyTeamTask(agentId: "forge", task: "Draft", dependsOn: []), BuddyTeamTask(agentId: "chief", task: "Review the draft", dependsOn: ["forge"])])
+        require((try? BuddyTeamPlan.decode(String(data: JSONEncoder().encode(BuddyTeamService.supervisorFirst(reviewFirst, supervisor: "chief")), encoding: .utf8)!, members: omori)) != nil, "ordering the supervisor first never makes a circle")
+        var managedState: [String: Any] = ["conversationWorkspace": supervised.workspace, "agents": omori.map { ["id": $0.id, "name": $0.name, "role": $0.role, "description": $0.description] }, "groups": [["id": supervised.groupId, "name": supervised.name, "objective": supervised.objective, "members": omori.map(\.id), "managedBy": "chief"]], "runs": [String: Any](), "messages": [String: Any]()]
+        require(try BuddyTeamRequest.from(workspace: managedState, payload: ["runId": supervised.runId, "groupId": supervised.groupId, "key": supervised.key, "text": "go"]).supervisorId == "chief", "the group's manager is its supervisor")
+        managedState["groups"] = [["id": supervised.groupId, "name": supervised.name, "objective": supervised.objective, "members": ["forge", "lyra"], "managedBy": "chief"]]
+        require(try BuddyTeamRequest.from(workspace: managedState, payload: ["runId": supervised.runId, "groupId": supervised.groupId, "key": supervised.key, "text": "go"]).supervisorId == nil, "a manager who is not in the group does not supervise its reply")
+        print("PASS: the group's supervisor answers before the teammates it directs, and they receive its decision")
+
+        // A fourth agent the person names is asked, not dropped.
+        let four = members + [BuddyTeamAgent(id: "vera", name: "Vera", role: "Verifier", description: "Check the filter rules")]
+        let crowded = request(members: four, text: "@Vera please sign off the filter rules")
+        let full = BuddyTeamPlan(leadId: "writer", tasks: [BuddyTeamTask(agentId: "writer", task: "Write", dependsOn: []), BuddyTeamTask(agentId: "reviewer", task: "Review", dependsOn: ["writer"]), BuddyTeamTask(agentId: "researcher", task: "Search", dependsOn: [])])
+        require(BuddyTeamService.honoringMentions(full, request: crowded).tasks.map(\.agentId) == ["writer", "reviewer", "researcher", "vera"], "a fourth mentioned member is added to a plan that already has three assignments")
+        let fourTasks = BuddyTeamPlan(leadId: "writer", tasks: full.tasks + [BuddyTeamTask(agentId: "vera", task: "Sign off", dependsOn: ["reviewer"])])
+        require((try? BuddyTeamPlan.decode(String(data: JSONEncoder().encode(fourTasks), encoding: .utf8)!, members: four)) == fourTasks, "a plan with four assignments is valid")
+        require((((BuddyTeamPlan.schema(memberIds: four.map(\.id))["properties"] as? [String: Any])?["tasks"] as? [String: Any])?["maxItems"] as? Int) == 6, "the coordinator may assign up to six members")
+        let (mentionFourFake, mentionFourTeam) = fixture(); _ = try mentionFourTeam.send(crowded); await wait { mentionFourFake.calls.count == 1 }
+        mentionFourFake.complete(0, text: String(data: try JSONEncoder().encode(full), encoding: .utf8)!)
+        await wait { mentionFourFake.calls.count >= 3 }
+        require(mentionFourFake.calls.contains { speaker($0) == "Vera" }, "the named fourth member actually receives an assignment: \(mentionFourFake.calls.map(speaker))")
+        _ = try await mentionFourTeam.stop(crowded.runId)
+        print("PASS: a fourth @mentioned member is not dropped and plans may hold up to six assignments")
+
+        // A teammate that keeps working is not cut off at the inactivity deadline; one that goes quiet is, and nothing runs for ever.
+        BuddyTeamService.contributionTimeout = 2
+        let (busyFake, busyTeam) = fixture(), busyRequest = request(members: [members[0]], group: "busy")
+        _ = try busyTeam.send(busyRequest); await wait { busyFake.calls.count == 1 }
+        let busyChild = busyFake.calls[0].payload["runId"] as! String
+        for _ in 0..<5 { try await Task.sleep(nanoseconds: 1_000_000_000); _ = busyTeam.consume(["type": "tool", "runId": busyChild, "tool": "buddy_read_file", "status": "completed", "internal": true]) }
+        require(busyFake.stopped.isEmpty && busyTeam.snapshots()[0]["status"] as? String == "answering", "a contribution emitting a tool event every second for five seconds is not timed out by a two-second deadline")
+        busyFake.complete(0, text: "STILL_WORKING_DONE"); await wait { busyTeam.snapshots()[0]["status"] as? String == "completed" }
+        let (quietFake, quietTeam) = fixture(), quietRequest = request(members: [members[0]], group: "quiet")
+        _ = try quietTeam.send(quietRequest); await wait { quietFake.calls.count == 1 }
+        try await Task.sleep(nanoseconds: 2_600_000_000)
+        require(quietTeam.snapshots()[0]["status"] as? String == "failed" && (quietTeam.snapshots()[0]["error"] as? String)?.contains("took too long") == true && quietFake.stopped.count == 1, "a contribution with no activity for the deadline is stopped")
+        BuddyTeamService.contributionCap = 3
+        let (cappedFake, cappedTeam) = fixture(), cappedRequest = request(members: [members[0]], group: "capped")
+        _ = try cappedTeam.send(cappedRequest); await wait { cappedFake.calls.count == 1 }
+        let cappedChild = cappedFake.calls[0].payload["runId"] as! String
+        for _ in 0..<4 { try await Task.sleep(nanoseconds: 1_000_000_000); _ = cappedTeam.consume(["type": "run", "runId": cappedChild, "status": "answering", "text": "still going", "internal": true]) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        require(cappedTeam.snapshots()[0]["status"] as? String == "failed" && cappedFake.stopped.count == 1, "activity cannot keep one contribution running past the absolute cap")
+        BuddyTeamService.contributionTimeout = 180; BuddyTeamService.contributionCap = 30 * 60
+        print("PASS: the contribution deadline re-arms on every tool or run event, a silent contribution still times out, and an absolute cap holds")
+
+        // What the person says to an agent in a group reaches that agent's direct chat; the rest of the group's traffic does not.
+        let dmState: [String: Any] = ["agents": [["id": "chief", "name": "Chief"], ["id": "forge", "name": "Forge"]],
+            "groups": [["id": "omori", "name": "Omori", "members": ["chief", "forge"]], ["id": "other", "name": "Elsewhere", "members": ["forge"]]],
+            "messages": ["chief": [["id": "d1", "who": "you", "live": true, "body": "DIRECT_QUESTION", "createdAt": "2026-10-18T19:00:00Z"]],
+                         "omori": [["id": "g1", "who": "you", "live": true, "body": "@Chief do X", "createdAt": "2026-10-18T19:46:00Z"], ["id": "g2", "who": "you", "live": true, "body": "@Forge FORGE_ONLY", "createdAt": "2026-10-18T19:47:00Z"], ["id": "g3", "who": "you", "live": true, "body": "you guys keep working", "createdAt": "2026-10-18T19:48:00Z"], ["id": "g4", "who": "chief", "status": "completed", "live": true, "body": "AGENT_REPLY", "createdAt": "2026-10-18T19:49:00Z"], ["id": "g5", "who": "you", "body": "SAMPLE_NOT_LIVE", "createdAt": "2026-10-18T19:50:00Z"], ["id": "g6", "who": "you", "live": true, "body": "@Chief " + String(repeating: "y", count: 3000), "createdAt": "2026-10-18T19:51:00Z"]],
+                         "other": [["id": "o1", "who": "you", "live": true, "body": "NOT_CHIEFS_GROUP", "createdAt": "2026-10-18T19:52:00Z"]]]]
+        let dm = BuddyConversationHistory.context(dmState, target: "chief", runId: UUID().uuidString)
+        require(dm.contains("You, in group Omori: @Chief do X") && dm.contains("You, in group Omori: you guys keep working") && dm.contains("DIRECT_QUESTION"), "the person's group messages to this agent or to everyone reach its direct chat: \(dm.prefix(600))")
+        require(!dm.contains("FORGE_ONLY") && !dm.contains("AGENT_REPLY") && !dm.contains("SAMPLE_NOT_LIVE") && !dm.contains("NOT_CHIEFS_GROUP") && !dm.contains(String(repeating: "y", count: 1300)), "messages to someone else, agents' replies, samples, other groups and overlong text are left out")
+        let many: [String: Any] = ["agents": [["id": "chief", "name": "Chief"]], "groups": [["id": "omori", "name": "Omori", "members": ["chief"]]], "messages": ["omori": (0..<15).map { ["id": "m\($0)", "who": "you", "live": true, "body": "GROUP_NOTE_\($0)_", "createdAt": String(format: "2026-10-18T19:%02d:00Z", $0)] as [String: Any] }]]
+        let recent = BuddyConversationHistory.context(many, target: "chief", runId: UUID().uuidString)
+        require(!recent.contains("GROUP_NOTE_4_") && recent.contains("GROUP_NOTE_5_") && recent.contains("GROUP_NOTE_14_"), "only the person's last ten group messages are carried")
+        // Group history keeps more of the latest messages, where the current thread usually is.
+        var longState: [String: Any] = ["conversationWorkspace": r.workspace, "agents": members.map { ["id": $0.id, "name": $0.name, "role": $0.role, "description": $0.description] }, "groups": [["id": r.groupId, "name": r.name, "objective": r.objective, "members": members.map(\.id)]], "runs": [String: Any]()]
+        longState["messages"] = [r.groupId: (0..<5).map { ["id": "l\($0)", "who": "you", "live": true, "body": "L\($0)" + String(repeating: "z", count: 5000)] as [String: Any] }]
+        let longHistory = try BuddyTeamRequest.from(workspace: longState, payload: ["runId": UUID().uuidString, "groupId": r.groupId, "key": r.key, "text": "next"]).history.components(separatedBy: "\n\n")
+        require(longHistory.map(\.count) == [1205, 1205, 4005, 4005, 4005],"the last three group messages keep 4,000 characters and earlier ones 1,200: \(longHistory.map(\.count))")
+        print("PASS: the person's group messages addressed to an agent reach its direct chat, bounded, and group history keeps more of the latest messages")
     }
 }

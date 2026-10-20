@@ -51,6 +51,7 @@ final class BuddyOperationsDB {
                 let check = try rows("PRAGMA quick_check(1)")
                 guard check.first?.first?.string == "ok" else { throw BuddyOperationsFailure(message: "Buddy couldn’t verify its saved task database. Your chats and files are not affected. Don’t delete anything in Application Support/Buddy/Worker; ask Claude Code to repair it.") }
                 try prepareSchema()
+                try ensureShape()
             }
         } catch {
             sqlite3_close_v2(opened); handle = nil
@@ -319,6 +320,29 @@ final class BuddyOperationsDB {
                 }
             }
             try run("PRAGMA user_version = 7")
+        }
+    }
+    /// Columns the code relies on that were added without a new version number. They are added wherever they are missing on every open, whatever
+    /// `user_version` says, so a database whose layout lags its version (as happened before version 7) is repaired. The version stays the same,
+    /// so an older Buddy can still open the database; it simply ignores the extra columns.
+    static let addedColumns: [(table: String, column: String, definition: String)] = [
+        ("decisions", "audience", "TEXT NOT NULL DEFAULT 'user'"),
+        ("decisions", "resolved_by", "TEXT NOT NULL DEFAULT ''"),
+        ("attempts", "result", "TEXT")]
+    private func ensureShape() throws {
+        func missing() throws -> (columns: [(table: String, column: String, definition: String)], indexMissing: Bool) {
+            var have: [String: Set<String>] = [:]
+            for table in Set(Self.addedColumns.map(\.table)) { have[table] = Set(try rows("PRAGMA table_info(\(table))").compactMap { $0[1].string }) }
+            let columns = Self.addedColumns.filter { item in !(have[item.table] ?? []).isEmpty && !(have[item.table] ?? []).contains(item.column) }
+            let indexMissing = try rows("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'decisions_audience'").isEmpty
+            return (columns, indexMissing)
+        }
+        // Reading first means a database that is already right is not even locked.
+        let needed = try missing()
+        guard !needed.columns.isEmpty || needed.indexMissing else { return }
+        try transaction {
+            for item in try missing().columns { try run("ALTER TABLE \(item.table) ADD COLUMN \(item.column) \(item.definition)") }
+            try run("CREATE INDEX IF NOT EXISTS decisions_audience ON decisions(workspace, audience, status)")
         }
     }
     /// The row number SQLite gave the most recent INSERT on this connection.

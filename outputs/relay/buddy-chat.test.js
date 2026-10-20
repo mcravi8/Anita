@@ -58,6 +58,11 @@ test('a group request the agents answered for themselves shows no combined reply
  assert.equal(Chat.presentation({runs:{}},{runId:'zz',body:'Plain reply'}).body,'Plain reply');
 });
 
+test('a group reply keeps up to six members’ work, so nobody named in the request drops out',()=>{
+ const people=['a','b','c','d','e','f','g'],s={...seed(),agents:people.map(id=>({id,name:id.toUpperCase(),role:'R',description:'D'})),groups:[{id:'team',name:'Team',members:people}],drafts:{team:'@everyone go'}};
+ const r=Chat.begin(s,'team');Chat.apply(s,{runId:r.run.runId,status:'answering',team:{phase:'working',leadId:'a',entries:people.map(agentId=>({agentId,status:'working'}))}});
+ assert.deepEqual(s.messages.team[1].team.entries.map(e=>e.agentId),['a','b','c','d','e','f']);
+});
 test('a reply that saved a routine but ended with no text is a finished reply, not "No answer came back"',()=>{
  const s=seed(),r=Chat.begin(s,'a'),routine={id:'saved',workspace:s.conversationWorkspace,agentId:'a',title:'Morning review',nextRun:'2026-10-17T16:00:00Z',status:'active'};
  Chat.apply(s,{type:'routine',runId:r.run.runId,routine});

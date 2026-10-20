@@ -11,7 +11,10 @@
   const unconfirmed=task=>(task.reviews||[]).filter(r=>r.status==='uncertain');
   const authTitle=mode=>mode==='signup'?'Create an account':mode==='verification'?'Verify your email':'Sign in privately';
   // A scheduled email check that found nothing the person has not been told (the native side decides: `quiet`) stays in Background work and says nothing.
-  const deliverable=t=>['completed','failed','interrupted','waiting_review','waiting_user'].includes(t?.status)&&t?.quiet!==true;
+  // A pause the system made (access reduced, a provider disconnected, a cause it could not name) is told in the agent's chat, so work never stops
+  // silently. A pause the person, a routine or a newer run made is not: they already know, and the daily limit has its own Needs item.
+  const systemPause=t=>t?.status==='paused'&&t.blockedBy!=='limit'&&!/^(user|routine|superseded)/.test(t.stopCause||'');
+  const deliverable=t=>(['completed','failed','interrupted','waiting_review','waiting_user'].includes(t?.status)||systemPause(t))&&t?.quiet!==true;
   const deliveryID=t=>`worker-${t.id}-${Number(t.attempt)||0}-${t.status}${['waiting_review','waiting_user'].includes(t.status)?'-'+encodeURIComponent(t.attentionKey||t.progress||''):''}`;
   const attention=status=>['waiting_review','waiting_user'].includes(status);
   function taskMessage(t){
@@ -23,6 +26,7 @@
     const brief=progress.length<=160&&!/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b|\b\d\d:\d\d:\d\dZ\b/i.test(progress)?progress:'';
     if(t.status==='waiting_user')return brief||'I need a detail from you to continue.';
     if(t.status==='completed')return t.result;
+    if(t.status==='paused'){const why=brief.replace(/^paused[:.]?\s*/i,'');return `**${String(t.title||'This task').slice(0,90)}** is paused. ${why?why[0].toUpperCase()+why.slice(1):'Open the task for details.'}`;}
     return `I couldn’t finish **${String(t.title||'this task').slice(0,90)}**. ${brief||'Open the task for details.'}`;
   }
   function presentation(state,m){
@@ -40,7 +44,7 @@
     const prior=attention(t.status)?state.messages[t.agentId].find(m=>m.workerTaskID===t.id&&attention(m.workerStatus)&&(m.workerAttempt===message.workerAttempt||m.id.startsWith(`worker-${t.id}-${message.workerAttempt}-`))):null;
     if(prior){if(prior.workerUpdatedAt&&prior.workerUpdatedAt>t.updatedAt)return false;Object.assign(prior,message);}else state.messages[t.agentId].push(message);return true;
   }
-  const api={labels,canResume,needsAllowance,pending,unconfirmed,authTitle,deliverable,deliveryID,deliverResult,taskMessage,presentation};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
+  const api={labels,canResume,needsAllowance,pending,unconfirmed,authTitle,systemPause,deliverable,deliveryID,deliverResult,taskMessage,presentation};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
   let snapshot={online:false,tasks:[],routines:[],paused:false},detail=null,view='list',routine=null,busy=false,error='',last='',preview=null;
   const drafts=new Map();
@@ -92,7 +96,12 @@
     const listKey=s=>JSON.stringify([s.online,s.paused,s.defaultProvider,s.privateBrowser?.agentId,s.privateBrowser?.taskId,s.tasks.map(t=>[t.id,t.title,t.agentId,t.status]),(s.routines||[]).map(r=>[r.id,r.status,r.nextRun])]);
     try{const before=listKey(snapshot);snapshot=await request({operation:'status'});await deliverRoutineResults();error='';const message=document.querySelector('[data-worker-error]');if(message)message.textContent='';if(redraw&&document.querySelector('[data-worker-panel]')){if(view==='list'&&before!==listKey(snapshot))list();else if(view==='routine'&&routine&&before!==listKey(snapshot)){const r=snapshot.routines?.find(r=>r.id===routine.id);if(r)routineDetail(r);else{view='list';list();}}else if(view==='task'&&detail){const result=await request({operation:'detail',taskId:detail.id});detail=result.task;const live=document.querySelector('[data-worker-live]');if(live&&!(live.contains(document.activeElement)&&document.activeElement.matches('input,textarea,select'))&&last!==detailKey()){live.innerHTML=taskBody(detail);last=detailKey();}}}badge();window.BuddyActivity?.acceptWorker(snapshot);}
     catch(e){window.BuddyActivity?.workerError(e.message||e);const wasOnline=snapshot.online!==false;snapshot.online=false;if(redraw&&view==='list'){if(wasOnline)list();showError(e);}}
+    // Whatever the poll found, the plan strip and the figures read it now rather than at the next full render.
+    finally{polled=Date.now();window.dispatchEvent(new CustomEvent('buddy-worker-snapshot'));}
   }
+  // A plan being worked on, or anyone busy in the background, is checked every 5 seconds; otherwise every 15.
+  let polled=0;
+  const live=()=>(snapshot.plans||[]).some(p=>p?.status==='active')||Object.values(snapshot.pulse?.agents||{}).some(a=>a?.state&&a.state!=='idle');
   // A finished task with nothing to deliver (an empty result) is asked for once per outcome, not on every refresh.
   const examined=new Map(),outcome=t=>`${t.status}|${t.updatedAt||''}`;
   async function deliverRoutineResults(){
@@ -104,7 +113,7 @@
     if(changed){save();if(ui.view.kind==='chat')refreshLiveChat(ui.view.target);else render();}
   }
   function badge(){if(window.BuddyActivity){BuddyActivity.paint();return;}const count=snapshot.tasks.filter(t=>['waiting_review','waiting_user','failed','interrupted'].includes(t.status)).length+(snapshot.routines||[]).filter(r=>r.status==='needs_attention').length+(snapshot.scheduleError?1:0);document.querySelectorAll('[data-worker-badge]').forEach(el=>{el.textContent=count||'';el.hidden=!count;});}
-  api.refresh=refresh;
+  api.refresh=refresh;api.snapshot=()=>snapshot;api.request=request;api.pulse=()=>snapshot.pulse||{agents:{}};
   api.open=async()=>{view='list';error='';list();await refresh();};
   api.profiles=async()=>{view='profiles';error='';profiles();try{snapshot=await request({operation:'start'});profiles();}catch(e){showError(e);}};
   document.addEventListener('input',e=>{if(e.target.matches('[data-worker-update]')&&detail)drafts.set(detail.id,{...drafts.get(detail.id),update:e.target.value});if(e.target.matches('[data-worker-allowance]')&&detail)drafts.set(detail.id,{...drafts.get(detail.id),allowance:e.target.value,budgetAuthorizationID:undefined});const form=e.target.closest('#worker-new-form,#worker-routine-form');if(form){try{localStorage.setItem(key()+(form.id==='worker-routine-form'?'-routine':''),JSON.stringify({...Object.fromEntries(new FormData(form)),...(form.id==='worker-routine-form'?{weekdays:[...form.querySelectorAll('[name=weekday]:checked')].map(v=>Number(v.value))}:{})}));}catch{}}});
@@ -167,6 +176,6 @@
   document.addEventListener('click',async e=>{const a=e.target.closest('[data-action]')?.dataset.action;if(view!=='preview'||!preview||!document.querySelector('.worker-document')||!['document-prev','document-next'].includes(a))return;try{preview=await request({operation:'preview',taskId:detail.id,path:preview.path,page:(preview.previewPage||1)+(a==='document-next'?1:-1)});document.querySelector('.worker-document').innerHTML=BuddyDocuments.preview(preview);}catch(e){showError(e);}});
   document.addEventListener('change',e=>{if(view==='preview'&&e.target.id==='document-sheet'&&preview&&document.querySelector('.worker-document'))document.querySelector('.worker-document').innerHTML=BuddyDocuments.preview(preview,Number(e.target.value));});
   setInterval(()=>{if(!busy&&!['new','routine-form'].includes(view)&&document.querySelector('[data-worker-panel]'))refresh();},2500);
-  setInterval(()=>{if(!busy&&!document.querySelector('[data-worker-panel]'))refresh(false);},15000);
+  setInterval(()=>{if(!busy&&!document.querySelector('[data-worker-panel]')&&Date.now()-polled>=(live()?4500:14500))refresh(false);},5000);
   setTimeout(()=>refresh(false),1800);
 })(typeof globalThis!=='undefined'?globalThis:this);

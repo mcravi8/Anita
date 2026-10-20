@@ -46,6 +46,23 @@ test('streaming activity keeps live work observable without exposing token or th
  assert.equal(JSON.stringify(f.events).includes('PRIVATE_STREAM_CONTENT'),false);f.host.close();
 });
 
+test('a result names how the run ended, keeps the last thing the model said, and a daily limit reads as a pause that continues by itself',async()=>{
+  const events=[];
+  const host=new ClaudeSession({startup:async({options})=>({options,close(){},query(){return {async *[Symbol.asyncIterator](){
+   yield {type:'assistant',message:{content:[{type:'text',text:'Drafted the brief and saved notes.md.'}]}};
+   yield {type:'result',subtype:'error_max_budget_usd',is_error:true,errors:[],total_cost_usd:0.3,session_id:'4b088c90-af25-410c-8a7d-74d54e9c1cad'};},close(){}};}}),tool:(n,d,s,call)=>({name:n,call}),createSdkMcpServer:x=>x,fromJSONSchema:()=>({shape:{}}),write:x=>events.push(x)});
+  await host.start({...config,runId:'limited'});
+  const result=events.find(e=>e.type==='result');
+  assert.equal(result.subtype,'error_max_budget_usd','the bridge passes on how the run ended');
+  assert.equal(result.text,'Drafted the brief and saved notes.md.','an empty SDK result falls back to the last assistant text');
+  assert.equal(result.error,'Today’s spending limit for this agent was reached. It continues tomorrow or after the user raises the daily limit.');
+  assert.doesNotMatch(result.error,/task limit|Settings and continue/,'no advice to raise a per-task limit that does not exist');
+  assert.equal(result.sessionId,'4b088c90-af25-410c-8a7d-74d54e9c1cad');assert.equal(result.cost,0.3);host.close();
+  const plain=fixture();await plain.host.start(config);
+  const done=plain.events.find(e=>e.type==='result');
+  assert.equal(done.subtype,'','a result with no subtype says so with an empty string');assert.equal(done.text,'Observed answer');assert.equal(done.error,null);plain.host.close();
+});
+
 test('a run with no budget is given no ceiling, and one with a number is held to it',async()=>{
   const open=fixture();await open.host.start({...config,budget:null});
   assert.equal('maxBudgetUsd' in open.calls[0].options,false,'no limit of its own means no ceiling is sent to the model');

@@ -23,7 +23,7 @@ test('read and unread controls clear badges without resolving work, persist, and
  const id=A.collect(s,w)[0].id;assert.equal(A.unreadCounts(A.collect(s,w)).needs,1);A.markRead(s,[id]);const loaded=JSON.parse(JSON.stringify(s));assert.equal(A.collect(loaded,w).length,1);assert.equal(A.unreadCounts(A.collect(loaded,w)).needs,0);assert.equal(t.status,'failed');A.markRead(loaded,[id],false);assert.equal(A.unreadCounts(A.collect(loaded,w)).needs,1);A.markRead(loaded,[id]);assert.equal(A.unreadCounts(A.collect(loaded,{workspace:'w',tasks:[{...t,attempt:2}]})).needs,1);
 });
 test('linked schedules share the actual task alert and check failures explain the cause',()=>{
- const w={workspace:'w',tasks:[{id:'t',agentId:'inbox',status:'failed',routineSeriesID:'series',progress:'This task’s Claude budget is exhausted or its last cost is uncertain.'}],routines:Array.from({length:6},(_,n)=>({id:'r'+n,agentId:'inbox',routineSeriesID:'series',status:'needs_attention'}))};assert.equal(A.collect(state,w).length,1);assert.match(A.collect(state,w)[0].description,/additional allowance/);
+ const w={workspace:'w',tasks:[{id:'t',agentId:'inbox',status:'failed',routineSeriesID:'series',progress:'This task’s Claude budget is exhausted or its last cost is uncertain.'}],routines:Array.from({length:6},(_,n)=>({id:'r'+n,agentId:'inbox',routineSeriesID:'series',status:'needs_attention'}))};assert.equal(A.collect(state,w).length,1);assert.match(A.collect(state,w)[0].description,/daily limit is used up/);
  const c=A.collect(state,{}, {workspace:'w',checks:[{id:'c',agentId:'chief',kind:'overview',status:'failed',error:'A team update referenced work outside its actual check-in.'}]})[0];assert.equal(c.checkId,'c');assert.match(c.description,/source reference/);assert.match(c.title,/Team update/);
 });
 test('an action that may not have gone through is something to check, whatever state its task is in',()=>{
@@ -97,6 +97,32 @@ test('a change waiting for the person’s OK is a card that asks for it, and a r
  const answered=A.collect(state,{workspace:'w',tasks:[],decisions:[]});assert.equal(answered.length,0,'once answered, the card is gone');
 });
 
+test('Needs you lists what needs the person; what waits for the supervisor shows only if Chief has not picked it up',()=>{
+ const now=Date.parse('2026-10-19T12:00:00Z'),at=minutes=>new Date(now-minutes*60000).toISOString();
+ const people={...state,agents:[{id:'chief',name:'Chief'},{id:'inbox',name:'Inbox'}]};
+ const forUser={id:'signin:t1',kind:'signin',audience:'user',agentId:'inbox',taskId:'t1',title:'Sign in',question:'Choose how to sign in.',createdAt:at(2)};
+ const legacy={id:'waiting:t2:1',kind:'waiting',agentId:'inbox',taskId:'t2',title:'Old entry',question:'Browser opened for you.',createdAt:at(2)};
+ const forChief={id:'result:t3:1',kind:'result',audience:'supervisor',agentId:'inbox',taskId:'t3',title:'Draft the reply',question:'The reply is drafted.',createdAt:at(2)};
+ const worker=(lane,decisions=[forUser,legacy,forChief])=>({workspace:'w',tasks:[],decisions,...(lane===undefined?{}:{supervisorLane:lane})});
+ const ids=items=>items.filter(i=>i.kind==='needs').map(i=>i.id);
+ assert.deepEqual(ids(A.collect(people,worker({online:true,busy:false}),{},now)),['decision:signin:t1','decision:waiting:t2:1'],'the supervisor’s item stays off the list while the lane is online and the item is fresh');
+ const offline=A.collect(people,worker({online:false}),{},now);
+ assert.equal(ids(offline).includes('decision:result:t3:1'),true,'shown when the supervisor lane is offline');
+ assert.match(offline.find(i=>i.id==='decision:result:t3:1').note,/^Chief hasn’t picked this up yet/);
+ assert.equal(offline.find(i=>i.id==='decision:signin:t1').note,undefined,'a request for the person carries no such label');
+ assert.equal(ids(A.collect(people,worker(undefined),{},now)).includes('decision:result:t3:1'),true,'and when the app does not report the lane at all');
+ const stale=A.collect(people,worker({online:true},[{...forChief,createdAt:at(16)}]),{},now);
+ assert.deepEqual(ids(stale),['decision:result:t3:1'],'shown once it has been open for more than 15 minutes');assert.match(stale[0].note,/hasn’t picked this up yet/);
+ assert.deepEqual(ids(A.collect(people,worker({online:true},[{...forChief,createdAt:at(14)}]),{},now)),[],'but not before');
+ assert.deepEqual(ids(A.collect(people,worker({online:true},[{...forChief,createdAt:''}]),{},now)),['decision:result:t3:1'],'an item whose age is unknown is shown');
+ const counted=A.collect(people,worker({online:true}),{},now);assert.equal(A.unreadCounts(counted).needs,2,'the badges count only what is listed');
+ const named={...people,agents:[...people.agents,{id:'mira',name:'Mira'}]};
+ assert.match(A.collect(named,{workspace:'w',tasks:[{id:'t3',agentId:'inbox',status:'completed',supervisorId:'mira'}],decisions:[forChief],supervisorLane:{online:false}},{},now).find(i=>i.id==='decision:result:t3:1').note,/^Mira hasn’t picked this up yet/,'named after the task’s own supervisor');
+});
+test('a used-up daily limit says it continues tomorrow or can be raised, never an allowance',()=>{
+ for(const raw of ['This task’s Claude budget is exhausted or its last cost is uncertain.','The automatic usage limit was reached.','Reached maximum budget'])assert.equal(A.describe(raw),'Today’s daily limit is used up. It continues tomorrow, or raise the limit in the agent’s settings.');
+ assert.doesNotMatch(A.describe('Reached maximum budget'),/allowance/);
+});
 test('a quiet scheduled check raises no notification, while the same kind of check with news does',()=>{
  const t={id:'scan',workspace:'w',agentId:'inbox',title:'Check AgentMail and Gmail',status:'completed',updatedAt:'2026-10-19T15:00:00Z'};
  assert.equal(A.collect(state,{workspace:'w',tasks:[{...t,quiet:true}]}).length,0);

@@ -8,12 +8,19 @@ for line in sys.stdin:
  assert c['tools']==[]
  p=json.loads(c['prompt']);kind='memory' if 'changed' in c['outputSchema']['properties'] else 'overview' if 'reports' in p else 'checkin'
  folder=Path(c['cwd']).parent
- with (folder/'fixture-calls.jsonl').open('a') as f:f.write(json.dumps({'kind':kind,'model':c['model'],'runId':c['runId']})+'\n')
+ call={'kind':kind,'model':c['model'],'runId':c['runId']}
+ if kind=='memory':
+  props=c['outputSchema']['properties'];call['required']=c['outputSchema'].get('required');call['rewrites']='role' in props or 'instructions' in props
+ with (folder/'fixture-calls.jsonl').open('a') as f:f.write(json.dumps(call)+'\n')
  if kind=='memory':
   messages=p['messages'];text=' '.join(m['text'] for m in messages)
   if 'SLOW' in text:time.sleep(2)
-  changed=next((m for m in messages if 'concise' in m['text']),None)
-  r={'changed':bool(changed),'role':p['currentRole'],'instructions':'Research public evidence. Keep answers concise and cite sources.' if changed else p['currentInstructions'],'rules':[{'messageId':changed['id'],'quote':'concise','instruction':'Keep answers concise.','replaces':[]}] if changed else []}
+  # fixture-memory-mode.txt = no_rules: the learner says something changed but gives no sourced rule, which is rejected.
+  mode=folder/'fixture-memory-mode.txt'
+  if mode.exists() and mode.read_text().strip()=='no_rules':r={'changed':True,'rules':[]}
+  else:
+   changed=next((m for m in messages if 'concise' in m['text']),None)
+   r={'changed':bool(changed),'rules':[{'messageId':changed['id'],'quote':'concise','instruction':'Keep answers concise.','replaces':[]}] if changed else []}
  elif kind=='checkin':
   sources=p.get('sources',[]);blocking=next((s for s in sources if s.get('status') in ['waiting_user','waiting_review','failed']),None);completed=next((s for s in sources if s.get('status')=='completed'),None);s=blocking or completed
   r={'notify':bool(s),'body':'I need your decision before continuing.' if blocking else 'The requested work finished.' if completed else '', 'priority':0 if blocking else 1,'sourceIds':[s['id']] if s else []}

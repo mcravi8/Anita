@@ -79,6 +79,20 @@ test('work moving between members shows the member working, with no animation jo
   t.update(base({}));
   assert.deepEqual(sink.log.filter(e=>e[0]==='handoff'||e[0]==='work'),[]);
 });
+test('background work from the worker’s pulse moves the figures: working, waiting for a turn, and needing the person',()=>{
+  const team={agents:[{id:'forge'},{id:'lyra'},{id:'chief'},{id:'mira'}],groups:[],runs:{}};
+  const pulse=agents=>()=>({agents});
+  assert.deepEqual(snapshot(team,{pulse:pulse({forge:{state:'working'}})}).modes,{forge:'working'},'Forge is working');
+  assert.deepEqual(snapshot(team,{pulse:pulse({forge:{state:'quiet'},lyra:{state:'retrying'},chief:{state:'with_supervisor'},mira:{state:'needs_you'}})}).modes,{forge:'working',lyra:'planning',chief:'planning',mira:'needs'});
+  assert.deepEqual(snapshot(team,{pulse:pulse({forge:{state:'idle'},ghost:{state:'working'}})}).modes,{},'idle rests, and an agent outside the workspace is ignored');
+  assert.deepEqual(snapshot(team,{pulse:()=>undefined}).modes,{},'no pulse yet, nothing changes');
+  assert.deepEqual(snapshot({...team,runs:dm('starting','forge')},{pulse:pulse({forge:{state:'needs_you'}})}).modes,{forge:'needs'},'needing the person outranks a reply starting');
+  const before=globalThis.BuddyWorkerUI;globalThis.BuddyWorkerUI={pulse:()=>({agents:{lyra:{state:'working'}}})};
+  try{assert.deepEqual(snapshot(team).modes,{lyra:'working'},'by default the pulse comes from the worker panel’s last status');}finally{globalThis.BuddyWorkerUI=before;}
+  const sink=fakeSink(),t=tracker(sink);let agents={forge:{state:'working'}};
+  t.update(team,{pulse:()=>({agents})});assert.equal(sink.modes.forge,'working');
+  agents={};t.update(team,{pulse:()=>({agents})});assert.equal(sink.modes.forge,'ready','and rests again once the work is over');
+});
 test('a mode set by something else is not overwritten when the run ends',()=>{
   const sink=fakeSink(),t=tracker(sink);
   t.update(base(dm('answering')));sink.modes.one='stuck';

@@ -54,6 +54,19 @@ test('actions that may or may not have gone through are listed for the user to c
  assert.deepEqual(worker.unconfirmed({}),[]);assert.deepEqual(worker.pending(task).map(r=>r.id),['1'],'checking an action is separate from approving one');
 });
 
+test('a pause the system made is told in the agent’s chat; a pause the person or a routine made is not',()=>{
+ assert.equal(worker.deliverable({status:'paused',stopCause:'access.narrowed'}),true);
+ assert.equal(worker.deliverable({status:'paused',stopCause:'provider.disconnected'}),true);
+ assert.equal(worker.deliverable({status:'paused',stopCause:''}),true,'a pause with no recorded cause is told too');
+ for(const stopCause of ['user.pause','user.pauseAll','user.plan_stop','routine.paused','superseded'])assert.equal(worker.deliverable({status:'paused',stopCause}),false,stopCause);
+ assert.equal(worker.deliverable({status:'paused',stopCause:'limit',blockedBy:'limit'}),false,'the daily limit has its own Needs item');
+ assert.equal(worker.deliverable({status:'paused',stopCause:'access.narrowed',quiet:true}),false);
+ const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}},t={id:'job',workspace:'w',agentId:'a',title:'Draft the brief',status:'paused',stopCause:'provider.disconnected',attempt:1,progress:'Paused: Claude was disconnected. It continues by itself once reconnected.',updatedAt:'2026-10-19T10:00:00Z'};
+ assert.equal(worker.deliverResult(s,t),true);assert.equal(worker.deliverResult(s,t),false,'once');
+ assert.equal(s.messages.a[0].body,'**Draft the brief** is paused. Claude was disconnected. It continues by itself once reconnected.');
+ assert.equal(worker.deliverResult(s,{...t,id:'mine',stopCause:'user.pause',progress:'Paused.'}),false);
+ assert.equal(worker.taskMessage({...t,progress:''}),'**Draft the brief** is paused. Open the task for details.');
+});
 test('a scheduled check the app marked quiet says nothing: no message in the DM',()=>{
  const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}},t={id:'scan',routineID:'r',workspace:'w',agentId:'a',status:'completed',attempt:1,result:'Nothing new since the last check. The Bank of America assessment is still open.',updatedAt:'2026-10-19T15:00:00Z'};
  const UI=require('./buddy-worker');

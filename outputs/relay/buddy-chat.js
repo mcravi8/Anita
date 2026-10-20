@@ -72,7 +72,7 @@
     if(run.memberIds&&event.team&&typeof event.team==='object') {
       team=structuredClone(event.team);
       if(team.leadId&&!run.memberIds.includes(team.leadId))return false;
-      team.entries=(Array.isArray(team.entries)?team.entries:[]).filter(e=>run.memberIds.includes(e.agentId)).slice(0,3);
+      team.entries=(Array.isArray(team.entries)?team.entries:[]).filter(e=>run.memberIds.includes(e.agentId)).slice(0,6);
     }
     const message=(state.messages[run.target]||[]).find(m=>m.id===run.replyId);
     const body=typeof event.text==='string'?event.text:message?.body||'';

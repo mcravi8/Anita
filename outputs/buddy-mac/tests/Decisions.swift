@@ -209,5 +209,90 @@ import Foundation
             }
         }
         print("PASS: one blocker per cause with a stable identity, each kind (sign-in, operation, waiting, stopped, allowance, unconfirmed action, limit), no duplicates, events for opening and ending, read and dismissed kept natively and separate, blockers found at start, and the process ended at all \(steps * 2) commit boundaries")
+
+        // 9. Every stop is seen by someone, and each entry says who it is for: the person, or the supervisor when the task names one.
+        let audienceDirectory = root.appendingPathComponent("audience/Worker")
+        let routed = try BuddyWorkerStore(directory: audienceDirectory)
+        func mine(_ task: String) throws -> [[String: Any]] { try open(routed, w).filter { $0["taskId"] as? String == task } }
+        let narrowed = try start(routed, w, a, request: "narrowed")
+        try routed.update(narrowed, ["status": "paused", "stopCause": "access.narrowed", "progress": "Paused: this agent's access was reduced while it worked."])
+        var got = try mine(narrowed)
+        require(kinds(got) == ["paused"] && got[0]["id"] as? String == "paused:\(narrowed):1:access.narrowed" && got[0]["audience"] as? String == "user" && (got[0]["question"] as? String)?.contains("access was reduced") == true, "a pause the system made is one entry that says why, for the person when no supervisor is named: \(got)")
+        _ = try routed.resume(narrowed)
+        require(try mine(narrowed).isEmpty && (try routed.job(narrowed))["stopCause"] as? String == "", "resuming ends it and clears the cause")
+        let mute = try start(routed, w, a, request: "mute")
+        try routed.update(mute, ["status": "paused", "stopCause": "user.pause"])
+        require(try mine(mute).isEmpty, "a pause the person made needs nobody")
+        for cause in ["user.pauseAll", "user.plan_stop", "routine.paused", "superseded"] { try routed.update(mute, ["stopCause": cause]); require(try mine(mute).isEmpty, "a pause by \(cause) needs nobody") }
+        try routed.update(mute, ["stopCause": "", "progress": ""])
+        got = try mine(mute)
+        require(kinds(got) == ["paused"] && got[0]["id"] as? String == "paused:\(mute):1:unknown" && got[0]["question"] as? String == "This task stopped by itself.", "a pause with no recorded cause is never silent: \(got)")
+
+        let retrying = try start(routed, w, a, request: "retrying")
+        try routed.update(retrying, ["status": "failed", "progress": "The connection stalled.", "stopCause": "stall", "recovery": ["cause": "stall", "state": "pending", "tries": 1]])
+        require(try mine(retrying).isEmpty, "a stop that is being retried by itself asks nobody")
+        try routed.update(retrying, ["recovery": ["cause": "stall", "state": "queued", "tries": 1]])
+        require(try mine(retrying).isEmpty, "nor while the retry is queued")
+        try routed.update(retrying, ["recovery": ["cause": "stall", "state": "exhausted", "tries": 3]])
+        got = try mine(retrying)
+        require(kinds(got) == ["stopped"] && got[0]["audience"] as? String == "user", "once the retries are used up it is a stopped task again: \(got)")
+        let chief = UUID().uuidString
+        try routed.update(retrying, ["supervisorId": chief])
+        got = try mine(retrying)
+        require(got.count == 1 && got[0]["audience"] as? String == "supervisor" && got[0]["id"] as? String == "stopped:\(retrying):1:failed", "naming a supervisor moves the open entry to them, in place: \(got)")
+
+        let supervised = try start(routed, w, a, request: "supervised")
+        try routed.update(supervised, ["supervisorId": chief])
+        try routed.update(supervised, ["status": "interrupted", "progress": "Stopped."])
+        got = try mine(supervised)
+        require(kinds(got) == ["stopped"] && got[0]["audience"] as? String == "supervisor", "a stop on a supervised task goes to the supervisor")
+        try routed.update(supervised, ["status": "paused", "stopCause": "provider.disconnected", "progress": "Paused: Claude was disconnected."])
+        got = try mine(supervised)
+        require(kinds(got) == ["paused"] && got[0]["audience"] as? String == "supervisor", "and so does a pause the system made")
+
+        let asking = try start(routed, w, a, request: "asking")
+        var checkpoint: [String: Any] = ["id": "c1", "question": "Which draft should go first?", "options": [String](), "recommendation": "The shorter one", "context": "", "routedTo": "supervisor", "at": "2026-10-19T12:00:00Z"]
+        try routed.update(asking, ["status": "waiting_user", "progress": "Which draft should go first?", "stopCause": "checkpoint.supervisor", "checkpoint": checkpoint])
+        got = try mine(asking)
+        require(kinds(got) == ["waiting"] && got[0]["audience"] as? String == "supervisor", "a question for the supervisor waits for the supervisor: \(got)")
+        checkpoint["routedTo"] = "user"
+        try routed.update(asking, ["checkpoint": checkpoint, "stopCause": "checkpoint.user"])
+        got = try mine(asking)
+        require(got.count == 1 && got[0]["audience"] as? String == "user", "one the person must answer waits for the person")
+
+        let parked = try start(routed, w, a, request: "parked")
+        try routed.update(parked, ["status": "waiting_user", "stopCause": "review.parked", "progress": "Set aside so other work could run."])
+        got = try mine(parked)
+        require(kinds(got) == ["waiting"] && got[0]["audience"] as? String == "user" && got[0]["question"] as? String == "Buddy set this aside so other work could run. Resume it when you can review the step it was waiting for.", "a review set aside so others could run is the person's, and says so: \(got)")
+
+        let delivered = try start(routed, w, a, request: "delivered")
+        try routed.update(delivered, ["reportsTo": chief, "status": "completed", "result": "Drafted both letters."])
+        got = try mine(delivered)
+        require(kinds(got) == ["result"] && got[0]["id"] as? String == "result:\(delivered):1" && got[0]["audience"] as? String == "supervisor" && got[0]["title"] as? String == "Result to review: Apply for the role", "a finished result the supervisor has to review is an entry for the supervisor: \(got)")
+        try routed.update(delivered, ["acceptedAt": "2026-10-19T12:00:00Z"])
+        require(try mine(delivered).isEmpty, "accepting the result ends it")
+        let finished = try start(routed, w, a, request: "finished")
+        try routed.update(finished, ["status": "completed", "result": "Done."])
+        require(try mine(finished).isEmpty, "a finished task with no one to report to needs nobody")
+        require(try open(routed, w).allSatisfy { ["user", "supervisor"].contains($0["audience"] as? String ?? "") }, "every entry says who it is for")
+
+        // An entry saved with the wrong audience (an older build) is put right at start.
+        let rawRouted = try BuddyOperationsDB(directory: audienceDirectory, existing: true)
+        try rawRouted.run("UPDATE decisions SET audience = 'user' WHERE task_id = ? AND status = 'open'", [.text(supervised)])
+        let reopenedRouted = try BuddyWorkerStore(directory: audienceDirectory)
+        require(try reopenedRouted.openDecisions(workspace: w).filter { $0["taskId"] as? String == supervised }.map { $0["audience"] as? String ?? "" } == ["supervisor"], "an entry saved with the wrong audience is put right at start")
+
+        // Notices can be for the supervisor, and an entry can be resolved by someone, which is recorded.
+        try reopenedRouted.openDecision(workspace: w, id: "notice:handoff", agent: a, kind: "notice", title: "Handed over", question: "Forge now owns the pipeline.", label: "Open", payload: [:], audience: "supervisor") // new-api
+        require(try reopenedRouted.openDecisions(workspace: w).first { $0["id"] as? String == "notice:handoff" }?["audience"] as? String == "supervisor", "a notice can be for the supervisor") // new-api
+        try reopenedRouted.resolveDecision(id: "notice:handoff", by: chief, resolution: "answered") // new-api
+        let resolvedRow = try rawRouted.rows("SELECT status, resolution, resolved_by FROM decisions WHERE id = 'notice:handoff'").first
+        require(resolvedRow?[0].string == "resolved" && resolvedRow?[1].string == "answered" && resolvedRow?[2].string == chief, "resolving records who did it and how") // new-api
+        let stoppedID = "stopped:\(retrying):1:failed"
+        try reopenedRouted.resolveDecision(id: stoppedID, by: chief, resolution: "dismissed") // new-api
+        try reopenedRouted.update(retrying, ["progress": "Still stopped."])
+        require(try reopenedRouted.openDecisions(workspace: w).filter { $0["taskId"] as? String == retrying }.isEmpty, "a resolved entry stays resolved until the task's state changes") // new-api
+        require(try reopenedRouted.history(of: retrying).contains { $0.type == "decision.resolved" && $0.payload["id"] as? String == stoppedID && $0.payload["by"] as? String == chief }, "and resolving it is in the task's history") // new-api
+        print("PASS: system pauses and exhausted retries are never silent, retries in progress ask nobody, the person's own pauses ask nobody, each entry has its audience (supervisor when named, re-derived in place and at start), parked reviews and results have their own entries, and resolutions record who") // new-api
     }
 }

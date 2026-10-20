@@ -39,7 +39,7 @@ import CryptoKit
             { try store.update(other, ["status": "completed", "result": "Done"]) },
             { try store.setPaused(true) },
             { _ = try store.archiveFinished(keeping: 1) },
-            { try store.update(id, ["status": "paused"]) },
+            { try store.update(id, ["status": "paused", "stopCause": "user.pause"]) },
             { _ = try store.resume(id, additionalBudgetUSD: 0.3, authorizationID: authorization) },
             { try store.update(id, ["status": "running", "attempt": 2, "executionRunID": "run-2"]) },
             { try store.update(id, ["status": "completed", "result": "All finished"]) },
@@ -288,13 +288,15 @@ import CryptoKit
         let restarted = try BuddyWorkerStore(directory: crashed), interruptedID = restarted.jobs[0]["id"] as! String
         let restartHistory = try restarted.history(of: interruptedID)
         let restartStatus = restartHistory.last { $0.type == "task.status" }
-        require(restartHistory.map(\.type) == ["task.created", "task.status", "attempt.started", "attempt.ended", "task.status", "decision.opened"] && restartStatus?.cause == "worker.restart" && restartStatus?.payload["to"] as? String == "interrupted", "a restart records that it interrupted the running task, and that this needs the person")
+        require(restartHistory.map(\.type) == ["task.created", "task.status", "attempt.started", "attempt.ended", "task.status"] && restartStatus?.cause == "worker.restart" && restartStatus?.payload["to"] as? String == "interrupted", "a restart records that it interrupted the running task, and asks nobody while the task waits to be continued: \(restartHistory.map(\.type))")
+        require((restarted.jobs[0]["recovery"] as? [String: Any])?["state"] as? String == "pending" && restarted.jobs[0]["stopCause"] as? String == "worker.restart", "it is marked for automatic recovery")
         require(try restarted.attempts(of: interruptedID).first?.outcome == "interrupted", "and ends the attempt as interrupted")
         let reopenedAgain = try BuddyWorkerStore(directory: crashed)
         require(reopenedAgain.eventCount == restarted.eventCount, "starting again adds nothing")
 
         // Tasks that were there before history began get one starting entry, from the import and from a database left by slice 1.
-        require(try queue.history(of: live[0]["id"] as! String).map(\.type) == ["task.imported"] && queue.eventCount == 5, "imported tasks each begin with one entry, and the archived ones have none")
+        // The one imported task that was paused with no recorded cause is no longer silent: it also gets its entry for whoever has to resume it.
+        require(try queue.history(of: live[0]["id"] as! String).map(\.type) == ["task.imported"] && queue.history(of: live[4]["id"] as! String).map(\.type) == ["task.imported", "decision.opened"] && queue.eventCount == 6, "imported tasks each begin with one entry, and the archived ones have none")
         let upgraded = root.appendingPathComponent("upgraded")
         do {
             let seeded = try BuddyWorkerStore(directory: upgraded)
@@ -390,6 +392,57 @@ import CryptoKit
         let hardlyAny = try BuddyWorkerStore(directory: trimmed)
         BuddyWorkerStore.eventLimit = 100_000
         require(hardlyAny.eventCount == 5, "once they are handled, the oldest entries of archived tasks are trimmed down to the limit (\(hardlyAny.eventCount))")
+
+        // 9. The table shape is checked on every open, whatever the version says: a missing column is added, rows are kept, the version stays.
+        let shaped = root.appendingPathComponent("shape")
+        do {
+            _ = try BuddyWorkerStore(directory: shaped)
+            let raw = try BuddyOperationsDB(directory: shaped, existing: true)
+            try raw.run("DROP INDEX IF EXISTS decisions_audience")
+            try raw.run("DROP TABLE decisions")
+            try raw.run("CREATE TABLE decisions(id TEXT PRIMARY KEY, workspace TEXT NOT NULL, agent_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', question TEXT NOT NULL DEFAULT '', label TEXT NOT NULL DEFAULT '', payload TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'open', resolution TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, resolved_at TEXT)")
+            try raw.run("CREATE INDEX decisions_open ON decisions(workspace, status)")
+            try raw.run("INSERT INTO decisions(id, workspace, kind, title, created_at) VALUES('notice:old', ?, 'notice', 'From before', '2026-10-18T00:00:00Z')", [.text(w)])
+            try raw.run("DROP TABLE attempts")
+            try raw.run("CREATE TABLE attempts(task_id TEXT NOT NULL, n INTEGER NOT NULL, run_id TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', started_at TEXT NOT NULL, ended_at TEXT, outcome TEXT, PRIMARY KEY(task_id, n))")
+            require(try raw.rows("PRAGMA user_version").first?.first?.int == 7, "the fixture is a version 7 database")
+        }
+        func columns(_ table: String) throws -> [String] { try BuddyOperationsDB(directory: shaped, existing: true).rows("PRAGMA table_info(\(table))").compactMap { $0[1].string } }
+        let fixtureDecisions = try columns("decisions"), fixtureAttempts = try columns("attempts")
+        require(!fixtureDecisions.contains("audience") && !fixtureAttempts.contains("result"), "the fixture lacks the new columns")
+        _ = try BuddyOperationsDB(directory: shaped)
+        let decisionColumns = try columns("decisions"), attemptColumns = try columns("attempts")
+        let shapedDB = try BuddyOperationsDB(directory: shaped, existing: true)
+        require(decisionColumns.contains("audience") && decisionColumns.contains("resolved_by") && attemptColumns.contains("result"), "a version 7 database without the new columns gains them on open: \(decisionColumns) \(attemptColumns)")
+        require(try shapedDB.rows("PRAGMA user_version").first?.first?.int == 7, "and its version is still 7, so an older Buddy can still open it")
+        require(try !shapedDB.rows("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'decisions_audience'").isEmpty, "the audience index is there")
+        let oldRow = try shapedDB.rows("SELECT audience, resolved_by, title FROM decisions WHERE id = 'notice:old'").first
+        require(oldRow?[0].string == "user" && oldRow?[1].string == "" && oldRow?[2].string == "From before", "a row from before keeps its content and is for the person")
+        let schemaBefore = try shapedDB.rows("SELECT sql FROM sqlite_master ORDER BY name").compactMap { $0.first?.string }
+        _ = try BuddyOperationsDB(directory: shaped)
+        let schemaAfter = try shapedDB.rows("SELECT sql FROM sqlite_master ORDER BY name").compactMap { $0.first?.string }
+        let decisionColumnsAgain = try columns("decisions")
+        require(schemaBefore == schemaAfter && decisionColumnsAgain == decisionColumns, "opening it again changes nothing")
+        let shapedStore = try BuddyWorkerStore(directory: shaped)
+        require(try shapedStore.openDecisions(workspace: w).first { $0["id"] as? String == "notice:old" }?["audience"] as? String == "user", "the store reads it")
+
+        // Each attempt keeps its own result, so an empty retry cannot erase the one before it.
+        let resulted = root.appendingPathComponent("results")
+        let ledgerStore = try BuddyWorkerStore(directory: resulted)
+        let withResult = try ledgerStore.create(workspace: w, agent: a, requestId: "with-result", title: "Rerun", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0)["id"] as! String
+        try ledgerStore.update(withResult, ["status": "running", "attempt": 1, "executionRunID": "r1"])
+        try ledgerStore.update(withResult, ["result": "First attempt: the 34 events reproduce."])
+        try ledgerStore.update(withResult, ["status": "failed", "progress": "Stopped."])
+        try ledgerStore.update(withResult, ["status": "running", "attempt": 2, "executionRunID": "r2", "result": ""])
+        try ledgerStore.update(withResult, ["status": "completed"])
+        let long = String(repeating: "a", count: 60_000) + String(repeating: "z", count: 60_000)
+        try ledgerStore.update(withResult, ["status": "running", "attempt": 3, "executionRunID": "r3", "result": long])
+        try ledgerStore.update(withResult, ["status": "completed"])
+        let kept = try BuddyOperationsDB(directory: resulted, existing: true).rows("SELECT n, result FROM attempts WHERE task_id = ? ORDER BY n", [.text(withResult)])
+        require(kept.count == 3 && kept[0][1].string == "First attempt: the 34 events reproduce." && kept[1][1].string == "", "when an attempt ends, its own result is kept with it: \(kept.map { String(($0[1].string ?? "nil").prefix(40)) })")
+        require(kept[2][1].string?.count == 100_000 && kept[2][1].string?.hasSuffix("zzz") == true && kept[2][1].string?.hasPrefix("aaa") == true, "a very long result keeps its last 100,000 characters")
+        require(try ledgerStore.attempts(of: withResult).map { String(($0.result ?? "").prefix(5)) } == ["First", "", "aaaaa"], "and the store reads each attempt's result back") // new-api
+
         print("PASS: first-start migration with a verified ZIP backup, exact IDs and schedules, old files set aside not deleted, refusal of every unverifiable file, one task per request, versions, oversize refusal, newer-schema refusal, and the process ended at all \(scriptSteps * 2) commit boundaries plus both import boundaries")
     }
 
@@ -406,7 +459,7 @@ import CryptoKit
             let store = try BuddyWorkerStore(directory: directory)
             try store.register(consumer: "writer")
             let made = try store.create(workspace: environment["BUDDY_CRASH_W"]!, agent: environment["BUDDY_CRASH_A"]!, requestId: "deliver", title: "Deliver", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0)
-            try store.update(made["id"] as! String, ["status": "paused"])
+            try store.update(made["id"] as! String, ["status": "paused", "stopCause": "user.pause"])
             // two events wait: the creation and the status change; handle the first one and end the process at the chosen point
             let first = try store.undelivered(for: "writer")[0]
             if phase == "before" { BuddyOperationsDB.beforeCommit = { _exit(137) } }

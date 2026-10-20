@@ -49,6 +49,26 @@ import Foundation
         let restored=BuddyAgentSetup(support:root,makeProcess:make,keyReader:{_ in "fixture-key"})
         require((try restored.request(workspace:workspace,payload:["action":"status","agentId":a])["interview"] as? [String:Any])?["status"] as? String=="ready","completed setup survives app restart")
         do{_ = try restored.request(workspace:UUID().uuidString,payload:["action":"begin","agentId":a]);require(false,"cross-workspace setup rejected")}catch{}
+        // A teammate a team plan briefed in full is set up on group send exactly as "Use their instructions" would; a short brief, or
+        // instructions the team plan did not write, still wait for the person.
+        let brief=String(String(repeating:"Run the study pipeline, save each result with its inputs, and report what changed. ",count:13).prefix(1027)),short=String(brief.prefix(150)),plan=UUID().uuidString
+        let e=UUID().uuidString,f=UUID().uuidString,g=UUID().uuidString,h=UUID().uuidString
+        var current=try JSONSerialization.jsonObject(with:Data(contentsOf:stateFile)) as! [String:Any]
+        current["agents"]=(current["agents"] as! [[String:Any]])+[
+            ["id":e,"name":"Forge","role":"Engineer","description":brief,"setupSeed":brief,"setupStatus":"pending","profileSource":"team-brief","sourceTeamPlanId":plan],
+            ["id":f,"name":"Vera","role":"Verifier","description":short,"setupSeed":short,"setupStatus":"pending","profileSource":"team-brief","sourceTeamPlanId":plan],
+            ["id":g,"name":"Lyra","role":"Researcher","description":brief,"setupSeed":brief,"setupStatus":"pending","profileSource":"team-brief","sourceTeamPlanId":plan],
+            ["id":h,"name":"Nova","role":"Writer","description":brief,"setupSeed":"","setupStatus":"pending","profileSource":"setup"]]
+        try JSONSerialization.data(withJSONObject:current).write(to:stateFile)
+        _ = try call(g,"begin")
+        let seen=try service.protect(JSONSerialization.jsonObject(with:Data(contentsOf:stateFile)) as! [String:Any])["agents"] as! [[String:Any]]
+        require(seen.first{$0["id"] as? String==g}?["profileSource"] as? String=="setup" && seen.first{$0["id"] as? String==g}?["description"] as? String==brief,"opening a teammate's chat starts an interview but leaves its team brief in place")
+        let still=try service.adoptTeamBriefs(workspace:workspace,members:[a,e,f,g,h],agents:seen)
+        require(still==["Vera","Nova"],"only the short brief and the instructions no team plan wrote still need the person: \(still)")
+        require(service.ready(workspace:workspace,agent:e) && service.ready(workspace:workspace,agent:g) && !service.ready(workspace:workspace,agent:f) && !service.ready(workspace:workspace,agent:h),"full team briefs are adopted, including one whose chat was opened")
+        let adopted=(try JSONSerialization.jsonObject(with:Data(contentsOf:stateFile)) as! [String:Any])["agents"] as! [[String:Any]]
+        require(adopted.first{$0["id"] as? String==e}?["description"] as? String==brief && adopted.first{$0["id"] as? String==e}?["role"] as? String=="Engineer" && adopted.first{$0["id"] as? String==e}?["setupStatus"] as? String=="ready","the saved brief becomes the agent's instructions unchanged and the agent is ready")
+        require(try service.adoptTeamBriefs(workspace:workspace,members:[a,e,g],agents:adopted)==[],"agents that are ready need nothing more")
         service.shutdown();restored.shutdown()
         print("PASS: immediate first question, adaptive follow-up count, Claude-only tool-free interview, separate instruction generation, exact saved profile, idempotency, stale saves, retry, manual-edit precedence and restart isolation")
     }

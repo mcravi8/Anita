@@ -102,11 +102,12 @@ def ensure_idle():
             raise RuntimeError('Finish or stop active conversations before updating Buddy.')
     queue = saved_queue()
     if queue is not None:
-        safe = ('completed', 'failed', 'cancelled', 'interrupted', 'paused')
-        if queue.get('paused'):
-            safe += ('queued',)
-        if any(task.get('status') not in safe for task in queue.get('tasks', [])):
-            raise RuntimeError('Finish or pause background tasks before updating Buddy.')
+        # Running, queued and waiting work carries on after the worker restarts, so it never has to be paused for an update. The one
+        # thing an update must not cut off is an approved action that is being handed over to be sent right now.
+        for task in queue.get('tasks', []):
+            if any(isinstance(review, dict) and review.get('status') == 'dispatched' for review in task.get('reviews') or []):
+                title = str(task.get('title') or 'a background task')
+                raise RuntimeError(f'An approved action is being sent right now ({title}). Try the update again in a minute.')
     commands = subprocess.check_output(['ps', '-axww', '-o', 'comm='], text=True).splitlines()
     if str(INSTALLED / 'Contents/MacOS/Buddy') in (line.strip() for line in commands):
         raise RuntimeError('Quit Buddy before updating; reopen the same app in Applications afterward.')

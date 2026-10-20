@@ -29,6 +29,12 @@ for line in sys.stdin:
  elif method=='turn/start':
   tid=p['threadId'];seq+=1;turn='turn-'+str(seq);result={'turn':{'id':turn,'status':'inProgress'}}
   out({'id':m['id'],'result':result});rid='call-'+str(seq);calls[rid]=(tid,turn)
+  text=' '.join(i.get('text','') for i in p.get('input',[]) if isinstance(i,dict))
+  if 'REQUEST_DECISION_FIXTURE' in text:
+   # A choice the agent may not make: asked through the decision tool, which ends the attempt.
+   assert any(t['name']=='buddy_request_decision' for t in threads[tid].get('dynamicTools',[]))
+   assert 'Decisions: decide by default.' in json.dumps(threads[tid]),'the decision policy reaches background research tasks'
+   out({'id':rid,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':rid,'tool':'buddy_request_decision','arguments':{'question':'Which sources should the research rely on?','category':'approach','recommendation':'Use the two official reports.'}}});continue
   out({'id':rid,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':rid,'tool':'buddy_write_file','arguments':{'path':'fixture.md','content':'# Background result\n\nPrivate and durable.','expectedVersion':''}}});continue
  elif method=='turn/interrupt':pass
  else:out({'id':m.get('id'),'error':{'code':-32601,'message':'Unexpected '+str(method)}});continue

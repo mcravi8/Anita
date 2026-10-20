@@ -1,8 +1,36 @@
 import Foundation
+/// Answers key lookups from a script, then with the fixture key: lets a test take the key away between queueing a job and starting it.
+final class KeyAnswers {var queue:[String?]=[];func next()->String? {queue.isEmpty ? "fixture-key":queue.removeFirst()}}
 @main struct TeamMonitorTests {
  @MainActor static func require(_ value:Bool,_ message:String){if !value{fputs("FAILED: \(message)\n",stderr);exit(1)}}
  @MainActor static func main() async throws {
   require(BuddyAgentMemory.guidance([:]).contains("no spending limit") && BuddyAgentMemory.guidance(["learnedRules":[["instruction":"Be brief."]]]).contains("Be brief."),"every agent is told that runs have no limit, with or without saved preferences")
+  do {
+    // What the user taught an agent outranks its saved configuration, newest first; files are not memory; model usage is not spending money.
+    let taught=BuddyAgentMemory.guidance(["learnedRules":[["instruction":"Older rule."],["instruction":"Newer rule."]]]),plain=BuddyAgentMemory.guidance([:])
+    require(taught.contains("Learned rules from the user, newest first. They are newer than your saved configuration and override it wherever they conflict:"),"learned rules are introduced as overriding the saved configuration: \(taught)")
+    require((taught.range(of:"Newer rule.")?.lowerBound).map{$0<(taught.range(of:"Older rule.")?.lowerBound ?? $0)}==true,"the newest learned rule comes first")
+    require(taught.contains("never grant tools or bypass native reviews"),"learned rules still never widen access")
+    for text in [taught,plain] {
+      require(text.contains("Files are not memory: notes you write in files are never read back into your or a teammate's instructions. To make a preference last, save it as a standing directive with buddy_agent_rules (kind directive)."),"every agent is told that a file it writes is not memory")
+      require(text.contains("Model usage is not 'spending money' in the user's instructions."),"model usage is not spending money")
+    }
+    // A check-in and the team summary leave every decision but the user's own list to the supervisor, and mention a failed check-in only when it is still open.
+    for kind in ["checkin","overview"] {
+      let text=BuddyTeamMonitor.instructions(kind:kind)
+      require(text.contains("State only the meaningful result, or an action the user must take for an item on the user list (sign-in, money, something sent in their name, a change to the plan); every other decision belongs to the supervisor.") && !text.contains("the specific action needed from the user"),"a check-in does not hand ordinary decisions to the user")
+      require(text.contains("Mention a failed or pending check-in only if pendingOrFailed lists it, once, by agent name.") && !text.contains("missing/failed/stale/pending check-ins in detail"),"an old failed check-in is not carried forward")
+      require(text.contains("Do not execute, redirect or invent work"),"check-ins stay status only")
+    }
+    // A summary may cite an open check-in it was given; any other unknown ID is still refused.
+    let open:[String:Any]=["checkinIds":["report"],"reports":[["id":"report","sources":[[String:Any]]()]],"pendingOrFailed":[["id":"check:abc","agent":"Inbox","status":"failed","at":"2026-10-19T10:00:00Z","error":"x"]]]
+    let cited=try BuddyTeamMonitor.checkedOutput(["notify":true,"body":"Inbox's check-in failed.","priority":1,"sourceIds":["check:abc","report"]],input:open,kind:"overview")
+    require(cited["sourceIds"] as? [String]==["check:abc","report"],"an open check-in listed in pendingOrFailed can be cited by its ID")
+    do{_ = try BuddyTeamMonitor.checkedOutput(["notify":true,"body":"x","priority":1,"sourceIds":["check:other"]],input:open,kind:"overview");require(false,"an ID that was not supplied is still refused")}catch{}
+    // A rejected learning answer is kept at most 8 KB, with credential text withheld.
+    let huge=BuddyTeamMonitor.bounded(["changed":true,"rules":[["instruction":String(repeating:"é",count:9000)]]]),secret=BuddyTeamMonitor.bounded(["note":"api key is sk-proj-"+String(repeating:"a",count:30)])
+    require((huge as? String).map{$0.utf8.count<=8192 && $0.hasPrefix("{")}==true && (secret as? [String:Any])?["note"] as? String=="[Credential text excluded from background coordination and preference learning.]","a rejected answer is bounded and never keeps credential text")
+  }
   do {
     // The same assessment, worded four ways by different summaries over a morning, is told once; a change to it is told.
     let now=Date(),stamp=ISO8601DateFormatter(),names:Set<String>=["lyra","forge","vera","chief","inbox"]
@@ -104,6 +132,13 @@ import Foundation
   require(exchanges.count==1 && exchanges[0]["fromAgentId"] as? String==chief && exchanges[0]["toAgentId"] as? String==maze && exchanges[0]["status"] as? String=="completed","the actual completed peer check-in is inspectable with its true participants")
   require(exchanges[0]["input"]==nil && exchanges[0]["sources"]==nil && exchanges[0]["output"]==nil,"message history excludes internal prompts and model context")
   require((done["agentMessages"] as? [String:[String:Any]])?[maze]?["count"] as? Int==2,"the collapsed chat link counts a recorded request and response")
+  // The supervisor answers the person itself, with the plan and everyone's work in view. An automatic check-in of its own saw neither, ran
+  // beside that answer and posted a second report that contradicted it, so the supervisor never gets one.
+  func chiefCheckins()throws->Int{(try monitor.status(state)["checks"] as! [[String:Any]]).filter{$0["kind"] as? String=="checkin" && $0["agentId"] as? String==chief}.count}
+  var chiefAsked=state,chiefAskedMessages=chiefAsked["messages"] as! [String:[[String:Any]]];chiefAskedMessages[chief]=[["id":"ask-maze","who":"you","body":"What is @Maze working on?","createdAt":BuddyAgentMemory.timestamp(now.addingTimeInterval(1)),"live":true]];chiefAsked["messages"]=chiefAskedMessages
+  let chiefCheckinsBefore=try chiefCheckins()
+  for _ in 0..<4 {await step(chiefAsked)}
+  require(try chiefCheckins()==chiefCheckinsBefore,"a message to the supervisor never starts an automatic check-in on the supervisor beside its own reply")
   let activity=(done["agentMessages"] as! [String:[String:Any]])[maze]!["events"] as! [[String:Any]]
   require(activity.count==2 && activity[0]["at"] as? String==exchanges[0]["createdAt"] as? String && activity[1]["at"] as? String==exchanges[0]["finishedAt"] as? String,"timeline markers retain the actual request and reply times")
   require(activity.allSatisfy{$0["exchangeId"] as? String==exchanges[0]["id"] as? String && $0["body"]==nil && $0["input"]==nil},"timeline metadata links to real exchanges without exposing their private content")
@@ -123,7 +158,7 @@ import Foundation
   var foreignHistory=state;foreignHistory["conversationWorkspace"]=UUID().uuidString
   require((try historyStore.messages(state:foreignHistory)["messages"] as! [[String:Any]]).isEmpty,"foreign workspace history stays inaccessible")
   let learned=(try BuddyAgentMemory.overlay(state,support:root)["agents"] as! [[String:Any]])[1]
-  require((learned["description"] as? String)?.contains("concise")==true && (learned["learnedRules"] as? [[String:Any]])?.first?["messageId"] as? String=="user-pref","ongoing explicit preferences update effective instructions with exact user-message evidence")
+  require(learned["description"] as? String=="Research public evidence." && (learned["learnedRules"] as? [[String:Any]])?.first?["messageId"] as? String=="user-pref" && BuddyAgentMemory.guidance(learned).contains("- Keep answers concise."),"an explicit preference is learned as a sourced rule with exact user-message evidence, and the instructions the user saved are left as written: \(learned)")
   // What wakes oversight: things ending or needing the user, never bookkeeping.
   let watchRoot=root.appendingPathComponent("Watching");try FileManager.default.createDirectory(at:watchRoot.appendingPathComponent("Worker"),withIntermediateDirectories:true)
   let watchStore=try BuddyTeamMonitorStore(support:watchRoot),rid=UUID().uuidString
@@ -157,6 +192,8 @@ import Foundation
   let calls=try String(contentsOf:callsURL,encoding:.utf8).split(separator:"\n").map{try JSONSerialization.jsonObject(with:Data($0.utf8)) as! [String:Any]}
   let oversightCalls=calls.filter{$0["kind"] as? String != "memory"}
   require(calls.contains{$0["kind"] as? String=="checkin"} && calls.contains{$0["kind"] as? String=="overview"} && oversightCalls.allSatisfy{$0["model"] as? String==BuddyTeamMonitorStore.defaultCheckInModel},"check-ins and team summaries run on the small default model, not the model each agent chats with (Chief and Maze are set to other models)")
+  let learningCalls=calls.filter{$0["kind"] as? String=="memory"}
+  require(!learningCalls.isEmpty && learningCalls.allSatisfy{$0["required"] as? [String]==["changed","rules"] && $0["rewrites"] as? Bool==false},"the learner is asked for sourced rules only, never a rewrite of the agent's role or instructions: \(learningCalls)")
   for _ in 0..<8 {await step()}
   require(try String(contentsOf:callsURL,encoding:.utf8).split(separator:"\n").count==calls.count,"unchanged work and saved preferences do not trigger repeat model calls")
   // The same report about another blocker is not sent up again; a different one is; a check the user asks for is always answered.
@@ -327,6 +364,162 @@ import Foundation
   let quiet=try budgetStore.setPolicy(["agentId":chief,"proactive":false],state:state)
   require(budgetStore.configuration(quiet,agent:chief)["proactive"] as? Bool==false,"Chief can be switched to quiet mode explicitly")
   gpt.shutdown()
+  func waitUntil(_ rounds:Int=60,_ done:()->Bool) async {for _ in 0..<rounds {if done(){return};try? await Task.sleep(nanoseconds:100_000_000)}}
+  func agentRow(_ id:String,_ name:String,_ extra:[String:Any]=[:])->[String:Any] {(["id":id,"name":name,"role":"Researcher","description":"Research public evidence.","setupStatus":"ready","profileRevision":1] as [String:Any]).merging(extra){_,n in n}}
+  func fixtureRoot(_ name:String,_ workspace:[String:Any]?=nil)throws->URL {
+    let url=root.appendingPathComponent(name);try FileManager.default.createDirectory(at:url.appendingPathComponent("TeamMonitor"),withIntermediateDirectories:true)
+    if let workspace {try JSONSerialization.data(withJSONObject:workspace).write(to:url.appendingPathComponent("workspace.json"),options:.atomic)}
+    _ = try BuddyAISettings(support:url).update(w,provider:"claude",enabled:("claude",true),budget:0.5);return url
+  }
+  do {
+    // Who may read whose work: an agent sees its own, its manager and the supervisor see it too, and nobody else does.
+    let boss=UUID().uuidString,lead=UUID().uuidString,helper=UUID().uuidString,outsider=UUID().uuidString
+    let accessState:[String:Any]=["version":1,"conversationWorkspace":w,"agents":[agentRow(boss,"Chief"),agentRow(lead,"Lead"),agentRow(helper,"Helper",["managedBy":lead]),agentRow(outsider,"Outsider")],"messages":[helper:[["id":"h1","who":"you","body":"Private note for Helper only.","createdAt":"2026-10-18T09:00:00Z"]]]]
+    let access=try BuddyTeamMonitor(support:try fixtureRoot("Access",accessState),makeClaude:factory,keyReader:{_ in "fixture-key"})
+    let accessJobs:[[String:Any]]=[boss,lead,helper,outsider].map{["id":UUID().uuidString,"workspace":w,"agentId":$0,"title":"Brief","status":"waiting_user","progress":"Needs a choice.","updatedAt":"2026-10-18T10:00:00Z"]}
+    func visible(_ args:[String:Any],_ actor:String)throws->Set<String> {Set((try access.handle(args,state:accessState,jobs:accessJobs,actor:actor)["work"] as? [[String:Any]] ?? []).compactMap{$0["agentId"] as? String})}
+    let peek=try access.handle(["action":"status","agentId":helper],state:accessState,jobs:accessJobs,actor:outsider)
+    let peekText=String(data:try JSONSerialization.data(withJSONObject:peek),encoding:.utf8)!
+    require((peek["work"] as? [[String:Any]] ?? []).isEmpty && !peekText.contains("Private note"),"a teammate that neither supervises nor manages an agent gets none of its work or chat: \(peek["work"] ?? "")")
+    require(try visible(["action":"status"],outsider)==[outsider],"an agent's own status shows only its own work")
+    require(try visible(["action":"status","agentId":helper],lead)==[helper] && (try visible(["action":"status"],lead))==[lead,helper],"a manager sees the agents it manages")
+    require(try visible(["action":"status"],boss)==[boss,lead,helper,outsider],"the supervisor sees everyone who shares work")
+    for (actor,target) in [(outsider,helper),(outsider,nil),(helper,lead),(lead,nil)] as [(String,String?)] {
+      var args:[String:Any]=["action":"check_in"];if let target {args["agentId"]=target}
+      do{_ = try access.handle(args,state:accessState,jobs:accessJobs,actor:actor);require(false,"only the supervisor or the manager can ask an agent for a check-in")}catch{require(error.localizedDescription=="Only the supervisor or this agent's manager can ask it for a check-in.","the refusal says who may ask: \(error.localizedDescription)")}
+    }
+    require(access.store.checks.isEmpty,"a refused check-in queues nothing")
+    let managerAsk=try access.handle(["action":"check_in","agentId":helper],state:accessState,jobs:accessJobs,actor:lead)
+    let asked=access.store.checks.first{$0["id"] as? String==(managerAsk["queuedCheckIds"] as? [String])?.first}
+    require(managerAsk["accepted"] as? Bool==true && (asked?["input"] as? [String:Any])?["question"] as? String=="What changed, what is blocked, and what needs a decision — by you, the supervisor, or (only for sign-ins, money, things sent in the user's name, or plan changes) the user?","a manager can ask its own agent, and the default question routes decisions to the supervisor")
+    do{_ = try access.handle(["action":"check_in","agentId":outsider,"question":String(repeating:"a",count:1501)],state:accessState,jobs:accessJobs,actor:boss);require(false,"an over-long check-in question is refused rather than cut")}catch{require(error.localizedDescription=="A check-in question is limited to 1,500 characters and only asks for status. To give a teammate work, add it to the team plan with buddy_plan.","the refusal points to the plan: \(error.localizedDescription)")}
+    let longest=try access.handle(["action":"check_in","agentId":outsider,"question":String(repeating:"b",count:1500)],state:accessState,jobs:accessJobs,actor:boss)
+    require(((access.store.checks.first{$0["id"] as? String==(longest["queuedCheckIds"] as? [String])?.first}?["input"] as? [String:Any])?["question"] as? String)?.count==1500,"a question at the limit is kept whole")
+    require(try access.handle(["action":"check_in","agentId":lead],state:accessState,jobs:accessJobs)["accepted"] as? Bool==true,"the person on screen can still ask any agent")
+    access.shutdown()
+  }
+  do {
+    // The team summary lists only each agent's latest check-in, only while it is open and recent, by ID and name.
+    let pChief=UUID().uuidString,xena=UUID().uuidString,yuri=UUID().uuidString,zed=UUID().uuidString
+    let pendState:[String:Any]=["version":1,"conversationWorkspace":w,"agents":[agentRow(pChief,"Chief"),agentRow(xena,"Xena"),agentRow(yuri,"Yuri"),agentRow(zed,"Zed")],"messages":[String:Any]()]
+    let pend=try BuddyTeamMonitor(support:try fixtureRoot("Pending",pendState),makeClaude:factory,keyReader:{_ in "fixture-key"})
+    let policy=try pend.store.policy(pendState),clock=Date()
+    func recorded(_ agent:String,_ status:String,hoursAgo:Double,kind:String="checkin",error:String="",output:[String:Any]?=nil,input:[String:Any]?=nil)throws->String {
+      let at=clock.addingTimeInterval(-hoursAgo*3600)
+      let job=try pend.store.enqueue(kind:kind,workspace:w,agent:agent,input:input ?? ["requesterId":pChief,"agent":["id":agent,"name":"Teammate"]],fingerprint:UUID().uuidString,policy:policy,selection:.init(provider:"claude",model:"fixture"),now:at,force:true)
+      var fields:[String:Any]=["status":status,"error":error,"startedAt":BuddyTeamMonitorStore.stamp(at),"finishedAt":BuddyTeamMonitorStore.stamp(at)];if let output {fields["output"]=output}
+      try pend.store.update(job["id"] as! String,fields);return job["id"] as! String
+    }
+    let xenaFailed=try recorded(xena,"failed",hoursAgo:2,error:"The check-in returned no verified structured result.")
+    let xenaDone=try recorded(xena,"completed",hoursAgo:1,output:["notify":true,"body":"Xena finished the draft.","priority":1,"sourceIds":[String]()])
+    let yuriFailed=try recorded(yuri,"failed",hoursAgo:1,error:String(repeating:"Long failure. ",count:40))
+    let zedFailed=try recorded(zed,"failed",hoursAgo:30,error:"An old failure.")
+    await pend.tick(state:pendState,jobs:[],paused:false,now:clock)
+    let summary=pend.store.checks.last{$0["kind"] as? String=="overview"},listed=(summary?["input"] as? [String:Any])?["pendingOrFailed"] as? [[String:Any]] ?? []
+    require(((summary?["input"] as? [String:Any])?["checkinIds"] as? [String])==[xenaDone],"the summary covers the completed check-in")
+    require(listed.count==1 && listed[0]["id"] as? String=="check:"+yuriFailed && listed[0]["agent"] as? String=="Yuri" && listed[0]["status"] as? String=="failed" && listed[0]["at"] is String && (listed[0]["error"] as? String)?.count==200,"only an agent whose latest check-in is still open and recent is listed, by ID and name, with a short error: \(listed)")
+    require(!String(describing:listed).contains(xenaFailed) && !String(describing:listed).contains(zedFailed),"a failure replaced by a later completed check-in, or older than a day, is not carried forward")
+    await waitUntil{pend.store.checks.allSatisfy{!["queued","running"].contains($0["status"] as? String ?? "")}}
+    // A summary that failed over an unknown source before the source fix is not retried by a one-off compatibility pass any more.
+    let stale=try recorded(pChief,"failed",hoursAgo:1,kind:"overview",error:"A team update referenced work outside its actual check-in.",input:["checkinIds":[xenaDone]])
+    await pend.tick(state:pendState,jobs:[],paused:false,now:clock.addingTimeInterval(11))
+    require(!pend.store.checks.contains{$0["compatibilityRetry"] as? Bool==true} && pend.store.checks.first{$0["id"] as? String==stale}?["status"] as? String=="failed","the compatibility retry for summaries is gone")
+    await waitUntil{pend.store.checks.allSatisfy{!["queued","running"].contains($0["status"] as? String ?? "")}}
+    pend.shutdown()
+  }
+  func offered(_ job:[String:Any]?)->[String] {((job?["input"] as? [String:Any])?["messages"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String}}
+  func future(_ id:String,_ seconds:Double,_ body:String)->[String:Any] {["id":id,"who":"you","body":body,"createdAt":BuddyAgentMemory.timestamp(Date().addingTimeInterval(seconds))]}
+  do {
+    // Learning never wedges: a rejected batch is kept with its reason, retried one message at a time, and a message that still fails is passed over.
+    let lyra=UUID().uuidString,learnRoot=try fixtureRoot("Learning")
+    let learner=try BuddyTeamMonitor(support:learnRoot,makeClaude:factory,keyReader:{_ in "fixture-key"})
+    let learnState:[String:Any]=["version":1,"conversationWorkspace":w,"agents":[agentRow(lyra,"Lyra")],"messages":[lyra:(0..<6).map{future("m\($0)",Double(10+$0),"Standing rule number \($0).")}]]
+    try JSONSerialization.data(withJSONObject:learnState).write(to:learnRoot.appendingPathComponent("workspace.json"),options:.atomic)
+    try "no_rules".write(to:learnRoot.appendingPathComponent("TeamMonitor/fixture-memory-mode.txt"),atomically:true,encoding:.utf8)
+    var learnNow=Date()
+    func learning()->[[String:Any]] {learner.store.checks.filter{$0["kind"] as? String=="memory"}}
+    func learnTick() async {learnNow=learnNow.addingTimeInterval(11);await learner.tick(state:learnState,jobs:[],paused:false,now:learnNow)}
+    await learnTick();await waitUntil{learning().first?["status"] as? String=="failed"}
+    let batch=learning().first,firstIds=offered(batch)
+    require(firstIds.count==5 && batch?["status"] as? String=="failed","several unlearned messages are offered together at first: \(firstIds)")
+    require(batch?["rejectedReason"] as? String=="changed_without_rules" && (batch?["rejectedOutput"] as? [String:Any])?["changed"] as? Bool==true,"a rejected learning result is kept on the check with the reason it was rejected: \(batch ?? [:])")
+    await learnTick()
+    require(learning().count==2 && offered(learning().last)==[firstIds[0]],"after the batch fails, the next tick queues a new learning job with its first message alone: \(learning().map(offered))")
+    await waitUntil{learning().count==2 && learning()[1]["status"] as? String=="failed"}
+    await learnTick()
+    require(learning().count==3 && offered(learning().last).first==firstIds[1] && !offered(learning().last).contains(firstIds[0]),"after that message fails alone it is passed over and the next unseen message is offered: \(learning().map(offered))")
+    await waitUntil{learning().allSatisfy{!["queued","running"].contains($0["status"] as? String ?? "")}}
+    learner.shutdown()
+  }
+  do {
+    // A learning job that fails before the model even runs (the key went away) moves the batch on the same way, instead of holding learning for good.
+    let pia=UUID().uuidString,answers=KeyAnswers(),keyRoot=try fixtureRoot("Reconnect")
+    let piaState:[String:Any]=["version":1,"conversationWorkspace":w,"agents":[agentRow(pia,"Pia")],"messages":[pia:(0..<3).map{future("p\($0)",Double(10+$0),"Please remember rule \($0).")}]]
+    try JSONSerialization.data(withJSONObject:piaState).write(to:keyRoot.appendingPathComponent("workspace.json"),options:.atomic)
+    let reconnect=try BuddyTeamMonitor(support:keyRoot,makeClaude:factory,keyReader:{_ in answers.next()})
+    func memoryJobs()->[[String:Any]] {reconnect.store.checks.filter{$0["kind"] as? String=="memory"}}
+    answers.queue=["fixture-key",nil]
+    await reconnect.tick(state:piaState,jobs:[],paused:false,now:Date().addingTimeInterval(11))
+    require(memoryJobs().count==1 && memoryJobs()[0]["status"] as? String=="failed" && offered(memoryJobs()[0]).count==3,"the job fails before the model runs: \(memoryJobs())")
+    let record=reconnect.memory.records[w+":"+pia]
+    require(record?["singly"] as? Bool==true && !(record?["error"] as? String ?? "").isEmpty,"and the failure is recorded against its batch: \(record ?? [:])")
+    await reconnect.tick(state:piaState,jobs:[],paused:false,now:Date().addingTimeInterval(22))
+    require(memoryJobs().count==2 && memoryJobs()[1]["id"] as? String != memoryJobs()[0]["id"] as? String && offered(memoryJobs()[1])==["p0"],"so the next tick queues a new job instead of being held by the failed one: \(memoryJobs().map(offered))")
+    await waitUntil{memoryJobs().allSatisfy{!["queued","running"].contains($0["status"] as? String ?? "")}}
+    reconnect.shutdown()
+  }
+  do {
+    // Records wedged before batches were split (an error, and no "singly" key) are retried one message at a time once, and only those.
+    let stuck=UUID().uuidString,settled=UUID().uuidString,clean=UUID().uuidString,wedgedRoot=try fixtureRoot("Wedged")
+    func memoryRecord(_ id:String,_ extra:[String:Any])->[String:Any] {(["workspace":w,"agentId":id,"baseRevision":1,"revision":0,"enabled":true,"rules":[[String:Any]](),"seen":[String](),"history":[[String:Any]]()] as [String:Any]).merging(extra){_,n in n}}
+    try JSONSerialization.data(withJSONObject:["version":1,"activatedAt":"2026-10-17T00:00:00.000Z","records":[w+":"+stuck:memoryRecord(stuck,["error":"The learned instructions didn't fit the saved format."]),w+":"+settled:memoryRecord(settled,["error":"Still no.","singly":false]),w+":"+clean:memoryRecord(clean,["error":""])]]).write(to:wedgedRoot.appendingPathComponent("agent-memory.json"))
+    let wedgedState:[String:Any]=["version":1,"conversationWorkspace":w,"agents":[agentRow(stuck,"Chief"),agentRow(settled,"Vera"),agentRow(clean,"Forge")],"messages":[stuck:(0..<4).map{["id":"s\($0)","who":"you","body":"Rule \($0).","createdAt":"2026-10-18T0\($0):00:00Z"]}]]
+    let wedged=try BuddyAgentMemory(support:wedgedRoot)
+    require(offered(["input":wedged.input(wedgedState,agent:agentRow(stuck,"Chief")) ?? [:]]).count==4,"before the fix the whole wedged batch is offered again")
+    try wedged.synchronize(wedgedState)
+    let reread=try BuddyAgentMemory.read(wedgedRoot)
+    require(wedged.records[w+":"+stuck]?["singly"] as? Bool==true && reread[w+":"+stuck]?["singly"] as? Bool==true,"a record with an error and no singly key is set to one message at a time, and saved")
+    require(wedged.records[w+":"+settled]?["singly"] as? Bool==false && wedged.records[w+":"+clean]?["singly"]==nil,"a record that already says, or has no error, is left alone")
+    require(offered(["input":wedged.input(wedgedState,agent:agentRow(stuck,"Chief")) ?? [:]])==["s0"],"so its first message is tried alone")
+    let once=wedged.records;try wedged.synchronize(wedgedState)
+    require(NSDictionary(dictionary:once).isEqual(to:wedged.records),"doing it again changes nothing")
+  }
+  do {
+    // A failed learning batch never stands in for a new attempt at the same messages; check-ins about unchanged work are still not repeated on their own.
+    let dedupe=try BuddyTeamMonitorStore(support:try fixtureRoot("Dedupe")),dp=try dedupe.policy(state)
+    let lost=try dedupe.enqueue(kind:"memory",workspace:w,agent:maze,input:["messages":[["id":"a"]]],fingerprint:"same-batch",policy:dp,selection:.init(provider:"claude",model:"fixture"),now:Date())
+    try dedupe.update(lost["id"] as! String,["status":"failed","error":"Rejected."])
+    let again=try dedupe.enqueue(kind:"memory",workspace:w,agent:maze,input:["messages":[["id":"a"]]],fingerprint:"same-batch",policy:dp,selection:.init(provider:"claude",model:"fixture"),now:Date())
+    require(again["id"] as? String != lost["id"] as? String && again["status"] as? String=="queued","a failed learning batch does not block a new one")
+    let check=try dedupe.enqueue(kind:"checkin",workspace:w,agent:maze,input:[:],fingerprint:"same-work",policy:dp,selection:.init(provider:"claude",model:"fixture"),now:Date())
+    try dedupe.update(check["id"] as! String,["status":"failed"])
+    require(try dedupe.enqueue(kind:"checkin",workspace:w,agent:maze,input:[:],fingerprint:"same-work",policy:dp,selection:.init(provider:"claude",model:"fixture"),now:Date())["id"] as? String==check["id"] as? String,"a check-in's own retries stay paced separately")
+  }
+  do {
+    // The check-in journal stays small: old bulky inputs are dropped (keeping who asked what), old failures go after a week, and trimming keeps 400 finished checks.
+    let fmt=ISO8601DateFormatter(),clock=Date()
+    func ago(_ days:Double)->String {fmt.string(from:clock.addingTimeInterval(-days*86400))}
+    func row(_ status:String,_ days:Double)->[String:Any] {["id":UUID().uuidString,"workspace":w,"agentId":maze,"kind":"checkin","status":status,"createdAt":ago(days),"finishedAt":ago(days),"fingerprint":UUID().uuidString,"policyRevision":1,"provider":"claude","model":"fixture","input":["requesterId":chief,"question":"How is it going?","sources":[["id":"chat:x","text":String(repeating:"private context ",count:20)]]]]}
+    func journal(_ name:String,_ rows:[[String:Any]])throws->BuddyTeamMonitorStore {
+      let url=try fixtureRoot(name);try JSONSerialization.data(withJSONObject:["version":1,"settings":[String:[String:Any]](),"checks":rows,"updates":[[String:Any]](),"observed":[String:[String:Any]](),"daily":[String:Any]()]).write(to:url.appendingPathComponent("team-monitor.json"));return try BuddyTeamMonitorStore(support:url)
+    }
+    func age(_ c:[String:Any])->Double {clock.timeIntervalSince(fmt.date(from:(c["finishedAt"] ?? c["createdAt"]) as? String ?? "") ?? clock)/86400}
+    func inputOf(_ c:[String:Any])->[String:Any] {c["input"] as? [String:Any] ?? [:]}
+    let small=try journal("GrowthSmall",[row("failed",8),row("interrupted",8),row("completed",3),row("cancelled",2),row("failed",2),row("interrupted",3),row("completed",0.1)])
+    _ = try small.enqueue(kind:"checkin",workspace:w,agent:maze,input:["requesterId":chief,"question":"New?"],fingerprint:"fresh",policy:try small.policy(state),selection:.init(provider:"claude",model:"fixture"),now:clock)
+    let compacted=small.checks
+    require(compacted.count==6 && !compacted.contains{["failed","interrupted"].contains($0["status"] as? String ?? "") && age($0)>7},"failed and interrupted checks older than a week are dropped: \(compacted.map{$0["status"] ?? ""})")
+    require(compacted.filter{["completed","cancelled","failed"].contains($0["status"] as? String ?? "") && age($0)>1}.allSatisfy{inputOf($0)["sources"]==nil && inputOf($0)["requesterId"] as? String==chief && inputOf($0)["question"] as? String=="How is it going?"},"finished checks older than a day lose their bulky input but keep who asked what, for the message history")
+    require(compacted.filter{$0["status"] as? String=="interrupted" || age($0)<1}.allSatisfy{$0["id"] as? String != nil && (inputOf($0)["sources"] != nil || inputOf($0)["question"] as? String=="New?")},"recent and interrupted checks keep their input")
+    let rows=(0..<760).map{_ in row("completed",3)}+(0..<10).map{_ in row("failed",8)}+(0..<10).map{_ in row("interrupted",8)}+(0..<20).map{_ in row("failed",2)}+(0..<20).map{_ in row("completed",0.01)}+(0..<9).map{_ in row("queued",0.01)}
+    let big=try journal("Growth",rows)
+    let fresh=try big.enqueue(kind:"checkin",workspace:w,agent:maze,input:["requesterId":chief,"question":"New?"],fingerprint:"fresh",policy:try big.policy(state),selection:.init(provider:"claude",model:"fixture"),now:clock)
+    let kept=big.checks,finished=kept.filter{!["queued","running","budget"].contains($0["status"] as? String ?? "")}
+    require(finished.count==400 && kept.filter{$0["status"] as? String=="queued"}.count==10 && kept.contains{$0["id"] as? String==fresh["id"] as? String},"trimming keeps at most 400 finished checks and every waiting one: \(finished.count) of \(kept.count)")
+    require(finished.filter{age($0)<1}.count==20 && finished.filter{$0["status"] as? String=="failed"}.count==20,"the newest finished checks are the ones kept")
+    require(kept.filter{$0["status"] as? String=="queued" && $0["id"] as? String != fresh["id"] as? String}.allSatisfy{inputOf($0)["sources"] != nil},"waiting checks keep their full input")
+    require(try BuddyTeamMonitorStore(support:root.appendingPathComponent("Growth")).checks.count==kept.count,"the trimmed journal reopens")
+  }
   print("PASS: real private check-ins, Chief oversight, selected models, quiet defaults and opt-in updates, idle suppression, source receipts, ongoing preference learning, exact quotes, manual precedence, sharing revocation and workspace isolation")
  }
 }

@@ -8,6 +8,7 @@ import {pathToFileURL} from 'node:url';
 // the API key. Seatbelt confines descendants as well as the initial shell.
 // Without network=true a command has no network of any kind, not even to services on this Mac: a local proxy, VPN client or database
 // would otherwise hand it the internet, or your data, without the review that network access requires.
+// With network=true it gets IP networking only. Unix sockets stay denied (the worker's control socket is one), except the system DNS resolver's.
 export function sandboxProfile(project,scratch,network=false) {
   const q=p=>JSON.stringify(p);
   return `(version 1)
@@ -22,7 +23,7 @@ export function sandboxProfile(project,scratch,network=false) {
 (allow file-write* (subpath ${q(project)}) (subpath ${q(scratch)}) (literal "/dev/null"))
 (allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.system.opendirectoryd.libinfo"))
 ${network?'(allow mach-lookup (global-name "com.apple.mDNSResponder"))':''}
-${network?'(allow network-outbound)\n(allow network-inbound (local ip "localhost:*"))\n(allow network-bind (local ip "localhost:*"))':''}`;
+${network?'(allow network-outbound (remote ip "*:*"))\n(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))\n(allow network-inbound (local ip "localhost:*"))\n(allow network-bind (local ip "localhost:*"))':''}`;
 }
 export class CodingShell {
   constructor(){this.child=null;this.closed=false;}

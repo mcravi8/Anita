@@ -125,6 +125,9 @@
     CELL.f=f;CELL.H=H;CELL.maxB=maxB;
     return CELL;
   }
+  // A group's ring sweeps on its own clock while any member works, so it always closes the circle and shows at full strength. It used to show
+  // the members' average progress and strength, so one of four working stopped it at a quarter and two at half.
+  function groupSweep(R,t){const c=(t/4.2)%1.15;return {group:R.reduce((s,r)=>Math.max(s,r.work),0),gprog:Math.min(1,c)};}
   function groupRing(X,u0,v0,radius){
     if(!(X.group>.01))return;
     const d=Math.hypot(u0,v0),band=Math.exp(-Math.pow((d-radius)/X.bw,2));
@@ -241,7 +244,7 @@
     if(kind==='group'){
       const mem=membersOf(el.dataset.figId);if(!mem.length)return;
       R=mem.map((a,k)=>mkR(sim(a.id),normShape(a.avatarShape),normColor(a.avatarColor),HUD[k],t));
-      X={order:HUD_ORDER.filter(k=>k<R.length),rings:false,group:R.reduce((s,r)=>s+r.work,0)/R.length,gprog:R.reduce((s,r)=>s+r.prog,0)/R.length,amb:size>100?.28:0,clean:size<=100};
+      X={order:HUD_ORDER.filter(k=>k<R.length),rings:false,...groupSweep(R,t),amb:size>100?.28:0,clean:size<=100};
     }else{
       let shape,color,M,pos={x:0,y:0,s:1.12};
       if(kind==='agent'){
@@ -342,7 +345,7 @@
       if(spec.kind==='group'){
         const mem=membersOf(spec.id);if(!mem.length)continue;
         R=mem.map((a,k)=>Object.assign(mkR(sim(a.id),normShape(a.avatarShape),normColor(a.avatarColor),HUD[k],t),{pulse:1}));
-        X={order:HUD_ORDER.filter(k=>k<R.length),rings:false,group:R.reduce((s,r)=>s+r.work,0)/R.length,gprog:R.reduce((s,r)=>s+r.prog,0)/R.length};
+        X={order:HUD_ORDER.filter(k=>k<R.length),rings:false,...groupSweep(R,t)};
       }else{
         const a=spec.kind==='agent'?cfg.agent(spec.id):null;if(spec.kind==='agent'&&!a)continue;
         const M=a?sims[a.id]:sims.logo;if(!M)continue;
@@ -438,7 +441,7 @@
   }
   function stop(){cancelAnimationFrame(raf);timers.forEach(clearTimeout);timers=[];started=false;if(io)io.disconnect();if(mo)mo.disconnect();io=mo=null;observed.clear();visible.clear();fresh.clear();}
 
-  const engine={mkSim,stepSim,mkR,prep,evalM,drawAv,gridFor,headCells,sdBox,sdHex,eyeSD,setDark,HUD,HUD_ORDER,EYEDX,hash,easeIO,rnd,sst,TAU};
+  const engine={mkSim,stepSim,mkR,prep,evalM,drawAv,gridFor,headCells,sdBox,sdHex,eyeSD,setDark,HUD,HUD_ORDER,EYEDX,hash,easeIO,rnd,sst,TAU,groupSweep};
   const hovered=()=>hoverId;
   const api={hovered,extend,now:()=>clock,sim:id=>sims[id]||null,avatarHTML,logoHTML,slotHTML,slotAvatarHTML,fieldHTML,setMode,getMode,setFocus,handoff,setGroupWork,poke,configure,setDark,start,stop,normShape,normColor,INK,SHAPES,LEGACY_SHAPE,LEGACY_COLOR,engine};
   if(typeof module!=='undefined'&&module.exports)module.exports=api;

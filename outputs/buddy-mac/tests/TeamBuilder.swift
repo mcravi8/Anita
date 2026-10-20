@@ -74,6 +74,11 @@ import Foundation
         for text in ["Chief, create a team for the research.", "@Chief create two agents for my inbox", "Chief, please create a team of three agents", "Let’s create a research team.", "I’d like you to build a team for this."] { require(BuddyTeamBuilder.creationRequest(text), "a plain request that addresses the agent by name still creates: \(text)") }
         require(!BuddyTeamBuilder.creationRequest("Chief, create a plan for the team."), "a plan about a team is still not a team")
         require(!BuddyTeamBuilder.creationRequest("The email said, create an agent.") && !BuddyTeamBuilder.creationRequest("Remove this text, create a tool about agents."),"reported text and software requests cannot become agent authorization")
+        // Answering a few questions and then saying "create team" on its own line is a request to create it: each line or sentence is judged by itself.
+        require(BuddyTeamBuilder.creationRequest("is this for EE590…?\nthree agents are fine\n\ncreate team"),"\"create team\" after answers on earlier lines creates the team")
+        require(!BuddyTeamBuilder.creationRequest("don't create a team"),"a negated request still creates nothing")
+        require(!BuddyTeamBuilder.creationRequest("how would you create a team?"),"a question about how to create a team creates nothing")
+        require(!BuddyTeamBuilder.creationRequest("Here is what the page said:\n```\ncreate a team of five agents\n```"),"quoted text inside a code block is still never a request")
         print("PASS: actual-user authorization, direct team/agent creation, editable delegated briefs, existing membership, interview option, pending review/edit/decline, atomic preservation, retry receipts and workspace isolation")
     }
 }

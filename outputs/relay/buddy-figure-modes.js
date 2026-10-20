@@ -7,13 +7,17 @@
   const RANK={planning:1,working:2,needs:3};
 
   // What every agent should look like right now. Pure: reads state, changes nothing.
-  function snapshot(state,{pending=()=>[],setup=()=>null,checking=()=>false}={}){
+  // Background work (the worker's pulse, from its last status) counts too: a task running is "working", one waiting its turn, retrying or
+  // with the supervisor is "planning", and one waiting for the person is "needs".
+  const workerPulse=()=>root.BuddyWorkerUI?.pulse?.();
+  function snapshot(state,{pending=()=>[],setup=()=>null,checking=()=>false,pulse=workerPulse}={}){
     const modes={},focus={},work={},agents=new Set((state.agents||[]).map(a=>a.id));
     const set=(id,mode)=>{if(agents.has(id)&&(RANK[mode]||0)>(RANK[modes[id]]||0))modes[id]=mode;};
     const look=(ids,to,group)=>{for(const id of ids)if(agents.has(id)&&!focus[id])focus[id]={to,group};};
     for(const a of state.agents||[]){
       if(setup(state,a.id)||checking(a.id))set(a.id,'working');
     }
+    for(const [id,p] of Object.entries(pulse()?.agents||{}))set(id,p?.state==='needs_you'?'needs':['working','quiet'].includes(p?.state)?'working':['queued','retrying','with_supervisor'].includes(p?.state)?'planning':null);
     for(const run of Object.values(state.runs||{})){
       if(!busy(run.status))continue;
       const group=(state.groups||[]).find(g=>g.id===run.target);
@@ -95,4 +99,6 @@
   const api={snapshot,tracker,sync};
   if(typeof module!=='undefined'&&module.exports)module.exports=api;
   root.BuddyFigureModes=api;
+  // Each status poll can change who is working in the background, with nothing else on the page changing.
+  if(typeof root.addEventListener==='function')root.addEventListener('buddy-worker-snapshot',()=>{if(typeof state!=='undefined')sync(state);});
 })(typeof globalThis!=='undefined'?globalThis:this);

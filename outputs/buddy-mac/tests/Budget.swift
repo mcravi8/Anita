@@ -81,11 +81,16 @@ import Foundation
         require(kinds.map { $0["kind"] as! String } == ["authorize", "reserve", "spend", "release"] && close(kinds[2]["amountUSD"] as! Double, 0.12) && close(kinds[3]["amountUSD"] as! Double, 0.38), "an attempt that ends turns its reservation into what was spent and gives back the rest")
         try store.update(id, ["status": "running", "attempt": 2, "remainingBudgetUSD": 0, "reservedBudgetUSD": 0.38])
         try store.update(id, ["status": "interrupted"])
-        _ = try store.resume(id, additionalBudgetUSD: 0.3, authorizationID: authorization)
-        _ = try store.resume(id, additionalBudgetUSD: 0.3, authorizationID: authorization)
-        kinds = try store.ledger(of: id)
-        let tailEntries = Array(kinds.suffix(2)), tail = tailEntries.map { $0["kind"] as! String }
-        require(tail == ["uncertain", "authorize"] && close(tailEntries[0]["amountUSD"] as! Double, 0.38) && kinds.filter { $0["kind"] as? String == "authorize" }.count == 2, "an abandoned reservation becomes an uncertain amount, a new allowance is one entry, and asking twice adds no second one")
+        // Runs have no allowance of their own any more: an extra allowance asked for on resume (by an old caller) is ignored and nothing is authorized.
+        let leftovers = try BuddyWorkerStore(directory: root.appendingPathComponent("allowance/Worker"))
+        let oldRun = try leftovers.create(workspace: w, agent: a, requestId: "old-allowance", title: "Old", goal: "Do it", kind: "general", provider: "claude", budget: 0.5)["id"] as! String
+        try leftovers.update(oldRun, ["status": "running", "attempt": 1, "executionRunID": "o1", "remainingBudgetUSD": 0, "reservedBudgetUSD": 0.5])
+        try leftovers.update(oldRun, ["status": "interrupted"])
+        let carried = try leftovers.resume(oldRun, additionalBudgetUSD: 0.3, authorizationID: authorization)
+        let authorized = try leftovers.ledger(of: oldRun).filter { $0["kind"] as? String == "authorize" }.count
+        require(carried["status"] as? String == "queued" && carried["budgetAuthorizations"] == nil && BuddyRunLimit.isNone(carried["remainingBudgetUSD"] as? Double ?? 0) && authorized == 1, "an extra allowance asked for on resume is ignored: nothing is authorized and the task carries on with no limit of its own")
+        let leftoverProblems = try problems(root.appendingPathComponent("allowance/Worker"))
+        require(leftoverProblems.isEmpty, "the ledger and the task still agree: \(leftoverProblems)")
         let mainProblems = try problems(worker)
         require(mainProblems.isEmpty, "the ledger and the task agree: \(mainProblems)")
 
@@ -206,6 +211,17 @@ import Foundation
                 require(found == expected, "after being ended \(phase) commit \(commit), the money is exactly as \(phase == "before" ? "before" : "after") that step\n found: \(found)\n wanted: \(expected)")
             }
         }
+        // 7. The "no limit" sentinel is never booked as money: only what was really spent is.
+        let sentinelDirectory = root.appendingPathComponent("sentinel/Worker")
+        let sentinel = try BuddyWorkerStore(directory: sentinelDirectory)
+        let unlimited = try sentinel.create(workspace: w, agent: a, requestId: "unlimited", title: "Unlimited", goal: "Do it", kind: "general", provider: "claude", budget: BuddyRunLimit.none), unlimitedID = unlimited["id"] as! String
+        try sentinel.update(unlimitedID, ["status": "running", "attempt": 1, "executionRunID": "u1", "remainingBudgetUSD": 0, "reservedBudgetUSD": BuddyRunLimit.none])
+        try sentinel.update(unlimitedID, ["status": "completed", "spentUSD": 0.07, "remainingBudgetUSD": BuddyRunLimit.none - 0.07, "reservedBudgetUSD": 0])
+        let huge = try BuddyOperationsDB(directory: sentinelDirectory, existing: true).rows("SELECT COUNT(*) FROM budget_entries WHERE amount_usd >= 500000").first?.first?.int
+        require(huge == 0, "no entry of half a million dollars or more is ever written (\(String(describing: huge)))")
+        let booked = try sentinel.ledger(of: unlimitedID)
+        require(booked.map { $0["kind"] as? String ?? "" } == ["spend"] && close(booked[0]["amountUSD"] as? Double ?? 0, 0.07), "only the real spend is booked: \(booked)")
+
         print("PASS: every money event is a ledger entry written with its task; earlier spending kept on its own day; limits per agent and workspace with fallback, rollover and validation; chat turns counted, held to the room left, and unreported ones kept as uncertain; a task that would pass its limit waits with the reason and resumes when it is raised; and the process ended at all \(steps * 2) commit boundaries")
     }
 }

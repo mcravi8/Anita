@@ -1,4 +1,5 @@
-const stopReasons={error_max_budget_usd:'It reached its spending limit before it could finish. Raise the Claude task limit in Settings and continue.',error_max_turns:'It reached its limit on steps before it could finish. Continue it to keep going.',error_during_execution:'Claude hit an error while working.'};
+// A run has no limit of its own: error_max_budget_usd means the agent's daily limit ran out, which is a pause that continues by itself.
+const stopReasons={error_max_budget_usd:'Today’s spending limit for this agent was reached. It continues tomorrow or after the user raises the daily limit.',error_max_turns:'It reached its limit on steps before it could finish. Continue it to keep going.',error_during_execution:'Claude hit an error while working.'};
 const stopText=message=>message.errors?.length?message.errors.join('\n'):(message.subtype&&message.subtype!=='success'?(stopReasons[message.subtype]||message.subtype):(message.result||'Claude stopped before finishing.'));
 export class CodingSession {
   constructor({query,tool,createSdkMcpServer,fromJSONSchema,write}){Object.assign(this,{query,tool,createSdkMcpServer,fromJSONSchema,write});this.pending=new Map();this.next=0;this.busy=false;this.closed=false;}
@@ -13,7 +14,8 @@ export class CodingSession {
     const tools=config.tools.map(def=>this.tool(def.name,def.description,this.fromJSONSchema(def.inputSchema).shape,args=>new Promise(resolve=>{
       const id=String(++this.next);this.pending.set(id,resolve);this.emit({type:'call',id,tool:def.name,arguments:args});
     })));
-    let result,lastActivity=0;
+    // lastText is the last thing the model said: a run that stops without a final result (a limit, an error) still reports what it had done.
+    let result,lastActivity=0,lastText='';
     try{
       this.session=this.query({prompt:config.prompt,options:{cwd:config.cwd,env:{PATH:process.env.PATH,HOME:config.home,TMPDIR:process.env.TMPDIR,ANTHROPIC_API_KEY:config.apiKey,CLAUDE_CONFIG_DIR:config.home,CLAUDE_AGENT_SDK_CLIENT_APP:'Buddy/0.18.0',DISABLE_AUTOUPDATER:'1',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1'},
         settingSources:[],plugins:[],strictMcpConfig:true,tools:[],allowedTools:names,permissionMode:'dontAsk',persistSession:true,includePartialMessages:true,...(config.resume?{resume:config.resume}:{}),model:config.model||'claude-sonnet-4-6',maxTurns:100,...(config.budget!=null?{maxBudgetUsd:config.budget}:{}),
@@ -22,9 +24,9 @@ export class CodingSession {
         if(message.type==='stream_event'&&Date.now()-lastActivity>2000){lastActivity=Date.now();this.emit({type:'activity'});}
         if(message.type==='system'&&message.subtype==='init')this.emit({type:'session',sessionId:message.session_id});
         if(message.type==='assistant'){
-          const text=message.message.content.filter(x=>x.type==='text').map(x=>x.text).join('\n');if(text)this.emit({type:'progress',text});
+          const text=message.message.content.filter(x=>x.type==='text').map(x=>x.text).join('\n');if(text){lastText=text;this.emit({type:'progress',text});}
         }
-        if(message.type==='result')result={type:'result',text:message.result||'',error:message.is_error?stopText(message):null,cost:message.total_cost_usd||0,sessionId:message.session_id};
+        if(message.type==='result')result={type:'result',text:message.result||lastText,subtype:message.subtype||'',error:message.is_error?stopText(message):null,cost:message.total_cost_usd||0,sessionId:message.session_id};
       }
       if(!this.closed)this.emit(result||{type:'error',error:'The coding session ended without a confirmed result.'});
     }catch(error){

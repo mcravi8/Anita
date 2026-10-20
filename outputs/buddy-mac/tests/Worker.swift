@@ -64,6 +64,8 @@ import Foundation
         let first = try store.create(workspace: workspace, agent: agent, requestId: "once", title: "Fixture task", goal: "Research only", kind: "research", provider: "chatgpt", budget: 0), id = first["id"] as! String
         let duplicate = try store.create(workspace: workspace, agent: agent, requestId: "once", title: "Other title", goal: "Other brief", kind: "research", provider: "chatgpt", budget: 0)
         require(duplicate["id"] as? String == id && store.jobs.count == 1, "unknown response retry is idempotent")
+        let savedFirst = try store.job(id)
+        require(duplicate["deduplicated"] as? Bool == true && first["deduplicated"] == nil && savedFirst["deduplicated"] == nil, "a retried request says it found the earlier task, and that is never saved on the task")
         try store.update(id, ["status": "waiting_review", "result": "Saved partial work", "reviews": [["id": "pending", "status": "pending"], ["id": "sent", "status": "answered"]]])
         let recovered = try BuddyWorkerStore(directory: root.appendingPathComponent("Worker")), job = try recovered.job(id)
         require(job["status"] as? String == "interrupted" && job["result"] as? String == "Saved partial work", "restart keeps work and never replays an active send")
@@ -81,14 +83,11 @@ import Foundation
         try budgetStore.update(oldScan["id"] as! String,["status":"failed","remainingBudgetUSD":0.0,"reservedBudgetUSD":0.5,"spentUSD":0.1])
         let carried=try budgetStore.resume(oldScan["id"] as! String)
         require(carried["status"] as? String=="queued" && BuddyRunLimit.isNone(carried["remainingBudgetUSD"] as? Double ?? 0),"a task from when runs had an allowance carries on without one")
-        let authorization=UUID().uuidString
-        let funded=try budgetStore.resume(bid,additionalBudgetUSD:0.3,authorizationID:authorization)
-        require(funded["remainingBudgetUSD"] as? Double==0.3 && funded["uncertainBudgetUSD"] as? Double==0.5 && funded["reservedBudgetUSD"] as? Double==0 && funded["spentUSD"] as? Double==0.1,"an explicit extra allowance preserves prior uncertain and confirmed usage")
-        _ = try budgetStore.resume(bid,additionalBudgetUSD:0.3,authorizationID:authorization)
-        require((try budgetStore.job(bid)["budgetAuthorizations"] as? [[String:Any]])?.count==1,"a repeated response cannot authorize the allowance twice")
-        do{_ = try budgetStore.resume(bid,additionalBudgetUSD:0.7,authorizationID:authorization);require(false,"an allowance receipt cannot be reused for a changed amount")}catch{}
-        try budgetStore.update(bid,["status":"failed","remainingBudgetUSD":0.0])
-        for invalid in [-1.0,0,20,Double.nan] {do{_ = try budgetStore.resume(bid,additionalBudgetUSD:invalid,authorizationID:UUID().uuidString);require(false,"invalid extra spending rejected")}catch{}}
+        // There is no extra allowance any more: one asked for on resume (an old caller) is ignored, nothing is authorized, and the task carries on.
+        try budgetStore.update(bid,["stopCause":"stall"])
+        let funded=try budgetStore.resume(bid,additionalBudgetUSD:0.3,authorizationID:UUID().uuidString)
+        require(funded["status"] as? String=="queued" && funded["budgetAuthorizations"]==nil && BuddyRunLimit.isNone(funded["remainingBudgetUSD"] as? Double ?? 0) && funded["spentUSD"] as? Double==0.1 && funded["stopCause"] as? String=="","an old extra-allowance request is ignored: the task carries on with no limit of its own, keeps its confirmed usage, and its stop cause is cleared")
+        require(try budgetStore.ledger(of:bid).filter{$0["kind"] as? String=="authorize"}.count==1,"and nothing new is authorized")
         let support = root.appendingPathComponent("Data"), f = BuddyProjectFiles(support: support)
         try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: ["conversationWorkspace": workspace]).write(to: support.appendingPathComponent("workspace.json"))
@@ -122,5 +121,76 @@ import Foundation
         try Data("this is not a database at all, only some text".utf8).write(to: worn.appendingPathComponent("operations.sqlite"))
         try? FileManager.default.removeItem(at: worn.appendingPathComponent("operations.sqlite-wal")); try? FileManager.default.removeItem(at: worn.appendingPathComponent("operations.sqlite-shm"))
         corrupt = false; do { _ = try BuddyWorkerStore(directory: worn) } catch { corrupt = true }; require(corrupt, "a corrupt task database fails closed")
+
+        // Nothing piles up: a failed run occupies nothing, so it does not count against the cap; a later run of the same work that finishes
+        // supersedes the failed ones (unless one may have sent something); and the person is no longer asked about them.
+        let capStore = try BuddyWorkerStore(directory: root.appendingPathComponent("Cap")), teammate = UUID().uuidString
+        func failedRun(_ n: Int, series: String = "S", reviews: [[String: Any]] = []) throws -> String {
+            let made = try capStore.create(workspace: workspace, agent: agent, requestId: "scan-\(series)-\(n)", title: "Inbox scan \(n)", goal: "Read mail", kind: "email", provider: "chatgpt", budget: 0), mid = made["id"] as! String
+            try capStore.update(mid, ["routineSeriesID": series, "status": "running", "attempt": 1, "executionRunID": "run-\(series)-\(n)"])
+            var fields: [String: Any] = ["status": "failed", "progress": "AgentMail was blocked."]
+            if !reviews.isEmpty { fields["reviews"] = reviews }
+            try capStore.update(mid, fields)
+            return mid
+        }
+        var staleRuns: [String] = [], piledUp = true
+        do { for n in 0..<31 { staleRuns.append(try failedRun(n)) } } catch { piledUp = false }
+        require(piledUp, "thirty-one failed scans do not fill the queue, because a failed run occupies nothing")
+        let elsewhere = try? capStore.create(workspace: workspace, agent: teammate, requestId: "teammate-work", title: "Other work", goal: "Do it", kind: "research", provider: "chatgpt", budget: 0)
+        require(elsewhere != nil, "and another agent can still be given work")
+        let unsure = try failedRun(31, reviews: [["id": "sent-1", "kind": "browser", "status": "uncertain", "tool": ["name": "Click Send"]]])
+        let unrelated = try failedRun(0, series: "T")
+        let stoppedBefore = try capStore.openDecisions(workspace: workspace).filter { $0["kind"] as? String == "stopped" }.count
+        require(stoppedBefore == 33, "each failed run is still one entry while nothing has finished (\(stoppedBefore))")
+        let fresh = try capStore.create(workspace: workspace, agent: agent, requestId: "scan-S-fresh", title: "Inbox scan", goal: "Read mail", kind: "email", provider: "chatgpt", budget: 0), freshID = fresh["id"] as! String
+        try capStore.update(freshID, ["routineSeriesID": "S", "status": "running", "attempt": 1, "executionRunID": "run-fresh"])
+        try capStore.update(freshID, ["status": "completed", "result": "Nothing new."])
+        for sid in staleRuns {
+            let j = try capStore.job(sid)
+            require(j["status"] as? String == "cancelled" && j["stopCause"] as? String == "superseded" && j["supersededBy"] as? String == freshID && j["progress"] as? String == "Superseded: a later run of the same work finished.", "a later run of the same work that finished supersedes an older failed one: \(j["status"] ?? "")/\(j["stopCause"] ?? "")")
+        }
+        require(try capStore.job(unsure)["status"] as? String == "failed", "a run that may have sent something is never superseded")
+        require(try capStore.job(unrelated)["status"] as? String == "failed", "a run of other work is left alone")
+        let stoppedAfter = Set(try capStore.openDecisions(workspace: workspace).filter { $0["kind"] as? String == "stopped" }.compactMap { $0["taskId"] as? String })
+        require(stoppedAfter == Set([unsure, unrelated]), "the superseded runs no longer ask anyone, the others still do: \(stoppedAfter.count)")
+        require(try capStore.history(of: staleRuns[0]).contains { $0.type == "task.status" && $0.cause == "superseded" && $0.payload["to"] as? String == "cancelled" }, "the supersession is in the run's history")
+        let rereadCap = try BuddyWorkerStore(directory: root.appendingPathComponent("Cap"))
+        require(try rereadCap.job(staleRuns[30])["supersededBy"] as? String == freshID && rereadCap.job(freshID)["status"] as? String == "completed", "it was saved with the run that finished")
+
+        // A restart marks the work it interrupted for automatic recovery, unless an action may have been sent.
+        let restartDirectory = root.appendingPathComponent("Restart"), today = BuddyBudget.day(Date())
+        var plain = "", sent = "", again = ""
+        do {
+            let before = try BuddyWorkerStore(directory: restartDirectory)
+            plain = try before.create(workspace: workspace, agent: agent, requestId: "plain", title: "Plain", goal: "Do it", kind: "research", provider: "chatgpt", budget: 0)["id"] as! String
+            try before.update(plain, ["status": "running", "attempt": 1, "executionRunID": "run-plain"])
+            again = try before.create(workspace: workspace, agent: agent, requestId: "again", title: "Again", goal: "Do it", kind: "research", provider: "chatgpt", budget: 0)["id"] as! String
+            try before.update(again, ["status": "running", "attempt": 2, "executionRunID": "run-again", "recovery": ["cause": "worker.restart", "state": "queued", "tries": 2, "day": today, "nextAt": ""]])
+            sent = try before.create(workspace: workspace, agent: agent, requestId: "sent", title: "Sent", goal: "Do it", kind: "general", provider: "chatgpt", budget: 0)["id"] as! String
+            try before.update(sent, ["status": "running", "attempt": 1, "executionRunID": "run-sent"])
+            try before.update(sent, ["status": "waiting_review", "reviews": [["id": "click", "kind": "browser", "status": "pending", "tool": ["name": "Click Send"]]]])
+            try before.update(sent, ["status": "running", "reviews": [["id": "click", "kind": "browser", "status": "answered", "tool": ["name": "Click Send"]]]])
+            try before.markDispatched(task: sent, review: "click")
+        }
+        let afterRestart = try BuddyWorkerStore(directory: restartDirectory)
+        let p = try afterRestart.job(plain), recovery = p["recovery"] as? [String: Any]
+        require(p["status"] as? String == "interrupted" && p["stopCause"] as? String == "worker.restart" && recovery?["state"] as? String == "pending" && recovery?["cause"] as? String == "worker.restart" && recovery?["tries"] as? Int == 0 && recovery?["day"] as? String == today && (recovery?["nextAt"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) } != nil, "a restart with nothing in flight marks the task for automatic recovery: \(p["stopCause"] ?? "none") \(String(describing: recovery))")
+        require((p["progress"] as? String) == "The worker restarted. Buddy will continue this task automatically from its saved progress.", "and says so plainly")
+        require(try afterRestart.openDecisions(workspace: workspace).filter { $0["taskId"] as? String == plain }.isEmpty, "nobody is asked about it while it waits to be continued")
+        require((try afterRestart.job(again)["recovery"] as? [String: Any])?["tries"] as? Int == 2, "the tries already made today are kept")
+        let s = try afterRestart.job(sent)
+        require(s["status"] as? String == "interrupted" && s["recovery"] == nil && s["stopCause"] as? String == "worker.restart" && (s["progress"] as? String)?.contains("may have been sent") == true, "a restart while an action may have been sent is never recovered automatically")
+        require(try afterRestart.openDecisions(workspace: workspace).filter { $0["taskId"] as? String == sent }.map { $0["kind"] as? String ?? "" }.sorted() == ["stopped", "unconfirmed"], "and the person is asked about it and its action")
+        print("PASS: failed runs occupy nothing, later finished runs supersede stale ones and resolve their entries, uncertain runs are kept, retries are marked deduplicated, and a restart marks only safe work for automatic recovery")
+
+        // Who may act on another agent's work: the agent itself, its manager, or the supervisor. Read from native state only.
+        let chiefID = UUID().uuidString, forge = UUID().uuidString, lyra = UUID().uuidString
+        let team: [String: Any] = ["agents": [["id": chiefID], ["id": forge, "managedBy": chiefID], ["id": lyra]]]
+        require(BuddyAuthority.may(forge, actOn: forge, state: team, supervisor: nil), "an agent may act on its own work") // new-api
+        require(BuddyAuthority.may(chiefID, actOn: forge, state: team, supervisor: nil), "a manager may act on the work of an agent it manages") // new-api
+        require(BuddyAuthority.may(chiefID, actOn: lyra, state: team, supervisor: chiefID), "the supervisor may act on anyone's work") // new-api
+        require(!BuddyAuthority.may(lyra, actOn: forge, state: team, supervisor: chiefID) && !BuddyAuthority.may(forge, actOn: lyra, state: team, supervisor: nil), "a teammate that neither manages nor supervises may not") // new-api
+        require(!BuddyAuthority.may("", actOn: "", state: team, supervisor: "") && !BuddyAuthority.may("", actOn: forge, state: ["agents": [["id": forge, "managedBy": ""]]], supervisor: nil), "an empty actor is nobody") // new-api
+        print("PASS: authority over another agent's work comes from native state only") // new-api
     }
 }

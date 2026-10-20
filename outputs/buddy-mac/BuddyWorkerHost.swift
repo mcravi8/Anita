@@ -94,7 +94,7 @@ import Darwin
             // A worker that has just started has no live holders: whatever the last one held is free.
             _ = try store.breakAllLeases()
             monitor=try BuddyTeamMonitor(support:support,makeClaude:makeCoding,makeGPT:{ConversationService(support:self.support,executable:self.executableOverride)},keyReader:keyReader)
-            supervisor = BuddySupervisorLane(support: support, store: store, plans: plans, makeClaude: makeCoding, keyReader: keyReader,
+            supervisor = BuddySupervisorLane(support: support, store: store, plans: plans, makeClaude: makeCoding, makeGPT: { [support, executableOverride] in ConversationService(support: support, executable: executableOverride) }, keyReader: keyReader,
                                              hooks: .init(stopTask: { [weak self] id, cause in await self?.stop(id, status: "cancelled", cause: cause) },
                                                           taskFiles: { [weak self] id in self?.taskFiles(id) ?? [] }))
             try listen()

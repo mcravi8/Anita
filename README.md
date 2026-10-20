@@ -5,19 +5,22 @@ A personal AI workspace with configurable agents, individual chats, and group te
 ## Features
 
 - Configurable agents with independent conversations, roles, appearances, instructions, and access settings.
+- **Team plans that run on their own.** Chief splits an objective into stages, each with tasks for named agents, and asks which stage to do. Say "get stage 1 done" (or tap the stage button on the plan strip) and the team works through that stage without waiting for you: each task starts when its inputs are ready, Chief reviews results, reworks or accepts them, plans an empty stage itself, and the team stops at the end of the stage with one report.
+- **Agents decide by default.** Only sign-ins and credentials, money, anything sent or deleted in your name, changes to the plan, and facts only you know come to you; everything else goes to the team's supervisor (Chief), who decides in the background and records why.
+- **Work recovers by itself.** Restarts, stalls, step caps, dropped connections and connector failures retry within bounds and then go to the supervisor; a stop is never silent, and nothing waits for you unless it is on that short list.
 - Halftone dot figures whose motion shows what each agent is really doing, one dot field behind the chat list, and Light, Dark or Match system appearance.
-- Adaptive setup in each new agent's chat; Claude turns the answers into editable instructions and learns explicit standing preferences over time.
-- Proactive Chief oversight with private status check-ins, sourced DM updates, and per-agent opt-in notifications.
+- Live progress in every chat: an agent sees its running background work (what is running, since when, the command running now, recent results) and the supervisor sees everyone's; times are always in your own time zone.
+- Adaptive setup in each new agent's chat, turned into editable instructions; standing preferences you state are saved as directives that override older instructions.
 - Agents create requested teams and teammates, with editable briefs and approval for unsolicited suggestions.
 - Group coordination with assignments, dependent handoffs, and one shared response.
-- ChatGPT sign-in through the local Codex app-server, using subscription allowances.
+- **ChatGPT or Claude, switchable in one step.** Settings → AI provider → "Switch all agents to …" previews and moves every agent to the matching model on the other side (by the account's own model descriptions), and switching back restores each agent's previous model. ChatGPT uses your subscription through the local Codex app-server; Claude uses Console/API credits.
+- Coding sessions on the agent's own provider: Claude Code on Claude, Codex on ChatGPT, always in a private copy of the project with network and outside writes behind your review.
 - Connected services for research, email, and other supported tools, with action reviews.
 - Connected-folder files with version checks, recoverable edits, and in-app previews.
 - Word paragraph editing, Excel cell and formula editing, PDF forms and annotations, Markdown, HTML, and code.
 - Reviewed control of applications on the connected Mac.
 - Durable background tasks with a separate local browser and files, saved results, approvals, and pause/resume.
-- Workspace settings for choosing ChatGPT or Claude, with independent connect, disconnect, and reconnect controls.
-- Claude Agent SDK conversations, group work, and background tasks using Console/API credits with explicit estimated limits.
+- Spending: runs have no limit of their own; an optional daily limit per agent is the only thing that stops paid work, and a run that reaches it pauses and continues by itself the next day or when the limit is raised.
 
 Independent cloud computers and an always-on remote worker are future work. The local Mac must remain available for local operations. The browser-only frontend is a preview; real conversations and tools run in the native app.
 
@@ -38,7 +41,7 @@ npm ci --ignore-scripts --no-audit --no-fund --prefix outputs/buddy-worker
 python3 outputs/buddy-mac/build.py --install
 ```
 
-Quit Buddy before installing an update. This updates the single `/Applications/Buddy.app`, with Apple Silicon and Intel support and an ad-hoc signature. Build staging is temporary and excluded from search; packages and rollback copies are ZIP archives. Agents, chats, files, browser profiles, and Keychain credentials stay in their existing locations. To produce only `outputs/Buddy-mac.zip`, omit `--install`; to install that archive later, run `python3 outputs/buddy-mac/install.py`. Do not create separate check apps or unpack builds elsewhere. Real conversations also require the supported Codex CLI/app-server and ChatGPT sign-in; see the [native app documentation](outputs/buddy-mac/README.md).
+Quit Buddy before installing an update (background tasks that were running continue by themselves after the restart). This updates the single `/Applications/Buddy.app`, with Apple Silicon and Intel support and an ad-hoc signature. Build staging is temporary and excluded from search; packages and rollback copies are ZIP archives. Agents, chats, files, browser profiles, and Keychain credentials stay in their existing locations. To produce only `outputs/Buddy-mac.zip`, omit `--install`; to install that archive later, run `python3 outputs/buddy-mac/install.py`. Do not create separate check apps or unpack builds elsewhere. Real conversations also require the supported Codex CLI/app-server and ChatGPT sign-in; see the [native app documentation](outputs/buddy-mac/README.md).
 
 ## Preview the frontend
 
@@ -73,4 +76,4 @@ PDF editing covers forms, annotations, page rotation, and additional pages; exis
 
 Third-party frontend dependency licenses are included in `outputs/relay/vendor/`.
 
-See the [background worker guide](outputs/buddy-worker/README.md) for startup, provider connections, approvals, local isolation, recovery, and budget limits.
+See the [background worker guide](outputs/buddy-worker/README.md) for startup, provider connections, approvals, local isolation, recovery, and daily limits.

@@ -1,4 +1,17 @@
-# Buddy for Mac · 0.23.1
+# Buddy for Mac · 0.24.6
+
+## How Buddy works now
+
+The sections after this one are the release history; where they disagree with this summary, this summary is current.
+
+- **Team plans.** Chief turns an objective into stages with tasks (`buddy_plan`) and asks which stage to do. "Get stage N done", or the stage button on the plan strip, is recorded natively as your authorization. The background worker then starts each task when its inputs are accepted, Chief reviews results in a background supervisor lane (accept, rework, answer a teammate's question, plan an empty stage, close the stage), and the team stops at the end of the authorized stage with one report. Plans live in the worker's database and survive restarts.
+- **Who decides.** Every prompt carries one decide-by-default policy. Only credentials and sign-ins, money, irreversible actions toward others or your files, plan or objective changes, and personal facts go to you; other questions go to the supervisor (`buddy_request_decision`). A refused supervisor action is reported back to Chief with the reason.
+- **Recovery.** Every stop records a cause. Restarts, stalls, step caps, bridge and provider/connector errors resume automatically within bounds and then go to the supervisor; time asleep never counts as a stall. Automatic check-ins cut short by sleep or a reconnect are re-queued quietly and never shown.
+- **Money.** No per-run or per-task limits. An optional daily limit per agent is the only stop; reaching it pauses work, which resumes by itself.
+- **Providers.** Settings → AI provider → "Switch all agents to …" moves the whole team to the matching model on the other provider (Claude by family; ChatGPT by the account's own model descriptions, e.g. Opus → GPT-6-Astra, Sonnet → GPT-6-Sol, Haiku → GPT-6-Luna) and restores each agent's previous model when you switch back. Answer formats sent to ChatGPT are converted to its strict form (every field required, optional ones nullable) and the nulls are dropped from the answer.
+- **Coding.** `buddy_coding_session` runs on the agent's own provider: Claude Code on Claude, Codex on ChatGPT (workspace-write sandbox in the task's private project copy, no network; network or outside writes go to a native review). Codex can read outside the project, as it does on its own.
+- **Live progress and time.** Each chat turn sees the live state of its own background work (the supervisor sees everyone's), and every prompt carries your time zone and local time so agents never quote UTC.
+- **Security.** The worker socket answers only Buddy's own processes, and an agent cannot read another agent's private chat unless it supervises or manages it.
 
 Buddy is a personal Mac app with minimal direct messages, 3D avatars, and agents whose names, roles, instructions, shapes, and colors you can change independently.
 
@@ -182,7 +195,7 @@ Every chat turn and background worker receives native runtime facts naming its p
 
 ## Buddy 0.18 — Claude coding sessions
 
-`buddy_coding_session` is a native tool in each agent's chat, separate from the connected-services catalog and Codex Document Control. It starts, inspects, continues or cancels a durable coding task using the saved Claude API connection. A Claude agent uses its selected model; an OpenAI agent delegates this coding job to the Claude default without changing its DM model. No additional Claude login is needed. The configured task budget is reserved before execution; a lost/uncertain cost cannot silently replenish it.
+`buddy_coding_session` is a native tool in each agent's chat, separate from the connected-services catalog and Codex Document Control. It starts, inspects, continues or cancels a durable coding task using the saved Claude API connection. A Claude agent uses its selected model. (Since 0.24.6 an agent on ChatGPT codes with Codex on its own model instead; see "How Buddy works now".) No additional Claude login is needed. The configured task budget is reserved before execution; a lost/uncertain cost cannot silently replenish it.
 
 Coding runs the official Claude Agent SDK with the Claude Code system-prompt preset, persisted SDK session IDs, and a deliberately scoped MCP tool surface. It can write project files, run commands, build/test software, and continue a completed session with an explicit follow-up. Built-in shell, automatic project settings/plugins and unrelated connectors are disabled. Commands use a separate process with a clean environment and a macOS Seatbelt sandbox: private project/scratch writes, system runtime/project reads, no network of any kind unless a command is approved for network access (not even localhost), and no account keys, user-home contents, browser profiles or Keychain. Internet commands show the exact command/reason in native worker review; a fresh review and current web/file permissions are required. Pause, cancellation and disconnect stop the runner and its descendant processes. A sandbox failure is a failed command, never an unrestricted retry.
 

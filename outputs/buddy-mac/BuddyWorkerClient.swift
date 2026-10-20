@@ -160,6 +160,76 @@ enum BuddyAutonomy {
     }
 }
 
+/// Background work as it stands right now, for a chat turn. Asked "how much longer?", an agent used to answer from the plan alone ("a few
+/// hours") because nothing in its chat showed the session that was actually running. Pure: it reads the worker's task records, which the app
+/// reads before a turn. An agent sees its own work; the supervisor sees everyone's. Times are the person's own.
+enum BuddyLiveWork {
+    static let live: Set<String> = ["running", "queued", "waiting_review", "waiting_user", "paused", "interrupted"]
+    static let recentWindow: TimeInterval = 3 * 3600
+    static func context(jobs: [[String: Any]], workspace: String, agent: String, supervises: Bool, names: [String: String], now: Date = Date(), zone: TimeZone = .current) -> String {
+        let stamps = ISO8601DateFormatter(), fractional = ISO8601DateFormatter(), clock = DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        clock.locale = Locale(identifier: "en_US_POSIX"); clock.timeZone = zone; clock.dateFormat = "h:mm a"
+        func date(_ value: Any?) -> Date? { (value as? String).flatMap { stamps.date(from: $0) ?? fractional.date(from: $0) } }
+        func time(_ d: Date) -> String { Calendar.current.dateComponents(in: zone, from: d).day == Calendar.current.dateComponents(in: zone, from: now).day ? clock.string(from: d) : clock.string(from: d) + " yesterday" }
+        func span(_ seconds: TimeInterval) -> String {
+            let m = Int((max(0, seconds) / 60).rounded())
+            return m < 1 ? "under a minute" : m < 60 ? "\(m) min" : "\(m / 60) h \(m % 60) min"
+        }
+        func took(_ ms: Double) -> String {
+            let s = Int((ms / 1000).rounded())
+            return s < 60 ? "\(s) s" : s < 3600 ? "\(s / 60) min \(s % 60) s" : "\(s / 3600) h \((s % 3600) / 60) min"
+        }
+        func short(_ text: String, _ limit: Int) -> String {
+            let one = text.split(whereSeparator: \.isNewline).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
+            return one.count > limit ? String(one.prefix(limit - 1)) + "…" : one
+        }
+        let mine = jobs.filter { ($0["workspace"] as? String ?? workspace) == workspace && (supervises || $0["agentId"] as? String == agent) }
+        let order = ["running": 0, "waiting_review": 1, "waiting_user": 1, "interrupted": 2, "paused": 2, "queued": 3]
+        let current = mine.filter { live.contains($0["status"] as? String ?? "") }
+            .sorted { (order[$0["status"] as? String ?? ""] ?? 9, date($0["createdAt"]) ?? now) < (order[$1["status"] as? String ?? ""] ?? 9, date($1["createdAt"]) ?? now) }
+        let recent = mine.filter { ["completed", "failed", "cancelled"].contains($0["status"] as? String ?? "") && now.timeIntervalSince(date($0["updatedAt"]) ?? .distantPast) <= recentWindow }
+            .sorted { (date($0["updatedAt"]) ?? now) > (date($1["updatedAt"]) ?? now) }
+        guard !current.isEmpty || !recent.isEmpty else { return "" }
+        func who(_ job: [String: Any]) -> String { names[job["agentId"] as? String ?? ""] ?? "An agent" }
+        func line(_ job: [String: Any]) -> String {
+            let status = job["status"] as? String ?? "", title = short(job["title"] as? String ?? "Background task", 120)
+            var text = "- \(who(job)): “\(title)” — "
+            let started = date(job["createdAt"]), touched = date(job["updatedAt"])
+            switch status {
+            case "running":
+                text += "running since " + (started.map { "\(time($0)) (\(span(now.timeIntervalSince($0))))" } ?? "earlier")
+                let commands = job["commands"] as? [[String: Any]] ?? []
+                if let running = commands.last(where: { $0["status"] as? String == "running" }) {
+                    let code = (running["code"] as? String ?? "").split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty && !$0.hasPrefix("export ") && !$0.hasPrefix("#") } ?? ""
+                    text += "; command running for " + (date(running["at"]).map { span(now.timeIntervalSince($0)) } ?? "a while") + (code.isEmpty ? "" : ": `" + short(code, 140) + "`")
+                } else if let touched { text += "; last activity \(time(touched))" }
+                let finished = commands.filter { $0["status"] as? String != "running" }.compactMap { ($0["durationMs"] as? NSNumber)?.doubleValue }.suffix(3)
+                if !finished.isEmpty { text += "; last \(finished.count) command\(finished.count == 1 ? "" : "s") took " + finished.map(took).joined(separator: ", ") }
+                if !commands.isEmpty { text += "; \(commands.count) command\(commands.count == 1 ? "" : "s") so far" }
+            case "queued": text += "queued" + (started.map { " since \(time($0))" } ?? "") + ", waiting for the task ahead of it to finish"
+            case "waiting_review", "waiting_user": text += "waiting" + (touched.map { " since \(time($0))" } ?? "")
+            default: text += "\(status == "paused" ? "paused" : "stopped")" + (touched.map { " at \(time($0))" } ?? "") + "; Buddy restarts it by itself when it can"
+            }
+            let progress = short(job["progress"] as? String ?? "", 200)
+            if !progress.isEmpty, !["Queued", "Working on your request"].contains(progress) { text += ". Status: " + progress }
+            return text
+        }
+        func finished(_ job: [String: Any]) -> String {
+            let status = job["status"] as? String ?? "", result = short(job["result"] as? String ?? job["progress"] as? String ?? "", 240)
+            return "- \(who(job)): “\(short(job["title"] as? String ?? "Background task", 120))” — \(status == "completed" ? "finished" : status)" + (date(job["updatedAt"]).map { " \(time($0))" } ?? "") + (result.isEmpty ? "" : ": " + result)
+        }
+        var lines = ["Live background work, read from Buddy's worker at \(clock.string(from: now)):"]
+        lines += current.prefix(10).map(line)
+        if current.count > 10 { lines.append("- (\(current.count - 10) more not shown)") }
+        if !recent.isEmpty { lines.append("Finished in the last 3 hours:"); lines += recent.prefix(5).map(finished); if recent.count > 5 { lines.append("- (\(recent.count - 5) more not shown)") } }
+        lines.append("Answer questions about progress from this, not from the plan alone. For time left, use how long the running and recent commands take and what is still to do; give it as an estimate and say what it depends on. Never say you cannot see progress when it is listed here.")
+        var text = lines.joined(separator: "\n")
+        if text.count > 6000 { text = String(text.prefix(5960)) + "\n- (more not shown)" }
+        return text
+    }
+}
+
 /// The team plan as a chat turn sees it: which plan "get stage N done" is for, what each agent is told about its plan, and the notes a turn
 /// gets after the app records the person's authorization. Pure: it reads the plan summaries the worker keeps (as the app reads them before a
 /// turn) and never the plan store, so every target that compiles this file without the plan store still builds.

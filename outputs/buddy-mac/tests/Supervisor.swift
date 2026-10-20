@@ -28,7 +28,9 @@ import Foundation
 
     final class World {
         let root: URL, store: BuddyWorkerStore, plans: BuddyPlanStore, lane: BuddySupervisorLane
-        var now = Date(), stopped: [(String, String)] = []
+        // Noon today, not the moment the test starts: every tick moves the clock two minutes on, and a run started just before midnight
+        // crossed into the next day, where a once-a-day notice rightly appears a second time.
+        var now = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!, stopped: [(String, String)] = []
         var planID = "", keys: [String: String] = [:]
         init(root: URL, store: BuddyWorkerStore, plans: BuddyPlanStore, lane: BuddySupervisorLane) { self.root = root; self.store = store; self.plans = plans; self.lane = lane }
         var worker: URL { root.appendingPathComponent("Worker") }

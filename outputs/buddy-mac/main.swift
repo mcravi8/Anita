@@ -239,8 +239,13 @@ import AppKit
     }
     /// What one agent's chat turn is told about the plans it works in, and what the app did with the person's stage request, as text to append.
     private func planInstructions(plans: [[String: Any]], agent: String, state: [String: Any], note: String) -> String {
-        let plan = BuddyPlanChat.context(plans: plans, agent: agent, names: BuddyPlanChat.names(state: state), members: BuddyPlanChat.members(state: state))
-        return (plan.isEmpty ? "" : "\n" + plan) + (note.isEmpty ? "" : "\n" + note)
+        let names = BuddyPlanChat.names(state: state), plan = BuddyPlanChat.context(plans: plans, agent: agent, names: names, members: BuddyPlanChat.members(state: state))
+        // What is running right now, read-only from the worker's records, so "how is it going?" is answered from the live session, not guessed.
+        let workspace = state["conversationWorkspace"] as? String ?? ""
+        let jobs = ((try? BuddyOperationsDB.snapshot(directory: supportURL.appendingPathComponent("Worker"))) ?? nil)?.tasks ?? []
+        let supervises = BuddyAutonomy.supervisor(support: supportURL, workspace: workspace, state: state, agent: agent)?.id == agent
+        let live = BuddyLiveWork.context(jobs: jobs, workspace: workspace, agent: agent, supervises: supervises, names: names)
+        return (plan.isEmpty ? "" : "\n" + plan) + (live.isEmpty ? "" : "\n" + live) + (note.isEmpty ? "" : "\n" + note)
     }
     private var adopting = false
     /// Role and instructions are kept in the agent’s saved profile, so the app itself carries a change to them there, then confirms it to the worker.

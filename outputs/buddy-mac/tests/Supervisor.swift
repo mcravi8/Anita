@@ -475,6 +475,7 @@ import Foundation
         try raw.run("INSERT INTO supervisor_items(key, workspace, presented, state, last_run, updated_at) VALUES('stage:old:0', ?, 3, 'stuck', ?, '2026-10-20T16:46:00Z')", [.text(w), .text(appliedRun)])
         _ = try repair.plans.addNotice(planId: repair.planID, kind: "stuck", text: "The team is stuck on Stage 1 — Reproduce: Chief chose add_tasks. Tell me how to proceed.", chat: true, refs: ["itemKeys": ["stage:old:0"], "runId": appliedRun])
         _ = try repair.plans.addNotice(planId: repair.planID, kind: "stuck", text: "The team is stuck on Rerun the pipeline: Subprocess initialization did not complete within 30000ms — check authentication and network connectivity. Tell me how to proceed.", chat: true, refs: ["itemKeys": [repairKey], "runId": failedRun])
+        try raw.setMeta("supervisor.reopened.codex-saves-v1", "2026-10-20T00:00:00Z")   // that one-time repair is tested on its own below
         try mode(repair, "auto")
         await tick(repair)
         require(try (calls(repair).last?["items"] as? [String]) == [repairKey] && (try planTask(repair, "t1"))["status"] as? String == "done", "after the update the result a run that never started marked stuck is reviewed: \(calls(repair).last?["items"] ?? "")")
@@ -488,6 +489,36 @@ import Foundation
         await tick(again)
         require(try calls(again).count == repairCalls && (try itemState(again, "stage:old:0")).state == "stuck" && (try notices(again, "stuck")).map { $0["status"] as? String ?? "" } == ["open", "closed"], "a second start repairs nothing more")
         print("PASS: at its start the lane reopens, once, the items an earlier Buddy marked stuck after a run that never started, and closes their stuck notice")
+
+        // 10b. Once after the update that let Codex coding sessions save into connected folders: plan items stuck before it (a Stage 3 check whose
+        // artifacts stayed in a private copy) are reviewed again and their stuck notice is closed; other stuck entries are left alone.
+        let saves = try world(base, "saves")
+        try propose(saves); _ = try step(saves)
+        try finish(saves.store, jobs(saves, "t1").first?["id"] as? String ?? "", result: "R1: tables left in the private copy.")
+        _ = try step(saves)
+        let savedKey = "result:\(saves.keys["t1"] ?? ""):1", idleRun = "6F80FC78-0000-4000-8000-000000000003"
+        let db = try BuddyOperationsDB(directory: saves.worker, existing: true)
+        await tick(saves, state: [:])   // the lane's own tables exist before the old records are written
+        try db.run("INSERT INTO supervisor_runs(id, workspace, plan_id, items, status, output, started_at, finished_at, effective) VALUES(?, ?, ?, ?, 'applied', '{\"actions\":[]}', '2026-10-20T20:57:08Z', '2026-10-20T20:57:15Z', 0)",
+                   [.text(idleRun), .text(w), .text(saves.planID), .text("[{\"key\":\"\(savedKey)\",\"kind\":\"result\"}]")])
+        try db.run("INSERT OR REPLACE INTO supervisor_items(key, workspace, presented, state, last_run, updated_at) VALUES(?, ?, 3, 'stuck', ?, '2026-10-20T20:57:15Z')", [.text(savedKey), .text(w), .text(idleRun)])
+        try db.run("INSERT OR REPLACE INTO supervisor_items(key, workspace, presented, state, last_run, updated_at) VALUES('stopped:legacy:1:failed', ?, 3, 'stuck', ?, '2026-10-20T20:57:15Z')", [.text(w), .text(idleRun)])
+        _ = try saves.plans.addNotice(planId: saves.planID, kind: "stuck", text: "The team is stuck on Stage 1: the handoff repair confirmed a technical access blocker. Tell me how to proceed.", chat: true, refs: ["itemKeys": [savedKey], "runId": idleRun])
+        try db.run("DELETE FROM meta WHERE key = 'supervisor.reopened.codex-saves-v1'")
+        try mode(saves, "auto")
+        let fresh = try world(base, "saves")
+        fresh.planID = saves.planID; fresh.keys = saves.keys
+        await tick(fresh)
+        require(try (calls(fresh).last?["items"] as? [String]) == [savedKey], "after the update the stuck plan result is reviewed again: \(calls(fresh).last?["items"] ?? "")")
+        require(try notices(fresh, "stuck").map { $0["status"] as? String ?? "" } == ["closed"], "its stuck notice is closed")
+        require(try itemState(fresh, "stopped:legacy:1:failed").state == "stuck", "a stuck entry outside the plan is left alone")
+        let savesCalls = try calls(fresh).count
+        let later = try world(base, "saves")
+        later.planID = saves.planID; later.keys = saves.keys
+        try db.run("UPDATE supervisor_items SET state = 'stuck' WHERE key = ?", [.text(savedKey)])
+        await tick(later)
+        require(try calls(later).count == savesCalls && (try itemState(later, savedKey)).state == "stuck", "the repair runs once: a later stuck item stays stuck")
+        print("PASS: once after Codex could save results, plan items stuck before it are reviewed again and their stuck notice closed; other stuck entries stay")
 
         // 11. Supervision on ChatGPT. A supervisor whose selection is ChatGPT supervises over the ChatGPT subscription (the app-server), in a run with no
         // tool surface, with the lane's own output schema, instructions and briefing; its actions are applied exactly as on Claude, it records no

@@ -75,7 +75,8 @@ import AppKit
             try require(config["sandbox_workspace_write.network_access"] as? Bool == false && config["sandbox_workspace_write.exclude_slash_tmp"] as? Bool == true && config["sandbox_workspace_write.exclude_tmpdir_env_var"] as? Bool == true, "network off and writes only in the project: \(config)")
             try require(config["features.apps"] as? Bool == false && thread["model"] as? String == "gpt-fixture-coder", "no connectors, the agent's model: \(config["features.apps"] ?? "-") \(thread["model"] ?? "-")")
             let tools = Set((thread["dynamicTools"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String })
-            try require(tools == ["buddy_checkpoint", "buddy_request_decision", "buddy_list_folders", "buddy_list_files", "buddy_read_file", "buddy_copy_into_project"], "only Buddy's decision, read and copy-in tools: \(tools.sorted())")
+            let claudeCoding = Set(BuddyProjectFiles.tools.compactMap { $0["name"] as? String }).union(["buddy_copy_into_project", "buddy_copy_out_of_project", "buddy_checkpoint", "buddy_request_decision"])
+            try require(tools == claudeCoding && !tools.contains("buddy_coding_command"), "the same Buddy file, copy, save and decision tools as a Claude coding session, without Buddy's command tool: \(tools.sorted())")
             let brief = thread["developerInstructions"] as? String ?? ""
             try require(brief.contains("Decisions: decide by default.") && brief.contains("Use buddy_checkpoint only when the user must act in person") && brief.contains("No supervisor is set for this team") && brief.contains("Time: the user is in the")
                         && brief.contains(project(buildID).path) && brief.contains("You are Codey") && !brief.contains("Claude"), "Buddy's coding brief with the decision policy, supervision line and clock, adapted for Codex: \(brief.prefix(300))")
@@ -159,12 +160,17 @@ import AppKit
             try require(logged(outside, "decision").first as? String == "decline" && text(refused["result"]).hasPrefix("Writing outside the project was declined"), "declined and reported: \(refused["result"] ?? "")")
         }
 
-        // 6. Only the tools Buddy gave the thread: a write tool is refused.
-        await section("Buddy refuses a tool the Codex thread was not given (buddy_write_file)") {
-            let id = (try await start("CODEX_FORBIDDEN: try writing through Buddy.", request: "forbidden"))["id"] as? String ?? ""
-            let done = try await poll(id, "the task finishes") { settled($0) }
+        // 6. Results leave the private copy: Codex saves them into a connected folder, where teammates and the supervisor can check them. A Stage 3
+        //    run on Codex once left its tables in the task's own copy, so the validator could not audit them and the stage stuck.
+        await section("Codex saves its results into a connected folder with buddy_copy_out_of_project, never overwriting") {
+            let shared = support.appendingPathComponent("Shared research", isDirectory: true)
+            try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+            let folder = try BuddyProjectFiles(support: support).addFolder(workspace, to: shared)["folderId"] as? String ?? ""
+            let id = (try await start("CODEX_SAVE_RESULTS \(folder)", request: "copy-out"))["id"] as? String ?? ""
+            let done = try await poll(id, "the save task finishes") { settled($0) }
             let call = logged(id, "tool-result").first as? [String: Any] ?? [:]
-            try require(done["status"] as? String == "completed" && call["success"] as? Bool == false && text(done["result"]).hasPrefix("buddy_write_file was refused"), "refused: \(call) \(done["result"] ?? "")")
+            try require(done["status"] as? String == "completed" && call["success"] as? Bool == true, "the save succeeded and its result reached Codex: \(call) \(done["progress"] ?? "")")
+            try require((try? String(contentsOf: shared.appendingPathComponent("stage3/results/table.csv"), encoding: .utf8)) == "event,mae\nGFC,0.29\n", "the file is in the connected folder, in its new subfolder")
         }
 
         // 7. A decision the agent may not make ends the attempt and waits, as on Claude.

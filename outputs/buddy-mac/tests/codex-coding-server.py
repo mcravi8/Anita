@@ -100,6 +100,14 @@ def play(tid, turn, brief):
             log('tool-result', {'success': result.get('success'), 'value': tool_text(result)})
             say(tid, turn, 'Asked which data year to use; waiting for the answer.'); done(tid, turn)
         ask('item/tool/call', {'threadId': tid, 'turnId': turn, 'callId': 'call-decision', 'tool': 'buddy_request_decision', 'arguments': {'question': 'Which data year should the report use?', 'category': 'approach', 'options': ['2015', '2020'], 'recommendation': 'Use the 2015 data.'}}, asked); return
+    if 'CODEX_SAVE_RESULTS' in brief:
+        folder = re.search(r'CODEX_SAVE_RESULTS ([0-9A-Fa-f-]{36})', brief).group(1)
+        os.makedirs(os.path.join(threads[tid]['cwd'], 'results'), exist_ok=True)
+        write(tid, 'results/table.csv', 'event,mae\nGFC,0.29\n', 'w')
+        def saved(result):
+            log('tool-result', {'success': result.get('success'), 'value': tool_text(result)})
+            say(tid, turn, 'Saved results/table.csv into the connected folder.'); done(tid, turn)
+        ask('item/tool/call', {'threadId': tid, 'turnId': turn, 'callId': 'call-copyout', 'tool': 'buddy_copy_out_of_project', 'arguments': {'folderId': folder, 'paths': ['results/'], 'into': 'stage3'}}, saved); return
     if 'CODEX_FORBIDDEN' in brief:
         def refused(result):
             log('tool-result', {'success': result.get('success'), 'value': tool_text(result)})

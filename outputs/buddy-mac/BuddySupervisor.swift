@@ -489,6 +489,7 @@ import Foundation
     private func recover(_ db: BuddyOperationsDB, supervisor: Supervisor, state: [String: Any]) async {
         let stamp = Self.stamp(Date())
         reopenStuckByFailures(db, supervisor: supervisor)
+        reopenStuckForCodexSaves(db, supervisor: supervisor)
         for row in (try? db.rows("SELECT id, workspace, plan_id, items, output, status, started_at FROM supervisor_runs WHERE status IN ('running', 'applying') ORDER BY started_at")) ?? [] {
             let id = row[0].string ?? ""
             let records = ((try? JSONSerialization.jsonObject(with: Data((row[3].string ?? "[]").utf8))) as? [[String: Any]]) ?? []
@@ -517,6 +518,25 @@ import Foundation
             }
         }
         try? plans.closeStuckNotices(runIds: Array(Set(rows.compactMap { $0[1].string })))
+    }
+
+    /// Once: plan work that stuck before Codex coding sessions could save their results into a connected folder. A Stage 3 run on Codex left
+    /// its tables in the task's private copy, so the validator could not audit them and the stage check stuck; with the save tool in place the
+    /// stage gets another look. Only plan items (results, stage checks and plans) reopen; other stuck entries stay as they are.
+    private func reopenStuckForCodexSaves(_ db: BuddyOperationsDB, supervisor: Supervisor) {
+        let key = "supervisor.reopened.codex-saves-v1"
+        guard (try? db.meta(key)) == nil else { return }
+        let rows = (try? db.rows("SELECT key, last_run FROM supervisor_items WHERE state = 'stuck' AND (key LIKE 'stage:%' OR key LIKE 'stage_plan:%' OR key LIKE 'result:%')")) ?? []
+        let stamp = Self.stamp(Date())
+        for row in rows {
+            let item = row[0].string ?? ""
+            _ = try? db.run("UPDATE supervisor_items SET state = 'open', presented = 0, updated_at = ? WHERE key = ? AND state = 'stuck'", [.text(stamp), .text(item)])
+            if (try? db.rows("SELECT 1 FROM decisions WHERE id = ? AND status = 'open'", [.text("stuck:\(item)")]))?.isEmpty == false {
+                try? store.resolveDecision(id: "stuck:\(item)", by: "supervisor:" + supervisor.id, resolution: "reopened")
+            }
+        }
+        if !rows.isEmpty { try? plans.closeStuckNotices(runIds: Array(Set(rows.compactMap { $0[1].string }))) }
+        try? db.setMeta(key, stamp)
     }
 
     // MARK: applying

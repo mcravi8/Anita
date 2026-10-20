@@ -333,7 +333,7 @@ struct BuddyFailure: LocalizedError {
         guard !runs.values.contains(where: { $0["key"] as? String == key && ["starting", "answering", "stopping"].contains($0["status"] as? String ?? "") }) else {
             throw BuddyFailure(message: "This agent is already answering. Stop the reply or wait for it to finish.")
         }
-        runs[runID] = ["runId": runID, "key": key, "requestText":text, "status": "starting", "text": "", "items": [String: String](), "order": [String](), "cancelled": false, "internal": options.internalRun, "finalOnly": options.finalAnswerOnly, "phases": [String: String](), "permissionKeys": options.permissionKeys ?? [key], "files": [[String: Any]](), "agentName": name, "agentId": options.actorId, "proposalsEnabled": options.proposalsEnabled, "extraTools": options.extraTools.compactMap { $0["name"] as? String }]
+        runs[runID] = ["runId": runID, "key": key, "requestText":text, "status": "starting", "text": "", "items": [String: String](), "order": [String](), "cancelled": false, "internal": options.internalRun, "finalOnly": options.finalAnswerOnly, "structured": options.outputSchema != nil, "phases": [String: String](), "permissionKeys": options.permissionKeys ?? [key], "files": [[String: Any]](), "agentName": name, "agentId": options.actorId, "proposalsEnabled": options.proposalsEnabled, "extraTools": options.extraTools.compactMap { $0["name"] as? String }]
         runOrder.append(runID); BuddyRecordLimit.prune(order: &runOrder, records: &runs) { !["starting", "answering", "stopping"].contains($0["status"] as? String ?? "") }
         runs[runID]?["inboxRoutine"] = options.inboxRoutine
         runs[runID]?["requiresRoutine"] = options.requiresRoutine
@@ -445,7 +445,7 @@ struct BuddyFailure: LocalizedError {
                 var inputItems: [[String: Any]] = [["type": "text", "text": inputText]]
                 inputItems += usable.map { ["type": "mention", "name": $0.name, "path": "app://" + $0.id] }
                 var turnParams: [String: Any] = ["threadId": threadID, "input": inputItems, "clientUserMessageId": runID]
-                if let schema = options.outputSchema { turnParams["outputSchema"] = schema }
+                if let schema = options.outputSchema { turnParams["outputSchema"] = BuddyStrictSchema.openAI(schema) }
                 turnParams["model"]=turnModel
                 if let turnEffort { turnParams["effort"] = turnEffort }
                 let result = try await request("turn/start", turnParams)
@@ -964,6 +964,8 @@ struct BuddyFailure: LocalizedError {
             runs[runID]?["text"] = order.compactMap { items[$0] }.joined(separator: "\n\n"); emit(runID)
         }
         if method == "turn/completed", let turn = params["turn"] as? [String: Any] {
+            // A structured answer comes back with null for every optional field it left out (see BuddyStrictSchema); hand callers the shape they asked for.
+            if runs[runID]?["structured"] as? Bool == true, let text = runs[runID]?["text"] as? String { runs[runID]?["text"] = BuddyStrictSchema.cleanedAnswer(text) }
             let status = turn["status"] as? String ?? "failed", error = turn["error"] as? [String: Any]
             finish(runID, status: status == "completed" ? "completed" : status == "interrupted" ? "stopped" : "failed", error: error?["message"] as? String)
         }
@@ -1101,11 +1103,53 @@ extension ConversationService {
             for m in data {
                 guard m["hidden"] as? Bool != true,let id=(m["model"] ?? m["id"]) as? String,id.range(of:#"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"#,options:.regularExpression) != nil,!id.isEmpty else{continue}
                 var row:[String:Any] = ["provider":"chatgpt","id":id,"name":m["displayName"] as? String ?? id,"isDefault":m["isDefault"] as? Bool ?? false]
-                if let effort=m["defaultReasoningEffort"] as? String{row["effort"]=effort};rows.append(row)
+                if let effort=m["defaultReasoningEffort"] as? String{row["effort"]=effort}
+                // The account's own words about the model ("Frontier intelligence…", "Fast and affordable…") are what tell its size apart.
+                if let about=m["description"] as? String,!about.isEmpty{row["description"]=String(about.prefix(300))};rows.append(row)
             }
             guard let next=page["nextCursor"] as? String,!next.isEmpty else{modelRows=rows;modelRowsAt=Date();return rows}
             guard seen.insert(next).inserted else{throw BuddyFailure(message:"OpenAI’s model list did not finish. Try Refresh.")};cursor=next
         }
         throw BuddyFailure(message:"OpenAI’s model list exceeded its limit. Try Refresh.")
+    }
+}
+
+/// ChatGPT's structured output is strict: every object must list all of its properties as required and allow no others. Buddy's answer formats
+/// leave some fields optional, which Claude accepts; real ChatGPT refused the supervisor's and the check-in's formats outright ("'required' is
+/// required to include every key in properties"). At the ChatGPT boundary each optional field therefore becomes required but nullable, and the
+/// nulls are dropped from the answer again, so every caller sees exactly the shape it asked for.
+enum BuddyStrictSchema {
+    static func openAI(_ schema: [String: Any]) -> [String: Any] {
+        var s = schema
+        if let items = s["items"] as? [String: Any] { s["items"] = openAI(items) }
+        if let options = s["anyOf"] as? [[String: Any]] { s["anyOf"] = options.map(openAI) }
+        guard let properties = s["properties"] as? [String: Any] else { return s }
+        let required = Set(s["required"] as? [String] ?? [])
+        var strict: [String: Any] = [:]
+        for (key, value) in properties {
+            guard let property = value as? [String: Any] else { strict[key] = value; continue }
+            strict[key] = required.contains(key) ? openAI(property) : nullable(openAI(property))
+        }
+        s["properties"] = strict; s["required"] = properties.keys.sorted(); s["additionalProperties"] = false
+        return s
+    }
+    static func nullable(_ property: [String: Any]) -> [String: Any] {
+        var p = property
+        if let type = p["type"] as? String { if type != "null" { p["type"] = [type, "null"] } }
+        else if var types = p["type"] as? [String] { if !types.contains("null") { types.append("null"); p["type"] = types } }
+        else { return ["anyOf": [p, ["type": "null"]]] }
+        if var values = p["enum"] as? [Any], !values.contains(where: { $0 is NSNull }) { values.append(NSNull()); p["enum"] = values }
+        return p
+    }
+    static func droppingNulls(_ value: Any) -> Any {
+        if let object = value as? [String: Any] { return object.filter { !($0.value is NSNull) }.mapValues(droppingNulls) }
+        if let list = value as? [Any] { return list.filter { !($0 is NSNull) }.map(droppingNulls) }
+        return value
+    }
+    /// The answer text with its nulls removed; text that is not a JSON object is left exactly as it was.
+    static func cleanedAnswer(_ text: String) -> String {
+        guard let data = text.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cleaned = try? JSONSerialization.data(withJSONObject: droppingNulls(object)), let out = String(data: cleaned, encoding: .utf8) else { return text }
+        return out
     }
 }

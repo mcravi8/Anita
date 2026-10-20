@@ -20,7 +20,7 @@ test('switch all agents: a preview first, the switch only on confirm, a plain re
    state.agents=[agent('chief','Chief'),agent('forge','Forge'),agent('inbox','Inbox')];state.messages={};state.runs={};state.onboarding={status:'completed'};
    window.fixture={provider:'chatgpt',requests:[],refuse:''};
    const status=()=>({provider:fixture.provider,connected:true,chatgpt:{connected:true,enabled:true},claude:{connected:true,enabled:true},plan:null,error:''});
-   const note="Coding sessions and Chief's background supervision run on Claude. They keep using Claude while it stays connected.";
+   const note="Coding sessions and Chief's background supervision move too: coding uses Claude Code on Claude. If Claude is unavailable, Buddy uses the other provider while it stays connected.";
    const plans={
     claude:[{agentId:'chief',from:{provider:'chatgpt',model:'gpt-5.5-pro',name:'GPT-5.5 Pro'},to:{provider:'claude',model:'claude-opus-5',name:'Claude Opus 5'},how:'equivalent'},
             {agentId:'forge',from:{provider:'chatgpt',model:'gpt-5.5',name:'GPT-5.5'},to:{provider:'claude',model:'claude-sonnet-5',name:'Claude Sonnet 5'},how:'remembered'},
@@ -48,7 +48,7 @@ test('switch all agents: a preview first, the switch only on confirm, a plain re
   const text=await preview.textContent();
   assert.match(text,/Switch all agents to Claude\?/);assert.match(text,/Chief\s*GPT-5\.5 Pro\s*→\s*to\s*Claude Opus 5/);assert.match(text,/Forge\s*GPT-5\.5\s*→\s*to\s*Claude Sonnet 5\s*The model it had before/);
   assert.match(text,/Inbox\s*Claude Haiku 5\s*Already on Claude/);
-  assert.match(text,/Coding sessions and Chief's background supervision run on Claude\. They keep using Claude while it stays connected\./);
+  assert.match(text,/Coding sessions and Chief's background supervision move too: coding uses Claude Code on Claude\. If Claude is unavailable, Buddy uses the other provider while it stays connected\./);
   assert.match(text,/Replies and tasks already running finish on the model they started with\./);
   assert.equal(await page.evaluate(()=>document.activeElement?.matches('[data-provider-switch-preview]')),true,'the preview takes focus so it is read out');
 

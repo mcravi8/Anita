@@ -859,8 +859,8 @@ import Darwin
             var leads: [String: String] = [:]
             _ = try BuddyStageLoop.step(plans: plans, workspace: workspace, jobs: store.jobs, names: state.map(Self.names) ?? [:]) { ref, brief, requestID in
                 let kind = ref.kind == "coding" ? "coding" : ref.kind == "research" ? "research" : "general"
-                var request: [String: Any] = ["workspace": workspace, "agentId": ref.assignee, "requestId": requestID, "title": ref.title, "goal": brief, "kind": kind]
-                if kind == "coding" { request["provider"] = "claude" }
+                // A coding task runs on its assignee's own provider (createTask picks Codex or Claude Code), so nothing is pinned here.
+                let request: [String: Any] = ["workspace": workspace, "agentId": ref.assignee, "requestId": requestID, "title": ref.title, "goal": brief, "kind": kind]
                 guard let id = (try createTask(request)["task"] as? [String: Any])?["id"] as? String else { throw BuddyWorkerFailure(message: "The worker did not return the task it created.") }
                 if leads[ref.planId] == nil { leads[ref.planId] = (try plans.plan(id: ref.planId))?["supervisorId"] as? String ?? "" }
                 var fields: [String: Any] = ["planId": ref.planId, "planTaskId": ref.taskId, "stageId": ref.stageId]

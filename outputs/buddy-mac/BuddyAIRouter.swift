@@ -155,7 +155,7 @@ import Foundation
             let name=catalog.models.first{$0["provider"] as? String==s.provider && $0["id"] as? String==s.model}?["name"] as? String
             return ["provider":s.provider,"model":s.model,"name":name ?? (s.model.isEmpty ? "Account default":s.model)]
         }
-        return ["provider":target,"dryRun":dryRun,"applied":!dryRun,"agents":moves.map{["agentId":$0.agent,"from":describe($0.from),"to":describe($0.to),"how":$0.how]},"note":BuddyProviderSwitch.note(supervisor:supervisor)]
+        return ["provider":target,"dryRun":dryRun,"applied":!dryRun,"agents":moves.map{["agentId":$0.agent,"from":describe($0.from),"to":describe($0.to),"how":$0.how]},"note":BuddyProviderSwitch.note(supervisor:supervisor,target:target)]
     }
     func shutdown(){claude.shutdown();chatgpt.shutdown()}
 }

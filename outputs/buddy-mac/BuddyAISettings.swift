@@ -137,7 +137,9 @@ enum BuddyModelCatalog {
 enum BuddyProviderSwitch {
     enum Tier: String { case large, standard, small }
     /// A model's size. Claude: its family (opus large, sonnet standard, haiku small), from the catalog's `line`, else its id or name. ChatGPT: the
-    /// words in its id or name (mini, nano, small, lite, flash: small; max, pro, ultra: large). Anything else, an unknown model included, is standard.
+    /// words in its id or name (mini, nano, small, lite, flash: small; max, pro, ultra: large), else the account's own description of the model —
+    /// the names on a ChatGPT account (Astra, Sol, Luna, Terra) say nothing about size, but "Frontier intelligence for the most demanding work"
+    /// and "Fast and affordable model for easier tasks" do. Anything else, an unknown model included, is standard.
     static func tier(_ row:[String:Any])->Tier {
         let id=(row["id"] as? String ?? "").lowercased(),name=(row["name"] as? String ?? "").lowercased()
         if row["provider"] as? String=="claude" {
@@ -150,6 +152,9 @@ enum BuddyProviderSwitch {
         let words=Set((id+" "+name).split{!$0.isLetter && !$0.isNumber}.map(String.init))
         if !words.isDisjoint(with:["mini","nano","small","lite","flash"]) {return .small}
         if !words.isDisjoint(with:["max","pro","ultra"]) {return .large}
+        let about=Set((row["description"] as? String ?? "").lowercased().split{!$0.isLetter}.map(String.init))
+        if !about.isDisjoint(with:["frontier","flagship","demanding","hardest","deepest"]) {return .large}
+        if !about.isDisjoint(with:["fast","faster","affordable","efficient","easier","lightweight","cheap","cheaper","quick"]) {return .small}
         return .standard
     }
     /// The model of `tier` among `provider`'s models in `catalog` (newest first): the provider's default if it is that size, else the first listed.
@@ -177,9 +182,11 @@ enum BuddyProviderSwitch {
         }
         return moves
     }
-    /// What the preview says stays on Claude.
-    static func note(supervisor:String?)->String {
-        (supervisor.map{"Coding sessions and \($0)'s background supervision run on Claude."} ?? "Coding sessions run on Claude.")+" They keep using Claude while it stays connected."
+    /// What the preview says about the work that is not a chat reply: coding sessions and the supervisor's background lane follow each agent's
+    /// provider (Codex on ChatGPT, Claude Code on Claude), and fall back to the other provider only when this one is unavailable.
+    static func note(supervisor:String?,target:String)->String {
+        let side=target=="claude" ? "Claude":"ChatGPT", tool=target=="claude" ? "Claude Code":"Codex"
+        return (supervisor.map{"Coding sessions and \($0)'s background supervision move too: coding uses \(tool) on \(side)."} ?? "Coding sessions move too: they use \(tool) on \(side).")+" If \(side) is unavailable, Buddy uses the other provider while it stays connected."
     }
 }
 

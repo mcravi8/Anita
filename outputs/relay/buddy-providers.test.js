@@ -19,7 +19,7 @@ test('switch all agents is offered towards the provider that is not the starting
  assert.match(providers.switchOffer({provider:'chatgpt'},'switch'),/disabled>Checking models…</);
 });
 test('the switch preview lists every agent with its current and new model, says what stays on Claude, and escapes names',()=>{
- const plan={provider:'claude',dryRun:true,applied:false,note:"Coding sessions and Chief's background supervision run on Claude. They keep using Claude while it stays connected.",agents:[
+ const plan={provider:'claude',dryRun:true,applied:false,note:"Coding sessions and Chief's background supervision move too: coding uses Claude Code on Claude. If Claude is unavailable, Buddy uses the other provider while it stays connected.",agents:[
   {agentId:'chief',from:{provider:'chatgpt',model:'gpt-5.5-pro',name:'GPT-5.5 Pro'},to:{provider:'claude',model:'claude-opus-5',name:'Claude Opus 5'},how:'equivalent'},
   {agentId:'forge',from:{provider:'chatgpt',model:'gpt-5.5',name:'GPT-5.5'},to:{provider:'claude',model:'claude-sonnet-5',name:'Claude Sonnet 5'},how:'remembered'},
   {agentId:'inbox',from:{provider:'claude',model:'claude-haiku-5',name:'Claude Haiku 5'},to:{provider:'claude',model:'claude-haiku-5',name:'Claude Haiku 5'},how:'unchanged'},
@@ -31,7 +31,7 @@ test('the switch preview lists every agent with its current and new model, says 
  assert.match(rows[1],/Forge.*GPT-5\.5<\/span>.*Claude Sonnet 5<\/span><small>The model it had before<\/small>/);
  assert.match(rows[2],/Inbox.*Claude Haiku 5<\/span><small>Already on Claude<\/small>/);assert.doesNotMatch(rows[2],/→/);
  assert.match(rows[3],/&lt;img src=x&gt;/);assert.doesNotMatch(out,/<img/);
- assert.match(out,/Coding sessions and Chief&#39;s background supervision run on Claude\. They keep using Claude while it stays connected\./);
+ assert.match(out,/Coding sessions and Chief&#39;s background supervision move too: coding uses Claude Code on Claude\. If Claude is unavailable, Buddy uses the other provider while it stays connected\./);
  assert.match(out,/Replies and tasks already running finish on the model they started with\./);
  assert.match(out,/data-provider-switch-cancel >Cancel<\/button><button type="button" class="primary-button" data-provider-switch-confirm >Switch all agents to Claude<\/button>/);
  const busy=providers.switchPreview(plan,id=>names[id],'switch');assert.match(busy,/data-provider-switch-cancel disabled>Cancel/);assert.match(busy,/data-provider-switch-confirm disabled>Switching…</);

@@ -505,7 +505,7 @@ import Foundation
         require(gptCall["model"] as? String == "fixture-gpt-chief", "on the supervisor's own ChatGPT model: \(gptCall["model"] ?? "")")
         require((gptCall["dynamicTools"] as? [Any])?.isEmpty == true && gptCall["apps"] as? Bool == false && gptCall["sandbox"] as? String == "read-only" && gptCall["approvalPolicy"] as? String == "never"
                 && gptCall["ephemeral"] as? Bool == true && (gptCall["mentions"] as? [Any])?.isEmpty == true, "in a run with no tool surface: \(gptCall)")
-        require(NSDictionary(dictionary: gptCall["outputSchema"] as? [String: Any] ?? [:]).isEqual(to: BuddySupervisorLane.schema), "with the lane's own output schema: \(gptCall["outputSchema"] ?? "")")
+        require(NSDictionary(dictionary: gptCall["outputSchema"] as? [String: Any] ?? [:]).isEqual(to: BuddyStrictSchema.openAI(BuddySupervisorLane.schema)), "with the lane's own output schema, in the strict form ChatGPT requires: \(gptCall["outputSchema"] ?? "")")
         require(gptCall["policy"] as? Bool == true && gptCall["supervises"] as? Bool == true && gptCall["text"] as? Bool == true && gptCall["addTasks"] as? Bool == true, "with the same instructions as on Claude: \(gptCall)")
         require((gptCall["you"] as? [String: Any])?["name"] as? String == "Chief" && (gptCall["authorization"] as? [String: Any])?["quote"] as? String == "get stage 1 done"
                 && (gptCall["results"] as? [String])?.first?.contains("R1: the baseline reproduces") == true, "and the same briefing: \(gptCall)")

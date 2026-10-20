@@ -42,6 +42,17 @@ import Foundation
         require(size(gpt("fast-1", "Flash 2")) == "small", "the display name can say small")
         for large in ["gpt-5.1-codex-max", "gpt-5-pro", "gpt-ultra"] { require(size(gpt(large)) == "large", "\(large) is a large model") }
         require(size(gpt("x-1", "GPT-5 Pro")) == "large", "the display name can say large")
+        // The models a real ChatGPT account lists (codex app-server model/list, 20 Oct 2026): their names say nothing about size, their
+        // descriptions do. Every agent used to land on the default, GPT-6-Astra.
+        let account: [[String: Any]] = [
+            ["provider": "chatgpt", "id": "gpt-6-astra", "name": "GPT-6-Astra", "description": "Frontier intelligence for the most demanding work.", "isDefault": true],
+            ["provider": "chatgpt", "id": "gpt-6-sol", "name": "GPT-6-Sol", "description": "Previous generation workhorse model.", "isDefault": false],
+            ["provider": "chatgpt", "id": "gpt-6-luna", "name": "GPT-6-Luna", "description": "Fast and affordable model for easier tasks.", "isDefault": false],
+            ["provider": "chatgpt", "id": "gpt-5.6-sol", "name": "GPT-5.6-Sol", "description": "Older generation workhorse model.", "isDefault": false],
+            ["provider": "chatgpt", "id": "gpt-5.6-terra", "name": "GPT-5.6-Terra", "description": "Older balanced model for straightforward work.", "isDefault": false],
+            ["provider": "chatgpt", "id": "gpt-5.6-luna", "name": "GPT-5.6-Luna", "description": "Older fast and efficient model.", "isDefault": false]]
+        require(account.map { BuddyProviderSwitch.tier($0).rawValue } == ["large", "standard", "small", "standard", "standard", "small"], "the account's descriptions give each model its size: \(account.map { BuddyProviderSwitch.tier($0).rawValue })")
+        require(BuddyProviderSwitch.equivalent(.large, provider: "chatgpt", in: account) == "gpt-6-astra" && BuddyProviderSwitch.equivalent(.standard, provider: "chatgpt", in: account) == "gpt-6-sol" && BuddyProviderSwitch.equivalent(.small, provider: "chatgpt", in: account) == "gpt-6-luna", "Opus goes to Astra, Sonnet to GPT-6-Sol, Haiku to GPT-6-Luna — the newest of each size")
         for standard in ["gpt-5.5", "o3", "gpt-5.1-codex", "prompt-helper", "fixture", ""] { require(size(gpt(standard)) == "standard", "\(standard.isEmpty ? "the account default" : standard) is standard") }
         print("PASS: model sizes: Claude by family (opus, sonnet, haiku), ChatGPT by the words in its name (mini/nano/small/lite/flash, max/pro/ultra), anything else standard")
 
@@ -145,12 +156,12 @@ import Foundation
         require(planned[inbox]?.from == "claude/claude-haiku-5", "the preview shows the current model")
         require(planned[inbox]?.to == "claude/claude-haiku-5", "an agent already on Claude stays exactly where it is")
         require(planned[inbox]?.how == "unchanged", "and is marked unchanged")
-        require(text(preview["note"]) == "Coding sessions and Chief's background supervision run on Claude. They keep using Claude while it stays connected.", "the preview says plainly what stays on Claude: \(text(preview["note"]))")
+        require(text(preview["note"]) == "Coding sessions and Chief's background supervision move too: coding uses Claude Code on Claude. If Claude is unavailable, Buddy uses the other provider while it stays connected.", "the preview says coding and supervision move with the team: \(text(preview["note"]))")
         require(preview["applied"] as? Bool == false, "a preview is not applied")
         require(file("agent-models.json") == modelsBefore, "a preview saves no model")
         require(file("ai-providers.json") == settingsBefore, "a preview leaves the starting provider")
         let noLead = try await switchTo("claude", team, apply: false)
-        require(text(noLead["note"]) == "Coding sessions run on Claude. They keep using Claude while it stays connected.", "without a supervisor only coding sessions are named")
+        require(text(noLead["note"]) == "Coding sessions move too: they use Claude Code on Claude. If Claude is unavailable, Buddy uses the other provider while it stays connected.", "without a supervisor only coding sessions are named")
 
         // Apply: every agent saved, the default provider follows, and the switch is stamped for scheduled routines.
         let applied = try await switchTo("claude", team, apply: true, lead: "Chief")

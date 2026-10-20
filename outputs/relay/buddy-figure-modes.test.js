@@ -98,3 +98,19 @@ test('a mode set by something else is not overwritten when the run ends',()=>{
   t.update(base(dm('answering')));sink.modes.one='stuck';
   t.update(base({}));assert.equal(sink.modes.one,'stuck');
 });
+test('an agent pulses "needs you" only while the bell still counts something unread for it',()=>{
+  const A=require('./buddy-activity.js');
+  const team={conversationWorkspace:'w',agents:[{id:'inbox',name:'Inbox'},{id:'chief',name:'Chief'}],groups:[],runs:{}};
+  // Inbox's real case: its 06:00 check stopped, the open entry is the person's, and the person has already seen it.
+  const decision={id:'stopped:A7BB0D7D-862A-4761-ABDE-8A02C3008EBE:1:failed',kind:'stopped',agentId:'inbox',taskId:'A7BB0D7D-862A-4761-ABDE-8A02C3008EBE',title:'Check AgentMail and Gmail (06:00)',question:'failed to refresh installed connector runtime state',audience:'user',createdAt:'2026-10-20T14:25:38Z'};
+  const worker={workspace:'w',tasks:[],decisions:[decision],notifications:{}},pulse=()=>({agents:{inbox:{state:'needs_you'}}});
+  const needing=s=>()=>A.needingAgents(A.collect(s,worker));
+  assert.deepEqual(snapshot(team,{pulse,needing:needing(team)}).modes,{inbox:'needs'},'unread, it pulses');
+  const seen={...team,activitySeen:{['decision:'+decision.id]:true}};
+  assert.deepEqual(snapshot(seen,{pulse,needing:needing(seen)}).modes,{},'once the person has seen it, it rests');
+  const dismissed={...team,activityDismissed:{['decision:'+decision.id]:true}};
+  assert.deepEqual(snapshot(dismissed,{pulse,needing:needing(dismissed)}).modes,{},'and so once it is dismissed');
+  const readInApp={...team};const readWorker={...worker,notifications:{['decision:'+decision.id]:{read:true,dismissed:false}}};
+  assert.deepEqual(snapshot(readInApp,{pulse,needing:()=>A.needingAgents(A.collect(readInApp,readWorker))}).modes,{},'read on another screen (the app’s own copy) counts the same');
+  assert.deepEqual(snapshot(team,{pulse,needing:()=>undefined}).modes,{inbox:'needs'},'without the notification list, the worker’s pulse alone decides, as before');
+});

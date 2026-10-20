@@ -12,6 +12,9 @@ for line in sys.stdin:
  if kind=='memory':
   props=c['outputSchema']['properties'];call['required']=c['outputSchema'].get('required');call['rewrites']='role' in props or 'instructions' in props
  with (folder/'fixture-calls.jsonl').open('a') as f:f.write(json.dumps(call)+'\n')
+ # fixture-checkin-mode.txt = hang: a check-in never answers, so the monitor's own limits decide what happens to it.
+ hang=folder/'fixture-checkin-mode.txt'
+ if kind=='checkin' and hang.exists() and hang.read_text().strip()=='hang':continue
  if kind=='memory':
   messages=p['messages'];text=' '.join(m['text'] for m in messages)
   if 'SLOW' in text:time.sleep(2)

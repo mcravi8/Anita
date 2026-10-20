@@ -19,6 +19,7 @@ import Foundation
         require(queue.jobs.count==1 && rules.routines[0]["nextRun"] as? String=="2026-10-23T16:00:00Z","sleep catches up once and advances past missed days without bursts")
         let id=queue.jobs[0]["id"] as! String
         require(queue.jobs[0]["model"] as? String=="claude-pinned","routine occurrence retains its pinned model")
+        require(queue.jobs[0]["supervisorId"]==nil,"with no supervisor named, a scheduled run names none")
         require(queue.jobs[0]["inboxQuery"] as? String==args["query"] as? String && queue.jobs[0]["routineID"] as? String==rid,"native task carries saved search and stable routine memory")
         // simulate lost routine update after queue was saved
         let database=try BuddyOperationsDB(directory:root,existing:true)
@@ -163,5 +164,19 @@ import Foundation
         require(editRefused && rules.routines[0]["goal"] as? String==args["goal"] as? String,"an edit that would need team work is refused too, and the routine is unchanged")
         require(BuddyRoutineGoals.unsupported("call buddy_coding_session") && BuddyRoutineGoals.unsupported("Use buddy_computer_task to open the site") && !BuddyRoutineGoals.unsupported(args["goal"] as! String) && !BuddyRoutineGoals.unsupported("Write a coding-session summary for the user"),"only goals that need team work are refused") // new-api
         print("PASS: routine health judged per routine (a harmless stop does not freeze the series; three unfinished own runs park only that routine), revival keeps a slot missed within a day and runs it once, and routines that need team work are refused") // new-api
+
+        // A scheduled run, due or started now, records the team's supervisor like any other task, so its stops reach the supervisor first.
+        let supervisedRoot=root.appendingPathComponent("supervised"),chief=UUID().uuidString
+        let supervisedRules=try BuddyRoutineStore(directory:supervisedRoot),supervisedQueue=try BuddyWorkerStore(directory:supervisedRoot)
+        let daily:[String:Any]=["action":"create","title":"Check AgentMail and Gmail (06:00)","goal":"Check the inbox and say what needs attention","kind":"email","query":"in:inbox newer_than:1d","hour":6,"minute":0,"weekdays":[1,2,3,4,5,6,7],"timeZone":"America/Los_Angeles"]
+        let dailyID=(try supervisedRules.manage(daily,workspace:w,agent:a,requestID:"daily",provider:"claude",budget:BuddyRunLimit.none,now:now)["routine"] as! [String:Any])["id"] as! String
+        try supervisedRules.enqueueDue(store:supervisedQueue,workspace:w,now:f.date(from:"2026-10-17T14:00:00Z")!,supervisor:chief) // new-api
+        require(supervisedQueue.jobs.count==1 && supervisedQueue.jobs[0]["supervisorId"] as? String==chief && supervisedQueue.jobs[0]["routineID"] as? String==dailyID,"a due run records the team's supervisor: \(supervisedQueue.jobs.first?["supervisorId"] ?? "none")")
+        try supervisedQueue.update(supervisedQueue.jobs[0]["id"] as! String,["status":"completed"])
+        let manualRun=try supervisedRules.runNow(dailyID,workspace:w,agent:a,requestID:UUID().uuidString,store:supervisedQueue,supervisor:chief) // new-api
+        require(manualRun["supervisorId"] as? String==chief,"so does a run started now")
+        let unsupervised=try supervisedRules.runNow(dailyID,workspace:w,agent:a,requestID:UUID().uuidString,store:BuddyWorkerStore(directory:supervisedRoot.appendingPathComponent("none")),supervisor:nil) // new-api
+        require(unsupervised["supervisorId"]==nil,"and with no supervisor it names none")
+        print("PASS: scheduled runs, due or started now, record the team's supervisor like any task") // new-api
     }
 }

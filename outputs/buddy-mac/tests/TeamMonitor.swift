@@ -1,6 +1,8 @@
 import Foundation
 /// Answers key lookups from a script, then with the fixture key: lets a test take the key away between queueing a job and starting it.
 final class KeyAnswers {var queue:[String?]=[];func next()->String? {queue.isEmpty ? "fixture-key":queue.removeFirst()}}
+/// A key that can be made unreadable for a while (the Keychain locks with the Mac) and readable again.
+final class KeyBox {var key:String?="fixture-key"}
 @main struct TeamMonitorTests {
  @MainActor static func require(_ value:Bool,_ message:String){if !value{fputs("FAILED: \(message)\n",stderr);exit(1)}}
  @MainActor static func main() async throws {
@@ -519,6 +521,94 @@ final class KeyAnswers {var queue:[String?]=[];func next()->String? {queue.isEmp
     require(finished.filter{age($0)<1}.count==20 && finished.filter{$0["status"] as? String=="failed"}.count==20,"the newest finished checks are the ones kept")
     require(kept.filter{$0["status"] as? String=="queued" && $0["id"] as? String != fresh["id"] as? String}.allSatisfy{inputOf($0)["sources"] != nil},"waiting checks keep their full input")
     require(try BuddyTeamMonitorStore(support:root.appendingPathComponent("Growth")).checks.count==kept.count,"the trimmed journal reopens")
+  }
+  do {
+    // Inbox's three automatic check-ins each "stopped because access, settings, or its time limit changed", and each was shown to the person.
+    // A check-in cut short is nobody's business: a key that can't be read for a moment or time asleep does not stop it, a pause, a reconnect or
+    // its time limit queues it again quietly (paced and bounded), one that can no longer happen is dropped without a word, and none of it is shown.
+    var failed:[String]=[]
+    func expect(_ value:Bool,_ message:String){if !value{failed.append(message);fputs("FAILED: \(message)\n",stderr)}}
+    let cChief=UUID().uuidString,rex=UUID().uuidString
+    let cutState:[String:Any]=["version":1,"conversationWorkspace":w,"agents":[agentRow(cChief,"Chief"),agentRow(rex,"Inbox")],"messages":[String:Any]()]
+    let cutRoot=try fixtureRoot("CutShort",cutState)
+    try "hang".write(to:cutRoot.appendingPathComponent("TeamMonitor/fixture-checkin-mode.txt"),atomically:true,encoding:.utf8)
+    let box=KeyBox()
+    let cut=try BuddyTeamMonitor(support:cutRoot,makeClaude:factory,keyReader:{_ in box.key})
+    let cutJobs:[[String:Any]]=[["id":UUID().uuidString,"workspace":w,"agentId":rex,"title":"Check AgentMail and Gmail (06:00)","status":"failed","progress":"failed to refresh installed connector runtime state: failed to refresh tools for MCP server 'codex_apps'","updatedAt":"2026-10-20T14:25:38Z"]]
+    var clock=Date()
+    func cutTick(_ seconds:TimeInterval=11,paused:Bool=false) async {clock=clock.addingTimeInterval(seconds);await cut.tick(state:cutState,jobs:cutJobs,paused:paused,now:clock)}
+    func checkins()->[[String:Any]] {cut.store.checks.filter{$0["kind"] as? String=="checkin" && $0["agentId"] as? String==rex}}
+    func check(_ id:String)->[String:Any] {cut.store.checks.first{$0["id"] as? String==id} ?? [:]}
+    func said(_ c:[String:Any])->String {"\(c["status"] ?? "-") requeues \(c["requeues"] ?? 0) \(c["error"] ?? "")"}
+    /// What the person can see of check-ins on Inbox: the agent-message history, and the checks and timeline markers in the page's status.
+    func seen()throws->(history:[[String:Any]],checks:[[String:Any]],markers:Int) {
+      let s=try cut.status(cutState)
+      return (try cut.handle(["action":"messages"],state:cutState,jobs:cutJobs)["messages"] as? [[String:Any]] ?? [],(s["checks"] as? [[String:Any]] ?? []).filter{$0["agentId"] as? String==rex},((s["agentMessages"] as? [String:[String:Any]])?[rex]?["events"] as? [[String:Any]] ?? []).count)
+    }
+    func quiet(_ label:String,hiding id:String)throws {
+      let now=try seen()
+      expect(!now.history.contains{["interrupted","cancelled"].contains($0["status"] as? String ?? "") || $0["id"] as? String==id} && !now.checks.contains{$0["status"] as? String=="interrupted"} && now.markers==0,
+             "\(label): it is not in the agent-message history or the page's status: \(now.history.map{"\($0["status"] ?? "") · \($0["error"] ?? "")"}) \(now.checks.map{$0["status"] ?? ""}) markers \(now.markers)")
+    }
+    await cutTick()
+    await waitUntil{checkins().first?["status"] as? String=="running"}
+    let checkID=checkins().first?["id"] as? String ?? ""
+    expect(checkins().count==1 && check(checkID)["status"] as? String=="running","the automatic check-in on Inbox starts: \(checkins().map(said))")
+    box.key=nil;await cutTick();box.key="fixture-key"
+    expect(check(checkID)["status"] as? String=="running","a Claude key that can't be read for a moment (the Keychain locks with the Mac) does not stop a check that already has it: \(said(check(checkID)))")
+    await cutTick(600)
+    expect(check(checkID)["status"] as? String=="running","ten minutes asleep do not count toward its three-minute limit: \(said(check(checkID)))")
+    for _ in 0..<17 {await cutTick()}
+    let requeued=check(checkID)
+    expect(requeued["status"] as? String=="queued" && requeued["requeues"] as? Int==1 && requeued["retryAt"] is String && checkins().count==1,"three awake minutes without an answer queue the same check again, to wait its turn: \(checkins().map(said))")
+    try quiet("cut short by its time limit",hiding:checkID)
+    await cutTick()
+    expect(check(checkID)["status"] as? String=="queued","it waits before it is tried again: \(said(check(checkID)))")
+    await cutTick(601)
+    await waitUntil{check(checkID)["status"] as? String=="running"}
+    expect(check(checkID)["status"] as? String=="running" && checkins().count==1,"after its wait the same check runs again under the current settings: \(checkins().map(said))")
+    await cutTick(paused:true)
+    expect(check(checkID)["status"] as? String=="queued" && check(checkID)["requeues"] as? Int==1,"Pause all puts it back in the queue without counting against it: \(said(check(checkID)))")
+    await cutTick()
+    await waitUntil{check(checkID)["status"] as? String=="running"}
+    expect(check(checkID)["status"] as? String=="running","and it runs again once the queue does: \(said(check(checkID)))")
+    _ = try BuddyAISettings(support:cutRoot).update(w,enabled:("claude",false))
+    await cutTick()
+    expect(check(checkID)["status"] as? String=="cancelled","a check whose provider the person disconnected can no longer happen and is dropped: \(said(check(checkID)))")
+    for _ in 0..<3 {await cutTick(61)}
+    expect(checkins().count==1,"no new check-in is queued while the provider is disconnected: \(checkins().map(said))")
+    try quiet("dropped after a disconnect",hiding:checkID)
+    _ = try BuddyAISettings(support:cutRoot).update(w,enabled:("claude",true))
+    await cutTick(61)
+    await waitUntil{checkins().count==2 && checkins()[1]["status"] as? String=="running"}
+    let lastID=checkins().last?["id"] as? String ?? ""
+    expect(checkins().count==2 && check(lastID)["status"] as? String=="running","once reconnected the next check-in runs: \(checkins().map(said))")
+    try cut.store.update(lastID,["requeues":3])
+    for _ in 0..<17 {await cutTick()}
+    expect(check(lastID)["status"] as? String=="interrupted","a check cut short a fourth time is given up (and kept on record): \(said(check(lastID)))")
+    try quiet("given up",hiding:lastID)
+    for _ in 0..<3 {await cutTick(601)}
+    expect(checkins().count==2,"and nothing loops: no further automatic retry follows: \(checkins().map(said))")
+    cut.shutdown()
+    // Records the older build saved (Inbox's three, startedAt = createdAt and no finishedAt) stay saved, and stop showing.
+    let oldState:[String:Any]=["version":1,"conversationWorkspace":w,"agents":[agentRow(cChief,"Chief"),agentRow(rex,"Inbox")],"messages":[String:Any]()]
+    let oldRoot=try fixtureRoot("SavedInterruptions",oldState),policyRow:[String:Any]=["enabled":true,"supervisorId":cChief,"supervisorChosen":true,"agents":[String:Any](),"intervalMinutes":15,"dailyLimitUSD":2.0,"revision":1]
+    func oldCheck(_ id:String,_ at:String,_ status:String,_ extra:[String:Any]=[:])->[String:Any] {(["id":id,"workspace":w,"agentId":rex,"kind":"checkin","status":status,"createdAt":at,"startedAt":at,"fingerprint":"f","policyRevision":1,"provider":"claude","model":"claude-haiku-5-5","force":false,"input":["requesterId":cChief,"agent":["id":rex,"name":"Inbox"]]] as [String:Any]).merging(extra){_,n in n}}
+    let stoppedText="This check stopped because access, settings, or its time limit changed."
+    let answered=UUID().uuidString,old=[UUID().uuidString,UUID().uuidString,UUID().uuidString],stamp=ISO8601DateFormatter()
+    var oldChecks:[[String:Any]]=[oldCheck(answered,stamp.string(from:Date().addingTimeInterval(-3*3600)),"completed",["finishedAt":stamp.string(from:Date().addingTimeInterval(-3*3600+30)),"output":["notify":false,"body":"","priority":2,"sourceIds":[String]()]])]
+    for (id,ago) in zip(old,[-7200.0,-5400,-3600]) {oldChecks.append(oldCheck(id,stamp.string(from:Date().addingTimeInterval(ago)),"interrupted",["error":stoppedText]))}
+    try JSONSerialization.data(withJSONObject:["version":1,"settings":[w:policyRow],"checks":oldChecks,"updates":[[String:Any]](),"observed":[String:Any](),"daily":[String:Any]()]).write(to:oldRoot.appendingPathComponent("team-monitor.json"))
+    let older=try BuddyTeamMonitor(support:oldRoot,makeClaude:factory,keyReader:{_ in "fixture-key"})
+    let oldHistory=try older.handle(["action":"messages"],state:oldState,jobs:[])["messages"] as? [[String:Any]] ?? [],oldStatus=try older.status(oldState)
+    expect(oldHistory.map{$0["id"] as? String ?? ""}==[answered],"saved interrupted check-ins are not in the agent-message history, the answered one still is: \(oldHistory.map{"\($0["status"] ?? "") · \($0["error"] ?? "")"})")
+    expect(!(oldStatus["checks"] as? [[String:Any]] ?? []).contains{$0["status"] as? String=="interrupted"} && ((oldStatus["agentMessages"] as? [String:[String:Any]])?[rex]?["count"] as? Int)==1,"nor in the page's status or its chat markers: \(oldStatus["agentMessages"] ?? "")")
+    expect(BuddyTeamMonitor.pendingOrFailed(older.store.checks,workspace:w,agents:oldState["agents"] as! [[String:Any]],now:Date()).isEmpty,"and a team summary is not told about them")
+    let onDisk=try JSONSerialization.jsonObject(with:Data(contentsOf:oldRoot.appendingPathComponent("team-monitor.json"))) as? [String:Any] ?? [:]
+    expect(Set(old).isSubset(of:Set((onDisk["checks"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})) && older.store.checks.filter{$0["status"] as? String=="interrupted"}.count==3,"they are still saved, not deleted")
+    older.shutdown()
+    require(failed.isEmpty,"\(failed.count) expectation(s) about check-ins cut short failed")
+    print("PASS: an automatic check-in cut short is never shown: an unreadable key or time asleep does not stop it, a pause, a reconnect or its time limit queue it again quietly (paced and bounded), a disconnect drops it without a word, and saved interruptions stop showing without being deleted")
   }
   print("PASS: real private check-ins, Chief oversight, selected models, quiet defaults and opt-in updates, idle suppression, source receipts, ongoing preference learning, exact quotes, manual precedence, sharing revocation and workspace isolation")
  }

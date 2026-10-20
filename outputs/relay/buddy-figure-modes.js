@@ -10,14 +10,20 @@
   // Background work (the worker's pulse, from its last status) counts too: a task running is "working", one waiting its turn, retrying or
   // with the supervisor is "planning", and one waiting for the person is "needs".
   const workerPulse=()=>root.BuddyWorkerUI?.pulse?.();
-  function snapshot(state,{pending=()=>[],setup=()=>null,checking=()=>false,pulse=workerPulse}={}){
+  // The agents the bell counts something unread for (buddy-activity's own items, keys and read/dismissed state), or undefined without it.
+  const unreadNeeds=()=>{try{return root.BuddyActivity?.needingAgents?.();}catch{return undefined;}};
+  function snapshot(state,{pending=()=>[],setup=()=>null,checking=()=>false,pulse=workerPulse,needing=unreadNeeds}={}){
     const modes={},focus={},work={},agents=new Set((state.agents||[]).map(a=>a.id));
     const set=(id,mode)=>{if(agents.has(id)&&(RANK[mode]||0)>(RANK[modes[id]]||0))modes[id]=mode;};
     const look=(ids,to,group)=>{for(const id of ids)if(agents.has(id)&&!focus[id])focus[id]={to,group};};
     for(const a of state.agents||[]){
       if(setup(state,a.id)||checking(a.id))set(a.id,'working');
     }
-    for(const [id,p] of Object.entries(pulse()?.agents||{}))set(id,p?.state==='needs_you'?'needs':['working','quiet'].includes(p?.state)?'working':['queued','retrying','with_supervisor'].includes(p?.state)?'planning':null);
+    // Waiting for the person pulses only while the bell still counts something unread for that agent: once the person has read or dismissed
+    // it, the figure rests. Without the notification list, the worker's pulse alone decides.
+    const unread=needing();
+    const waits=id=>!(unread instanceof Set)||unread.has(id);
+    for(const [id,p] of Object.entries(pulse()?.agents||{}))set(id,p?.state==='needs_you'?(waits(id)?'needs':null):['working','quiet'].includes(p?.state)?'working':['queued','retrying','with_supervisor'].includes(p?.state)?'planning':null);
     for(const run of Object.values(state.runs||{})){
       if(!busy(run.status))continue;
       const group=(state.groups||[]).find(g=>g.id===run.target);

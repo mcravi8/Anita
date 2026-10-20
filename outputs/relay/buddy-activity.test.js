@@ -129,3 +129,19 @@ test('a quiet scheduled check raises no notification, while the same kind of che
  assert.equal(A.collect(state,{workspace:'w',tasks:[{...t,quiet:false}]}).length,1);
  assert.equal(A.collect(state,{workspace:'w',tasks:[{...t,status:'failed',progress:'Reached maximum budget',quiet:true}]}).length,0);
 });
+test('a check-in that was cut short never needs the person, while a real failure still does',()=>{
+ const stopped='This check stopped because access, settings, or its time limit changed.',check=(id,status,extra={})=>({id,agentId:'inbox',kind:'checkin',status,error:stopped,createdAt:'2026-10-20T14:30:01Z',...extra});
+ assert.deepEqual(A.collect(state,{}, {workspace:'w',checks:[check('434788FF','interrupted'),check('40AB5B6B','interrupted'),check('24423061','interrupted')]}),[]);
+ assert.deepEqual(A.collect(state,{}, {workspace:'w',checks:[check('done','completed',{error:''}),check('new','interrupted')]}),[],'an interruption after a finished check-in is not news either');
+ const failed=A.collect(state,{}, {workspace:'w',checks:[check('bad','failed',{error:'The check-in returned no verified structured result.'})]});assert.equal(failed.length,1);assert.equal(failed[0].checkId,'bad');
+});
+test('the agents that need the person are exactly those with an unread "needs you" item',()=>{
+ const d=(id,extra={})=>({id,kind:'stopped',agentId:'inbox',taskId:id,title:'Check',question:'Stopped.',audience:'user',createdAt:'2026-10-20T14:25:38Z',...extra});
+ const worker={workspace:'w',tasks:[],decisions:[d('a'),d('b',{agentId:'chief'})],notifications:{}};
+ assert.deepEqual([...A.needingAgents(A.collect(state,worker))].sort(),['chief','inbox']);
+ assert.deepEqual([...A.needingAgents(A.collect({...state,activitySeen:{'decision:a':true}},worker))],['chief'],'a seen item no longer counts');
+ assert.deepEqual([...A.needingAgents(A.collect({...state,activityDismissed:{'decision:b':true}},worker))],['inbox'],'nor a dismissed one');
+ const lane={...worker,supervisorLane:{online:true},decisions:[d('c',{audience:'supervisor',createdAt:new Date().toISOString()})]};
+ assert.deepEqual([...A.needingAgents(A.collect(state,lane))],[],'nor one the supervisor is handling');
+ assert.deepEqual([...A.needingAgents(A.collect(state,{workspace:'w',tasks:[{id:'t',agentId:'inbox',status:'completed'}],decisions:[]}))],[],'a finished result is not something that needs the person');
+});

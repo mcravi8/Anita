@@ -266,11 +266,17 @@ import CryptoKit
         // The ledger of team updates is a log: when it is full the oldest go, rather than every new update failing for good.
         try mutate{var entries=updates;if entries.count>=2000 {entries=Array(entries.suffix(1500))};entries.append(update);value["updates"]=entries}
     }
+    /// Whether the person is shown a check at all. One that was cut short (interrupted, or queued again to wait its turn) or dropped (cancelled)
+    /// said nothing and needs nobody; it stays on record, including those saved before this rule, and only its outcome, once there is one, is shown.
+    static func shown(_ check:[String:Any])->Bool {
+        let status=check["status"] as? String ?? ""
+        return !["interrupted","cancelled"].contains(status) && !(status=="queued" && (check["requeues"] as? Int ?? 0)>0)
+    }
     private func exchanges(state:[String:Any])->[[String:Any]] {
         let w=state["conversationWorkspace"] as? String ?? "",ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
         return checks.compactMap { j in
             let input=j["input"] as? [String:Any] ?? [:]
-            guard j["workspace"] as? String==w,j["kind"] as? String=="checkin",let from=input["requesterId"] as? String,let to=j["agentId"] as? String,from != to,ids.contains(from),ids.contains(to) else{return nil}
+            guard j["workspace"] as? String==w,j["kind"] as? String=="checkin",Self.shown(j),let from=input["requesterId"] as? String,let to=j["agentId"] as? String,from != to,ids.contains(from),ids.contains(to) else{return nil}
             let output=j["status"] as? String=="completed" ? j["output"] as? [String:Any] ?? [:]:[:]
             let row:[String:Any]=["id":j["id"]!,"fromAgentId":from,"toAgentId":to,"question":input["question"] ?? "","body":output["body"] ?? "","detail":output["detail"] ?? "","status":j["status"] ?? "queued","createdAt":j["createdAt"] ?? "","startedAt":j["startedAt"] ?? "","finishedAt":j["finishedAt"] ?? "","error":j["error"] ?? ""]
             return BuddyAgentMemory.privateValue(row) as? [String:Any]
@@ -297,7 +303,8 @@ import CryptoKit
         // Whether the person has ever opened the supervisor menu is bookkeeping, not a missing step: agents read this status, and one took the flag for an unfinished setup and kept telling the person to "choose" a supervisor that was already set.
         out.removeValue(forKey:"supervisorChosen")
         if let id=out["supervisorId"] as? String,let name=(state["agents"] as? [[String:Any]] ?? []).first(where:{$0["id"] as? String==id})?["name"] as? String {out["supervisorName"]=name}
-        out["workspace"]=w;out["checkInModel"]=checkInModel(out);out["checks"]=checks.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}.suffix(80).map{var j=$0;j.removeValue(forKey:"input");return j}
+        // A check cut short is not shown anywhere (not as a failure, in Needs or in the team panel); the rest are, as before.
+        out["workspace"]=w;out["checkInModel"]=checkInModel(out);out["checks"]=checks.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "") && $0["status"] as? String != "interrupted"}.suffix(80).map{var j=$0;j.removeValue(forKey:"input");return j}
         out["journalRevision"]=value["journalRevision"] as? Int ?? 0
         out["updates"]=updates.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}
         out["observed"]=(value["observed"] as? [String:[String:Any]] ?? [:]).values.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}.map{r in r.filter{$0.key != "sources"}}

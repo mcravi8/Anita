@@ -376,7 +376,7 @@ import Darwin
                 let saved=routines.routines.first{$0["id"] as? String==rid}
                 guard privateAgent==nil || (saved?["browserAgentId"] as? String ?? saved?["agentId"] as? String ?? id) != privateAgent else{throw BuddyWorkerFailure(message:"Finish this agent's private sign-in first: the routine uses the same browser profile.")}
                 followTeamSwitch(workspace:current)
-                return ["task":try routines.runNow(rid,workspace:current,agent:id,requestID:request["requestId"] as? String ?? "",store:store)]
+                return ["task":try routines.runNow(rid,workspace:current,agent:id,requestID:request["requestId"] as? String ?? "",store:store,supervisor:(try? state()).flatMap { teamSupervisor($0) })]
             }
             if let source=args["browserAgentId"] as? String {let owner=try agent(source,workspace:current);guard (owner["tools"] as? [String:Bool])?["desktop"] != false,(owner["tools"] as? [String:Bool])?["web"] != false else{throw BuddyWorkerFailure(message:"The source agent's browser access is off.")}}
             if !["pause","delete","list"].contains(args["action"] as? String ?? "") { _ = try agent(id,workspace:current) }
@@ -531,7 +531,8 @@ import Darwin
         return id
     }
     /// Stops someone other than the task's own agent (its supervisor or manager) may continue: technical ones, never a question or a person's choice.
-    static let technicalStops: Set<String> = ["stall", "bridge.closed", "provider.error", "max_turns", "worker.restart", "orphaned", "legacy"]
+    /// A result that could not be verified goes to the supervisor, who may carry it on.
+    static let technicalStops: Set<String> = ["stall", "bridge.closed", "provider.error", "max_turns", "worker.restart", "orphaned", "legacy", "result.incomplete"]
     /// Refuses an agent acting on a task that is neither its own nor a teammate's it supervises or manages (contract C-5); someone else may
     /// continue a task only after a technical stop. Returns how a follow-up from them is introduced to the task's agent ("" for its own).
     @discardableResult private func authorize(_ actor: String, on job: [String: Any], continuing: Bool = false) throws -> String {
@@ -816,7 +817,7 @@ import Darwin
         sweepOrphans(now:now)
         followTeamSwitch(workspace: space)
         // Due routines are queued even while another task runs, so they are not skipped because the worker was busy at their time.
-        if !store.paused { do { try routines.enqueueDue(store:store,workspace:space);try? FileManager.default.removeItem(at:root.appendingPathComponent("schedule-error.txt")) } catch { try? Data(error.localizedDescription.utf8).write(to:root.appendingPathComponent("schedule-error.txt"),options:.atomic) } }
+        if !store.paused { do { try routines.enqueueDue(store:store,workspace:space,supervisor:current.flatMap { teamSupervisor($0) });try? FileManager.default.removeItem(at:root.appendingPathComponent("schedule-error.txt")) } catch { try? Data(error.localizedDescription.utf8).write(to:root.appendingPathComponent("schedule-error.txt"),options:.atomic) } }
         await watchActive(now:now)
         recover(workspace:space,now:now)
         if now.timeIntervalSince(lastLimitPass)>=BuddyRecovery.limitPassInterval {lastLimitPass=now;resumeWithinLimit(workspace:space)}
@@ -836,7 +837,15 @@ import Darwin
             // cleaning up again could tear down the next task. Only a run that was still going has failed.
             guard ["queued", "running", "waiting_review"].contains((try? store.job(jobID))?["status"] as? String ?? "") else { return }
             try? store.settleActions(of: jobID, pending: "cancelled", cause: "run.ended"); refundIfNothingHappened(jobID)
-            try? store.update(jobID, ["status": "failed", "progress": error.localizedDescription]); cleanup()
+            // A start that failed for a reason that is nobody's doing (a connector that failed to refresh, a dropped connection) is a provider
+            // error, retried by itself like any other technical stop; only one that must change first, or that needs the person, waits.
+            let message = error.localizedDescription, cause = BuddyRecovery.failure(message, code: (error as? BuddyWorkerFailure)?.code ?? "failed")
+            var fields: [String: Any] = ["status": "failed", "stopCause": cause, "progress": message]
+            if BuddyRecovery.policy(cause) != nil {
+                let record = BuddyRecovery.record(for: (try? store.job(jobID)) ?? job, cause: cause, now: Date())
+                fields["recovery"] = record; fields["progress"] = BuddyRecovery.progress(message, record: record)
+            }
+            try? store.update(jobID, fields, cause: cause); cleanup()
         }
     }
     /// One pass of the stage loop. Each dispatch is an ordinary task for the plan task's assignee (request ID `plan:<task>:<n>`, so it happens once),
@@ -1161,11 +1170,24 @@ import Darwin
             if let coverage=event["coverage"] as? [[String:Any]],!coverage.isEmpty { values["coverage"]=coverage }
             let status = event["status"] as? String ?? ""
             if ["completed", "failed", "stopped"].contains(status) {
-                values["status"] = privateTask == id ? "waiting_user" : status == "stopped" ? "paused" : status; values["progress"] = privateTask == id ? "Private Chrome is open. Finish sign-in in Buddy when ready." : (event["error"] as? String) ?? (status == "completed" ? "Finished" : "Stopped")
+                // We never get here after our own stop (it sets `stopped` first), so a run that stopped was stopped by the provider.
+                values["status"] = privateTask == id ? "waiting_user" : status == "stopped" ? "interrupted" : status; values["progress"] = privateTask == id ? "Private Chrome is open. Finish sign-in in Buddy when ready." : (event["error"] as? String) ?? (status == "completed" ? "Finished" : "ChatGPT stopped this attempt before it finished.")
                 if status=="completed",privateTask != id,let issue=emailCompletionIssue(job) {values["status"]="failed";values["progress"]=issue}
                 if status=="completed",let runID { do { try service?.inboxReviews.commit(runID:runID) } catch { values["status"]="failed";values["progress"]=error.localizedDescription } }
                 if values["status"] as? String=="completed",let pacing=emailPacing(job,runID:runID) {values["emailPacing"]=pacing}
-                try? store.update(id, values); cleanup()
+                // No stop goes without its cause: a result that could not be verified, or the provider's own failure, which is retried by itself
+                // unless it needs the task changed or the person.
+                var cause = ""
+                if privateTask != id, ["failed", "interrupted"].contains(values["status"] as? String ?? "") {
+                    cause = status == "completed" ? "result.incomplete" : status == "stopped" ? "provider.error" : BuddyRecovery.failure(values["progress"] as? String ?? "")
+                    values["stopCause"] = cause
+                    if BuddyRecovery.policy(cause) != nil {
+                        var after = (try? store.job(id)) ?? job; after.merge(values) { _, new in new }
+                        let record = BuddyRecovery.record(for: after, cause: cause, now: Date())
+                        values["recovery"] = record; values["progress"] = BuddyRecovery.progress(values["progress"] as? String ?? "", record: record)
+                    }
+                }
+                try? store.update(id, values, cause: cause); cleanup()
             } else if Date().timeIntervalSince(lastProgressSave) > 0.5 { lastProgressSave = Date(); _ = try? store.update(id, values) }
         }
     }
@@ -1279,11 +1301,20 @@ import Darwin
                     finalValues["status"] = "paused"; finalValues["blockedBy"] = "limit"; finalValues["blockedAt"] = ISO8601DateFormatter().string(from: Date())
                     let whose = limit?.scope == "workspace" ? "the workspace" : "this agent"
                     finalValues["progress"] = "Today’s limit for \(whose)" + (limit.map { " (\(String(format: "$%.2f", $0.limit)))" } ?? "") + " is used up. It continues by itself tomorrow, or as soon as the limit is raised."
-                } else if let cause = BuddyRecovery.cause(subtype: subtype, error: errorText) {
-                    var after = (try? store.job(id)) ?? job; after.merge(finalValues) { _, new in new }
-                    let record = BuddyRecovery.record(for: after, cause: cause, now: Date())
-                    stopCause = cause; finalValues["recovery"] = record; finalValues["progress"] = BuddyRecovery.progress(finalProgress, record: record)
+                } else {
+                    // The bridge's subtype first, then what its error says: a provider error is retried by itself; one that needs the task
+                    // changed or the person is not.
+                    let cause = BuddyRecovery.cause(subtype: subtype, error: errorText) ?? BuddyRecovery.failure(errorText)
+                    stopCause = cause
+                    if BuddyRecovery.policy(cause) != nil {
+                        var after = (try? store.job(id)) ?? job; after.merge(finalValues) { _, new in new }
+                        let record = BuddyRecovery.record(for: after, cause: cause, now: Date())
+                        finalValues["recovery"] = record; finalValues["progress"] = BuddyRecovery.progress(finalProgress, record: record)
+                    }
                 }
+            } else if privateTask != id, !needsInput, memoryError != nil {
+                // The attempt ended, but its result could not be verified (no summary, a mailbox not read, a review not recorded).
+                stopCause = "result.incomplete"
             }
             if !stopCause.isEmpty { finalValues["stopCause"] = stopCause }
             if !failedOrWaiting, let pacing = emailPacing(job, runID: runID) { finalValues["emailPacing"] = pacing }
@@ -1681,6 +1712,18 @@ import Darwin
         if subtype == "error_during_execution" || error.hasPrefix("Claude hit an error while working") { return "provider.error" }
         return nil
     }
+    /// Why a task that failed outright stopped, from its error: "provider.account" when the person's provider account needs them (a sign-in, a
+    /// refused key, credit or billing: the person's list), "task.invalid" when the task or its own settings must change before it can run, and
+    /// otherwise "provider.error": a connector, connection or provider failure that is nobody's doing, which Buddy retries by itself.
+    static func failure(_ error: String, code: String = "failed") -> String {
+        if ["invalid_input", "not_authorized", "not_found", "unsupported_in_background"].contains(code) { return "task.invalid" }
+        let text = error.lowercased().replacingOccurrences(of: "’", with: "'")
+        if accountSigns.contains(where: { text.contains($0) }) { return "provider.account" }
+        if invalidSigns.contains(where: { text.contains($0) }) { return "task.invalid" }
+        return "provider.error"
+    }
+    static let accountSigns = ["sign in with chatgpt", "connect chatgpt", "needs chatgpt/gmail connected", "install codex", "credit balance", "invalid x-api-key", "authentication_error", "billing", "insufficient_quota"]
+    static let invalidSigns = ["finish this agent's setup", "no longer in your workspace", "saved coding session is invalid", "check the agent settings and message", "openai model is unavailable", "verify its saved action history", "invalid_request_error", "not_found_error", "permission_error"]
     /// What counts as progress between two tries: a new command, tool step or result text.
     static func mark(_ job: [String: Any]) -> String { "\((job["commands"] as? [Any])?.count ?? 0):\((job["events"] as? [Any])?.count ?? 0):\((job["result"] as? String)?.count ?? 0)" }
     static func plain(_ cause: String) -> String {

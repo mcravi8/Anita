@@ -29,6 +29,9 @@ struct BuddyFailure: LocalizedError {
     private var readChannelTasks:[String:Task<String,Error>]=[:]
 
     private var sessionPolicies: [String: String] = [:]
+    /// Threads this service does not run itself (a Codex coding session, BuddyCodexCoding.swift): every request and notification for one of
+    /// them goes to its handler, and nothing else here acts on it.
+    var threadHandlers: [String: ([String: Any]) -> Void] = [:]
     lazy var inboxReviews = BuddyInboxReview(support: grantsSupport)
     private lazy var grants = BuddyConnectionGrants(support: grantsSupport)
     private let grantsSupport: URL
@@ -523,6 +526,7 @@ struct BuddyFailure: LocalizedError {
                 else { callback?(.success(message["result"] as? [String: Any] ?? [:])) }
                 continue
             }
+            if let params = message["params"] as? [String: Any], let thread = params["threadId"] as? String ?? params["conversationId"] as? String, let handler = threadHandlers[thread] { handler(message); continue }
             let method = message["method"] as? String ?? "", params = message["params"] as? [String: Any] ?? [:]
             if method == "item/tool/call", message["id"] != nil {
                 if let threadID = params["threadId"] as? String, let runID = runForThread[threadID] {
@@ -1073,6 +1077,17 @@ extension ConversationService {
     }
 }
 
+
+/// What a Codex coding session (BuddyCodexCoding.swift) uses of this connection. Nothing here starts the connection: `connection()` does, first.
+extension ConversationService {
+    /// One request on the open app-server connection.
+    func codingRequest(_ method: String, _ params: [String: Any]) async throws -> [String: Any] { try await request(method, params) }
+    /// Answers a request the app-server made of a coding thread.
+    func codingRespond(_ id: Any, result: [String: Any]) { try? write(["id": id, "result": result]) }
+    func codingRefuse(_ id: Any, _ message: String) { try? write(["id": id, "error": ["code": -32601, "message": message]]) }
+    /// What every thread on this connection starts from (what Buddy turns off), for a coding thread to start from too.
+    var codingRestrictions: [String: Any] { restrictions }
+}
 
 extension ConversationService {
     func availableModels(refresh:Bool=false) async throws -> [[String:Any]] {

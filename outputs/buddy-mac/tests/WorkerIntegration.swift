@@ -118,7 +118,8 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
         require(try BuddyRoutineStore(directory:support.appendingPathComponent("Worker")).routines.first?["status"] as? String=="paused","direct routine pause reaches durable storage")
         print("PASS: native IPC routine creation, actual next-run receipt, status discovery and durable pause")
         // "Switch all agents to Claude": the running worker moves the routine saved on ChatGPT to its agent's Claude model by itself. The agent
-        // then goes back to ChatGPT remembering that Claude model, which its coding session below must keep.
+        // then goes back to ChatGPT remembering that Claude model, and is put back on Claude for the coding sessions below (a coding session runs
+        // on the agent's own provider; ChatGPT coding is checked in tests/CodexCoding.swift).
         try BuddyAgentModels(support:support).setAll(workspace:workspace,selections:[agent:.init(provider:"claude",model:"claude-fixture-switched")])
         _ = try BuddyAISettings(support:support).update(workspace,teamSwitch:true)
         var moved:[String:Any]=[:]
@@ -126,6 +127,7 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
         require(moved["provider"] as? String=="claude" && moved["model"] as? String=="claude-fixture-switched","after a team switch the worker moves the saved routine to its agent's provider and model: \(moved)")
         try BuddyAgentModels(support:support).setAll(workspace:workspace,selections:[agent:.init(provider:"chatgpt",model:"",alternates:["claude":"claude-fixture-switched"])])
         print("PASS: the running worker moves a saved routine to its agent's new provider and model after a team switch")
+        try BuddyAgentModels(support:support).set(workspace:workspace,agent:agent,selection:.init(provider:"claude",model:"claude-fixture-switched"))
         print("PASS: private Unix IPC, accepted/queued/running/completed worker journey, idempotent enqueue, subscription protocol, real saved file and preview, durable completion")
         func call(_ arguments:[String:Any],agentID:String?=nil,requestID:String="coding-once") async throws -> [String:Any] {
             try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"coding","agentId":agentID ?? agent,"requestId":requestID,"arguments":arguments])
@@ -139,7 +141,7 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
             };require(false,"coding task reaches \(status)");return [:]
         }
         let queued=try await call(["action":"start","title":"Coding fixture","goal":"Build and syntax-check the fixture."])["task"] as! [String:Any],codingID=queued["id"] as! String
-        require(queued["provider"] as? String=="claude" && queued["model"] as? String=="claude-fixture-switched","an agent on ChatGPT still codes on Claude, on the Claude model it had before the switch: \(queued["provider"] ?? "") \(queued["model"] ?? "")")
+        require(queued["provider"] as? String=="claude" && queued["model"] as? String=="claude-fixture-switched","an agent on Claude codes on Claude, on its Claude model: \(queued["provider"] ?? "") \(queued["model"] ?? "")")
         let same=try await call(["action":"start","title":"Coding fixture","goal":"Build and syntax-check the fixture."])["task"] as! [String:Any]
         require(same["id"] as? String==codingID,"coding enqueue is idempotent")
         let done=try await wait(codingID,for:"completed"),commands=done["commands"] as? [[String:Any]] ?? []
@@ -352,6 +354,9 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
                                                                            ["id": vera, "name": "Vera", "role": "Researcher", "description": "Reviews fixtures", "tools": [String: Bool]()]]
         withTeam["groups"] = [["id": team, "name": "Fixture team", "members": [lead, forge, vera]], ["id": side, "name": "Side team", "members": [lead, vera]]]
         try JSONSerialization.data(withJSONObject: withTeam).write(to: support.appendingPathComponent("workspace.json"), options: .atomic)
+        // Forge and Vera code on Claude here (the Claude coding fixture); a coding session runs on its agent's own provider.
+        func onProvider(_ provider: String, _ members: [String]) throws { for member in members { try BuddyAgentModels(support: support).set(workspace: workspace, agent: member, selection: .initial(provider)) } }
+        try onProvider("claude", [forge, vera])
         // Check-ins stay off, so no background check-in runs through these fixtures.
         _ = try await raw(["operation": "team", "arguments": ["action": "configure", "supervisorId": lead, "enabled": false]])
         func taskAs(_ owner: String, _ id: String) async throws -> [String: Any] { (try await call(["action": "status", "taskId": id], agentID: owner))["task"] as! [String: Any] }
@@ -427,6 +432,7 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
 
         // A private sign-in holds only its own agent: another agent's routine can still be run now, the signing-in agent's cannot.
         func manageRoutine(_ owner: String, _ arguments: [String: Any]) async throws -> [String: Any] { try await raw(["operation": "routine", "agentId": owner, "requestId": UUID().uuidString, "arguments": arguments]) }
+        try onProvider("chatgpt", [forge, vera])   // their routines are saved on ChatGPT, as before
         let forgeRoutine = ((try await manageRoutine(forge, ["action": "create", "title": "Forge research", "goal": "Research the explicitly requested topic", "kind": "research"]))["routine"] as? [String: Any])?["id"] as? String ?? ""
         let veraRoutine = ((try await manageRoutine(vera, ["action": "create", "title": "Vera research", "goal": "Research the explicitly requested topic", "kind": "research"]))["routine"] as? [String: Any])?["id"] as? String ?? ""
         require(!forgeRoutine.isEmpty && !veraRoutine.isEmpty, "both routines are saved")
@@ -449,6 +455,7 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
             return try await raw(payload)
         }
         func planJobs() async throws -> [[String: Any]] { ((try await raw(["operation": "status"]))["tasks"] as? [[String: Any]] ?? []).filter { ($0["requestId"] as? String ?? "").hasPrefix("plan:") } }
+        try onProvider("claude", [forge])   // the plan's coding task runs on Forge's provider, the Claude coding fixture
         let proposal: [String: Any] = ["action": "propose", "groupId": team, "objective": "Ship the fixture report",
                                        "stages": [["title": "Build", "goal": "Build the fixture", "acceptance": ["index.js passes node --check"]], ["title": "Polish", "goal": "Polish the fixture", "acceptance": ["README.md is written"]]],
                                        "tasks": [["stage": 1, "key": "t1", "title": "Build the fixture", "assignee": forge, "kind": "coding", "brief": "STALL_FIXTURE: build it and keep at it", "deliverable": "index.js"],
@@ -530,6 +537,7 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
         defer { try? FileManager.default.removeItem(at: again) }
         let againSpace = UUID().uuidString, builder = UUID().uuidString
         try JSONSerialization.data(withJSONObject: ["conversationWorkspace": againSpace, "agents": [["id": builder, "name": "Builder", "role": "Fixture", "description": "Restart fixture", "tools": [String: Bool]()]]]).write(to: again.appendingPathComponent("workspace.json"))
+        try BuddyAgentModels(support: again).set(workspace: againSpace, agent: builder, selection: .initial("claude"))   // codes on the Claude coding fixture
         func restartHost() -> BuddyWorkerHost { BuddyWorkerHost(support: again, executable: URL(fileURLWithPath: CommandLine.arguments[1]),makeBrowser:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[7]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]))},makeCoding:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[2]),runtime:URL(fileURLWithPath:CommandLine.arguments[3]))},makeCodingShell:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[4]),runtime:URL(fileURLWithPath:CommandLine.arguments[5]))},makeClaude:{BuddyWorkerProcess(resource:URL(fileURLWithPath:CommandLine.arguments[6]),runtime:URL(fileURLWithPath:CommandLine.arguments[5]))},keyReader:{_ in "inert-fixture-key"}) }
         func codingAgain(_ arguments: [String: Any]) async throws -> [String: Any] { try await BuddyWorkerClient.call(support: again, payload: ["workspace": againSpace, "operation": "coding", "agentId": builder, "requestId": "restart", "arguments": arguments]) }
         let previous = restartHost()
@@ -549,9 +557,13 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
                 "after the restart the task continued by itself in attempt 2 and finished, asking nobody: \(restarted["status"] ?? "") \(restarted["attempt"] ?? "") \(restarted["stopCause"] ?? "-") \(restartDecisions)")
         print("PASS: a worker restart in the middle of an attempt: the next worker continues the task by itself to completion, with no open decision")
 
+        // With the agent's own provider off a coding session would move to the other one (tests/CodexCoding.swift); with neither it is refused.
         _ = try BuddyAISettings(support:support).update(workspace,enabled:("claude",false))
+        _ = try BuddyAISettings(support:support).update(workspace,enabled:("chatgpt",false))
         do {_ = try await call(["action":"start","title":"Must not run","goal":"Claude is disconnected."],requestID:"disconnected");require(false,"disconnected coding must fail")}catch{}
+        _ = try BuddyAISettings(support:support).update(workspace,enabled:("chatgpt",true))
         print("PASS: coding enqueue, real native file/command/preview, persistent SDK resume, budget accounting, exact internet-command review, and disconnected-provider rejection")
+        try BuddyAgentModels(support:support).set(workspace:workspace,agent:agent,selection:.init(provider:"chatgpt",model:""))   // back on ChatGPT for the website tasks below
         _ = try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"pauseAll","paused":true])
         func computer(_ args:[String:Any],owner:String?=nil,requestID:String="ordinary-website-request") async throws -> [String:Any] {
             try await BuddyWorkerClient.call(support:support,payload:["workspace":workspace,"operation":"computer","agentId":owner ?? agent,"requestId":requestID,"arguments":args])

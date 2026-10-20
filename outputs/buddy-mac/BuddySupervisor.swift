@@ -3,7 +3,8 @@ import Foundation
 /// The supervisor lane: between the user's messages it reviews finished plan tasks, answers teammates' questions, resumes technical stops,
 /// plans authorized stages that have no tasks yet and checks finished stages, and the worker applies its decisions natively.
 ///
-/// Each run is one tool-less Claude call on the supervisor's own model with a structured output: the items waiting for the supervisor (at most 8,
+/// Each run is one tool-less model call on the supervisor's own provider and model (Claude, or ChatGPT through the Codex app-server as the team
+/// check-ins use it; the other provider when its own is not usable) with a structured output: the items waiting for the supervisor (at most 8,
 /// from one plan), the plan, the record of what finished and was decided, and the user's standing directives, all as data. The model call may
 /// happen more than once; each effect happens at most once, because every action is applied only while the state it was decided on still
 /// holds. An action Buddy refuses is never silent: the reason is kept on its item and given back with it next time. Only the user list reaches
@@ -16,6 +17,10 @@ import Foundation
     /// After this long with no run answered, the user is told once that background supervision can't start.
     static let failureNoticeAfter: TimeInterval = 30 * 60
     static let maxItems = 8, maxActions = 12, maxPresentations = 3, maxIdleRuns = 3, briefingLimit = 120 * 1024
+    /// The most a ChatGPT run's briefing may weigh: the app-server transport takes at most 100,000 characters for an internal run (bytes ≥ characters).
+    static let chatgptBriefingLimit = 100_000
+    /// How long the app-server's answer to "signed in to ChatGPT?" is trusted, by the lane's clock.
+    static let connectionCheck: TimeInterval = 60
     /// The one failed run that did get an answer (just not one that could be read); every other failure is technical.
     static let unreadable = "The supervisor's answer could not be read."
     /// The lane counts as online only if the worker ticked it this recently (wall clock). A test may shorten it.
@@ -58,20 +63,28 @@ import Foundation
         }
     }
     struct Supervisor { let id, name: String }
-    private struct Run { let id, workspace, planId: String; let items: [Item]; let started: Date; let supervisor: Supervisor; let state: [String: Any]; let folder: URL }
+    private struct Run { let id, workspace, planId: String; let items: [Item]; let started: Date; let supervisor: Supervisor; let state: [String: Any]; let folder: URL; var provider = "claude" }
 
     private let support: URL, store: BuddyWorkerStore, plans: BuddyPlanStore
     private let makeClaude: () -> BuddyWorkerProcess, keyReader: (String) -> String?, hooks: Hooks
+    /// The ChatGPT transport: a ConversationService talking to the Codex app-server. Nil when this lane has no way to reach ChatGPT.
+    private let makeGPT: (() -> ConversationService)?
+    private var gpt: ConversationService?
+    /// Whether the app-server last answered signed in to ChatGPT, and when it was asked.
+    private var gptReady = false, gptCheckedAt = Date.distantPast
     private let db: BuddyOperationsDB?
     private var online = false, busy = false, lastRunAt = "", lastError = ""
+    /// lastError says why the lane cannot run at all (no usable provider, unreadable settings, a used-up limit); cleared once it can.
+    private var gated = false
     private var retryAt = Date.distantPast, lastTick = Date(), recovered = false
     /// When the worker last ticked the lane, by the clock (the `now` it passes may be a test's), and whether the last run failed.
     private var tickedAt = Date.distantPast, failing = false
     private var process: BuddyWorkerProcess?
     private var current: Run?
 
-    init(support: URL, store: BuddyWorkerStore, plans: BuddyPlanStore, makeClaude: @escaping () -> BuddyWorkerProcess, keyReader: @escaping (String) -> String?, hooks: Hooks) {
-        self.support = support; self.store = store; self.plans = plans; self.makeClaude = makeClaude; self.keyReader = keyReader; self.hooks = hooks
+    init(support: URL, store: BuddyWorkerStore, plans: BuddyPlanStore, makeClaude: @escaping () -> BuddyWorkerProcess, makeGPT: (() -> ConversationService)? = nil,
+         keyReader: @escaping (String) -> String?, hooks: Hooks) {
+        self.support = support; self.store = store; self.plans = plans; self.makeClaude = makeClaude; self.makeGPT = makeGPT; self.keyReader = keyReader; self.hooks = hooks
         var opened: BuddyOperationsDB?
         do {
             let db = try BuddyOperationsDB(directory: store.directory)
@@ -101,9 +114,10 @@ import Foundation
         """,
     ]
 
-    /// `online` is true only while the lane can really answer: at its last tick a supervisor existed, ran on a connected Claude, the user had not
-    /// paused everything and the supervisor's daily limit had room; that tick was within the last 30 seconds; and its last run did not fail.
-    /// The page shows supervisor items to the user whenever it is false.
+    /// `online` is true only while the lane can really answer: at its last tick a supervisor existed and had a usable provider (Claude connected
+    /// with a key Buddy can read, or ChatGPT connected with the app-server signed in), the user had not paused everything and, on Claude, the
+    /// supervisor's daily limit had room; that tick was within the last 30 seconds; and its last run did not fail. The page shows supervisor items
+    /// to the user whenever it is false.
     var status: [String: Any] { ["online": online && !failing && Date().timeIntervalSince(tickedAt) < Self.staleAfter, "busy": busy, "lastRunAt": lastRunAt, "lastError": lastError] }
 
     func shutdown() {
@@ -114,14 +128,15 @@ import Foundation
             try? FileManager.default.removeItem(at: run.folder)
         }
         process?.onEvent = nil; process?.close(); process = nil
+        let service = gpt; gpt = nil; service?.onEvent = nil; service?.shutdown()
         busy = false; online = false
     }
 
     // MARK: the pass
 
     /// One pass, called by the worker every couple of seconds. It starts at most one run and returns at once; the run's answer is applied when
-    /// it arrives. It does nothing while a run is in flight, without a supervisor on Claude, while the user has paused everything, or when the
-    /// supervisor's daily limit is used up.
+    /// it arrives. It does nothing while a run is in flight, without a supervisor or a usable provider, while the user has paused everything, or
+    /// when a Claude supervisor's daily limit is used up.
     func tick(state: [String: Any], now: Date) async {
         lastTick = now; tickedAt = Date()
         if busy {
@@ -130,29 +145,43 @@ import Foundation
         }
         guard let db else { online = false; return }
         let workspace = state["conversationWorkspace"] as? String ?? ""
-        guard UUID(uuidString: workspace) != nil, let supervisor = supervisor(state, workspace: workspace) else { online = false; lastError = ""; return }
-        let model: String
+        guard UUID(uuidString: workspace) != nil, let supervisor = supervisor(state, workspace: workspace) else { online = false; lastError = ""; dropGPT(); return }
+        let provider: String, model: String
         do {
             let settings = try BuddyAISettings(support: support).current(workspace)
             let chosen = try BuddyAgentModels(support: support).selection(workspace: workspace, agent: supervisor.id) ?? .initial(settings.provider)
-            // The lane runs only on Claude. A supervisor that "Switch all agents to ChatGPT" moved keeps supervising on the Claude model it had.
-            guard chosen.provider == "claude" || chosen.alternates?["claude"] != nil, settings.claudeEnabled, keyReader(workspace) != nil else { throw BuddyWorkerFailure(message: "") }
-            let own = chosen.model(on: "claude")
-            model = own.isEmpty ? BuddyAgentModelSelection.initial("claude").model : own
+            // The lane runs on the supervisor's own provider. When that one is not usable and the other one is, it runs on the other one, so
+            // supervision does not stop: on the model the supervisor had there before a switch, or that provider's default.
+            let own = chosen.provider == "chatgpt" ? "chatgpt" : "claude"
+            var usable: String?
+            for candidate in [own, own == "claude" ? "chatgpt" : "claude"] where usable == nil {
+                if candidate == "claude" { if settings.claudeEnabled, keyReader(workspace) != nil { usable = candidate } }
+                else if await chatgptReady(settings, now: now) { usable = candidate }
+            }
+            guard let usable else {
+                dropGPT(); online = false; gated = true
+                lastError = "Connect \(own == "chatgpt" ? "ChatGPT or Claude" : "Claude or ChatGPT") in AI provider settings so \(supervisor.name) can supervise the team in the background."
+                return
+            }
+            if usable == "claude" { dropGPT() }
+            // An empty ChatGPT model is the account's default; Claude's default is a model of its own.
+            let picked = chosen.model(on: usable)
+            provider = usable; model = usable == "claude" && picked.isEmpty ? BuddyAgentModelSelection.initial("claude").model : picked
         } catch {
-            online = false; lastError = "The supervisor runs on Claude; connect Claude or choose a Claude model for \(supervisor.name)."
+            online = false; gated = true; lastError = error.localizedDescription
             return
         }
         guard !store.paused else { online = false; return }
-        let room = BuddyBudget.headroom(support: support, workspace: workspace, agent: supervisor.id, now: now)?.room
+        // A daily limit is a limit on Claude spending, so it holds only a Claude run; a ChatGPT run costs no API money.
+        let room = provider == "claude" ? BuddyBudget.headroom(support: support, workspace: workspace, agent: supervisor.id, now: now)?.room : nil
         if let room, room < 0.05 {
-            online = false; lastError = "\(supervisor.name)'s daily limit is used up."
+            online = false; gated = true; lastError = "\(supervisor.name)'s daily limit is used up."
             try? store.openDecision(workspace: workspace, id: "supervisor-limit:\(supervisor.id):\(BuddyBudget.day(now))", agent: supervisor.id, kind: "notice", title: "Supervision waits for tomorrow",
                                     question: "\(supervisor.name)'s daily limit is used up; supervision continues tomorrow or when the limit is raised.", label: "Open settings", payload: ["agentId": supervisor.id], audience: "user")
             return
         }
         online = true
-        if lastError.hasPrefix("The supervisor runs on Claude") || lastError.hasSuffix("daily limit is used up.") { lastError = "" }
+        if gated { gated = false; lastError = "" }
         if !recovered {
             recovered = true; busy = true
             await recover(db, supervisor: supervisor, state: state)
@@ -161,7 +190,41 @@ import Foundation
         guard now >= retryAt else { return }
         let items = collect(workspace: workspace, db: db)
         guard !items.isEmpty else { return }
-        start(items, workspace: workspace, supervisor: supervisor, model: model, room: room, state: state, now: now, db: db)
+        start(items, workspace: workspace, supervisor: supervisor, provider: provider, model: model, room: room, state: state, now: now, db: db)
+    }
+
+    // MARK: ChatGPT
+
+    /// Whether ChatGPT can run the supervisor now: connected in Buddy's settings, and the app-server signed in to ChatGPT. The app-server's answer
+    /// is trusted for a minute by the lane's clock (a "no" even without a connection kept open, so a missing sign-in does not start the
+    /// app-server on every tick); after a ChatGPT run failed or its connection dropped it is asked again at once.
+    private func chatgptReady(_ settings: BuddyAIChoice, now: Date) async -> Bool {
+        guard settings.chatgptEnabled, let makeGPT else { dropGPT(); return false }
+        if abs(now.timeIntervalSince(gptCheckedAt)) < Self.connectionCheck, gpt != nil || !gptReady { return gptReady }
+        let service = gpt ?? openGPT(makeGPT)
+        let ready = ((try? await service.connection())?["connected"] as? Bool) == true
+        gptReady = ready; gptCheckedAt = now
+        return ready
+    }
+    private func openGPT(_ make: () -> ConversationService) -> ConversationService {
+        let service = make(); gpt = service
+        service.onEvent = { [weak self] event in self?.receivedGPT(event) }
+        return service
+    }
+    /// Closes the lane's ChatGPT connection (and any turn still in it), once the event being handled, if any, has returned.
+    private func dropGPT() {
+        guard let service = gpt else { return }
+        gpt = nil; service.onEvent = nil
+        Task { @MainActor in service.shutdown() }
+    }
+    private func receivedGPT(_ event: [String: Any]) {
+        if event["type"] as? String == "connection", event["connected"] as? Bool == false { gptCheckedAt = .distantPast; return }
+        guard event["type"] as? String == "run", let run = current, run.provider == "chatgpt", event["runId"] as? String == run.id else { return }
+        switch event["status"] as? String ?? "" {
+        case "completed": finish(run.id, text: event["text"] as? String ?? "", error: nil, cost: nil)
+        case "failed", "stopped": finish(run.id, text: "", error: (event["error"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "The supervisor's ChatGPT run stopped without an answer.", cost: nil)
+        default: break
+        }
     }
 
     /// The team's supervisor: the agent named in the team check-in policy for this workspace, if it still exists.
@@ -221,9 +284,10 @@ import Foundation
     private static func size(_ value: [String: Any]) -> Int { (try? JSONSerialization.data(withJSONObject: value).count) ?? Int.max }
 
     /// What the supervisor is given, as data: the items, the user's authorization, the plan as the page shows it (without its notices), the
-    /// record of attempts and decisions, the standing directives and who is on the team. Kept under 120 KB by dropping, in order, files older
-    /// than a day, outcomes beyond 20 and decisions beyond 30; the items, the authorization, the stages and the directives are never cut.
-    private func briefing(_ items: [Item], planId: String, workspace: String, supervisor: Supervisor, state: [String: Any]) -> [String: Any] {
+    /// record of attempts and decisions, the standing directives and who is on the team. Kept under `limit` (120 KB on Claude, 100,000 bytes on
+    /// ChatGPT) by dropping, in order, files older than a day, outcomes beyond 20 and decisions beyond 30; the items, the authorization, the stages
+    /// and the directives are never cut.
+    private func briefing(_ items: [Item], planId: String, workspace: String, supervisor: Supervisor, state: [String: Any], limit: Int) -> [String: Any] {
         let names = names(state)
         var summary: [String: Any]?, detail: [String: Any]?
         if !planId.isEmpty {
@@ -304,7 +368,7 @@ import Foundation
             },
         ]
         // Fit: files older than a day, then outcomes beyond 20, then decisions beyond 30.
-        if Self.size(out) > Self.briefingLimit {
+        if Self.size(out) > limit {
             let dayAgo = Date().addingTimeInterval(-86400)
             out["items"] = entries.enumerated().map { index, entry in
                 var e = entry
@@ -312,20 +376,20 @@ import Foundation
                 return e
             }
         }
-        if Self.size(out) > Self.briefingLimit { out["ledger"] = ["outcomes": Array(outcomes.prefix(20)), "decisions": decisions] }
-        if Self.size(out) > Self.briefingLimit { out["ledger"] = ["outcomes": Array(outcomes.prefix(20)), "decisions": Array(decisions.prefix(30))] }
+        if Self.size(out) > limit { out["ledger"] = ["outcomes": Array(outcomes.prefix(20)), "decisions": decisions] }
+        if Self.size(out) > limit { out["ledger"] = ["outcomes": Array(outcomes.prefix(20)), "decisions": Array(decisions.prefix(30))] }
         return out
     }
 
     // MARK: running
 
-    private func start(_ items: [Item], workspace: String, supervisor: Supervisor, model: String, room: Double?, state: [String: Any], now: Date, db: BuddyOperationsDB) {
+    private func start(_ items: [Item], workspace: String, supervisor: Supervisor, provider: String, model: String, room: Double?, state: [String: Any], now: Date, db: BuddyOperationsDB) {
         let runID = UUID().uuidString, planId = items.first?.planId ?? ""
         let folder = store.directory.appendingPathComponent("Supervisor", isDirectory: true).appendingPathComponent(runID, isDirectory: true)
         let prompt: String
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let brief = briefing(items, planId: planId, workspace: workspace, supervisor: supervisor, state: state)
+            let brief = briefing(items, planId: planId, workspace: workspace, supervisor: supervisor, state: state, limit: provider == "chatgpt" ? Self.chatgptBriefingLimit : Self.briefingLimit)
             guard let text = String(data: try JSONSerialization.data(withJSONObject: brief, options: [.sortedKeys]), encoding: .utf8) else { throw BuddyWorkerFailure(message: "The briefing could not be written.") }
             prompt = text
             let stamp = Self.stamp(now)
@@ -344,8 +408,19 @@ import Foundation
             return
         }
         let instructions = BuddyAutonomy.policy + "\n" + BuddyAutonomy.supervision(agent: supervisor.id, supervisor: supervisor.id, name: supervisor.name) + "\n" + BuddyAutonomy.clock() + "\n" + Self.supervisorText(name: supervisor.name)
-        let run = Run(id: runID, workspace: workspace, planId: planId, items: items, started: now, supervisor: supervisor, state: state, folder: folder)
+        let run = Run(id: runID, workspace: workspace, planId: planId, items: items, started: now, supervisor: supervisor, state: state, folder: folder, provider: provider)
         current = run; busy = true
+        if provider == "chatgpt" {
+            // The same instructions, briefing and schema over the ChatGPT subscription: an internal run with no tool surface, as a team check-in runs.
+            var options = BuddyTurnOptions()
+            options.actorId = supervisor.id; options.toolsEnabled = false; options.proposalsEnabled = false; options.internalRun = true; options.finalAnswerOnly = true
+            options.instructions = instructions; options.selectedModel = model.isEmpty ? nil : model; options.outputSchema = Self.schema
+            do {
+                guard let service = gpt ?? makeGPT.map({ openGPT($0) }) else { throw BuddyWorkerFailure(message: "ChatGPT is not connected.") }
+                _ = try service.send(["runId": runID, "key": workspace + ":" + supervisor.id, "agent": ["name": String(supervisor.name.prefix(40)), "role": "Team supervisor", "description": ""], "text": prompt], options: options)
+            } catch { finish(runID, text: "", error: error.localizedDescription, cost: nil) }
+            return
+        }
         let p = makeClaude(); process = p
         p.onEvent = { [weak self] event in self?.received(event, runID: runID) }
         do {
@@ -375,7 +450,8 @@ import Foundation
         try? FileManager.default.removeItem(at: run.folder)
         let finished = Self.stamp(Date())
         lastRunAt = finished
-        if let cost, cost.isFinite, cost > 0 {
+        // Only a Claude run spends API money; a ChatGPT run is part of the subscription and records none.
+        if run.provider == "claude", let cost, cost.isFinite, cost > 0 {
             BuddyBudget.recordChat(support: support, workspace: run.workspace, agent: run.supervisor.id, runID: "supervisor:" + run.id, kind: "spend", amount: cost)
             _ = try? db?.run("UPDATE supervisor_runs SET cost = ? WHERE id = ?", [.text(String(cost)), .text(run.id)])
         }
@@ -386,6 +462,9 @@ import Foundation
             lastError = reason; retryAt = lastTick.addingTimeInterval(Self.retryDelay); failing = true
             if technical { uncount(run.id); noteFailing(run, reason: reason) }
             else { settle(run, effective: [], forwarded: [], reasons: Dictionary(run.items.map { ($0.key, reason) }, uniquingKeysWith: { a, _ in a })) }
+            // A ChatGPT run that got no answer is ended with its connection (a turn still going stops with it); the next one starts on a fresh
+            // connection, after asking the app-server again whether it is signed in.
+            if technical, run.provider == "chatgpt" { dropGPT(); gptCheckedAt = .distantPast }
             busy = false
             return
         }

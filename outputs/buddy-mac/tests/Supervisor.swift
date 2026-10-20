@@ -1,9 +1,10 @@
-// run-tests: BuddyWorkerCore.swift BuddyOperationsDB.swift BuddyWorkerProcess.swift BuddyWorkerHost.swift BuddyPlan.swift BuddySupervisor.swift BuddyMigrations.swift BuddyWorkerClient.swift BuddyAgentMemory.swift BuddyTeamMonitorStore.swift BuddyTeamMonitor.swift BuddyAISettings.swift ConversationService.swift BuddyInboxReview.swift BuddyMailVerification.swift BuddyComputer.swift BuddyTransport.swift BuddyToolInput.swift BuddyConnections.swift BuddyTeam.swift BuddyProjectFiles.swift BuddyDocuments.swift BuddyAgentProposals.swift -- src:tests/supervisor-claude.py which:python3
+// run-tests: BuddyWorkerCore.swift BuddyOperationsDB.swift BuddyWorkerProcess.swift BuddyWorkerHost.swift BuddyPlan.swift BuddySupervisor.swift BuddyMigrations.swift BuddyWorkerClient.swift BuddyAgentMemory.swift BuddyTeamMonitorStore.swift BuddyTeamMonitor.swift BuddyAISettings.swift ConversationService.swift BuddyInboxReview.swift BuddyMailVerification.swift BuddyComputer.swift BuddyTransport.swift BuddyToolInput.swift BuddyConnections.swift BuddyTeam.swift BuddyProjectFiles.swift BuddyDocuments.swift BuddyAgentProposals.swift -- src:tests/supervisor-claude.py which:python3 src:tests/supervisor-gpt.py
 import Foundation
 
 /// The supervisor lane, end to end at the store level: a real worker store, a real plan store, a stand-in dispatcher (what the worker's stage loop
-/// does) and the lane running a fixture Claude process. Between the user's messages the lane accepts results, answers teammates' questions and
-/// checks the finished stage; the stage boundary holds, user-list items reach the user once, nonsense is ignored, and a lane that gets nowhere stops.
+/// does) and the lane running a fixture Claude process, or a fixture ChatGPT app-server when the supervisor is on ChatGPT. Between the user's
+/// messages the lane accepts results, answers teammates' questions and checks the finished stage; the stage boundary holds, user-list items reach
+/// the user once, nonsense is ignored, and a lane that gets nowhere stops.
 @main struct SupervisorChecks {
     @MainActor static func require(_ value: Bool, _ message: String) { if !value { fputs("FAILED: \(message)\n", stderr); exit(1) } }
 
@@ -32,6 +33,8 @@ import Foundation
         // crossed into the next day, where a once-a-day notice rightly appears a second time.
         var now = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!, stopped: [(String, String)] = []
         var planID = "", keys: [String: String] = [:]
+        /// The Claude key the lane can read; nil is a key that cannot be read.
+        var key: String? = "fixture-key"
         init(root: URL, store: BuddyWorkerStore, plans: BuddyPlanStore, lane: BuddySupervisorLane) { self.root = root; self.store = store; self.plans = plans; self.lane = lane }
         var worker: URL { root.appendingPathComponent("Worker") }
         var supervisorFolder: URL { worker.appendingPathComponent("Supervisor") }
@@ -50,7 +53,8 @@ import Foundation
                                               taskFiles: { id in ["/fixture/\(id)/baseline.csv"] })
         let lane = BuddySupervisorLane(support: root, store: store, plans: plans,
                                        makeClaude: { BuddyWorkerProcess(resource: URL(fileURLWithPath: CommandLine.arguments[1]), runtime: URL(fileURLWithPath: CommandLine.arguments[2])) },
-                                       keyReader: { _ in "fixture-key" }, hooks: hooks)
+                                       makeGPT: { ConversationService(support: root, executable: URL(fileURLWithPath: CommandLine.arguments[3])) },
+                                       keyReader: { _ in holder?.key }, hooks: hooks)
         let made = World(root: root, store: store, plans: plans, lane: lane)
         holder = made
         return made
@@ -141,7 +145,7 @@ import Foundation
         let base = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("buddy-supervisor-\(UUID().uuidString).noindex", isDirectory: true)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: base) }
-        require(CommandLine.arguments.count >= 3, "the fixture and python3 are passed in")
+        require(CommandLine.arguments.count >= 4, "the Claude fixture, python3 and the ChatGPT fixture are passed in")
 
         // 1. A stage, start to finish, with nobody typing.
         let main = try world(base, "main")
@@ -280,17 +284,26 @@ import Foundation
         require(calls(ignored).count == 3 && ignored.lane.status["online"] as? Bool == true && (ignored.lane.status["lastError"] as? String ?? "x").isEmpty, "the next run that is applied brings it back online: \(ignored.lane.status)")
         print("PASS: the lane is online only while it was ticked in the last 30 seconds, has a Claude supervisor able to run, and its last run did not fail")
 
-        // After "Switch all agents to ChatGPT" the supervisor chats on ChatGPT and keeps supervising on the Claude model it had.
+        // After "Switch all agents to ChatGPT" the supervisor supervises on ChatGPT. While ChatGPT is disconnected it keeps supervising on Claude, on
+        // the Claude model it had; once ChatGPT is back it supervises there again, on its ChatGPT model.
         let switched = try world(base, "switched")
         // agent-models.json as the switch leaves it: Chief on ChatGPT, remembering its Claude model.
         try Data("{\"version\":1,\"workspaces\":{\"\(w)\":{\"\(chief)\":{\"provider\":\"chatgpt\",\"model\":\"gpt-5\",\"alternates\":{\"claude\":\"fixture-switched-model\"}}}}}".utf8).write(to: switched.root.appendingPathComponent("agent-models.json"))
+        _ = try BuddyAISettings(support: switched.root).update(w, enabled: ("chatgpt", false))
         try mode(switched, "auto"); try propose(switched); _ = try step(switched)
         try finish(switched.store, jobs(switched, "t1")[0]["id"] as? String ?? "", result: "R1: the baseline reproduces.")
         _ = try step(switched); await tick(switched)
         let switchedCalls = calls(switched)
-        require(switched.lane.status["online"] as? Bool == true && switchedCalls.count == 1, "a supervisor switched to ChatGPT keeps supervising: \(switched.lane.status)")
-        require(switchedCalls.first?["model"] as? String == "fixture-switched-model", "on the Claude model it had before the switch: \(switchedCalls)")
-        print("PASS: after a switch to ChatGPT the supervisor's background lane keeps running on Claude, on the supervisor's remembered Claude model")
+        require(switched.lane.status["online"] as? Bool == true && switchedCalls.count == 1, "a supervisor switched to ChatGPT, with ChatGPT disconnected, keeps supervising: \(switched.lane.status)")
+        require(switchedCalls.first?["model"] as? String == "fixture-switched-model" && switchedCalls.first?["transport"] == nil, "on Claude, on the Claude model it had before the switch: \(switchedCalls)")
+        _ = try BuddyAISettings(support: switched.root).update(w, enabled: ("chatgpt", true))
+        require(try step(switched).count == 1, "accepting t1 starts t2")
+        try finish(switched.store, jobs(switched, "t2").first?["id"] as? String ?? "", result: "Signed off: Table 2 matches.")
+        _ = try step(switched); await tick(switched)
+        let backCall = calls(switched).last ?? [:]
+        require(try calls(switched).count == 2 && backCall["transport"] as? String == "chatgpt" && backCall["model"] as? String == "gpt-5" && (try planTask(switched, "t2"))["status"] as? String == "done",
+                "with ChatGPT connected again it supervises on ChatGPT, on its own ChatGPT model: \(backCall)")
+        print("PASS: after a switch to ChatGPT the supervisor's background lane runs on ChatGPT; while ChatGPT is disconnected it falls back to Claude, on the supervisor's remembered Claude model")
 
         // 4. Gates, then the no-progress breaker.
         let hold = try world(base, "hold")
@@ -302,9 +315,13 @@ import Foundation
         var noSupervisor = state; noSupervisor["agents"] = (state["agents"] as? [[String: Any]] ?? []).filter { $0["id"] as? String != chief }
         await tick(hold, state: noSupervisor)
         require(calls(hold).isEmpty && hold.lane.status["online"] as? Bool == false, "without its supervisor the lane does nothing and is offline")
+        // A supervisor on ChatGPT with neither ChatGPT nor Claude connected: nothing runs, and the lane says what to connect.
         try BuddyAgentModels(support: hold.root).set(workspace: w, agent: chief, selection: .init(provider: "chatgpt", model: "gpt-5"))
+        _ = try BuddyAISettings(support: hold.root).update(w, enabled: ("chatgpt", false)); _ = try BuddyAISettings(support: hold.root).update(w, enabled: ("claude", false))
         await tick(hold)
-        require(calls(hold).isEmpty && hold.lane.status["lastError"] as? String == "The supervisor runs on Claude; connect Claude or choose a Claude model for Chief.", "a supervisor on ChatGPT is reported, not run: \(hold.lane.status)")
+        require(calls(hold).isEmpty && hold.lane.status["online"] as? Bool == false && hold.lane.status["lastError"] as? String == "Connect ChatGPT or Claude in AI provider settings so Chief can supervise the team in the background.",
+                "with neither ChatGPT nor Claude connected the lane runs nothing and says what to connect: \(hold.lane.status)")
+        _ = try BuddyAISettings(support: hold.root).update(w, enabled: ("chatgpt", true)); _ = try BuddyAISettings(support: hold.root).update(w, enabled: ("claude", true))
         try BuddyAgentModels(support: hold.root).set(workspace: w, agent: chief, selection: .init(provider: "claude", model: "fixture-chief-model"))
         try hold.store.setPaused(true)
         await tick(hold)
@@ -325,7 +342,7 @@ import Foundation
         let still = try notices(hold, "stuck")
         require(calls(hold).count == 3 && still.count == 1, "a stuck item is not presented again and the notice is not repeated")
         require(try rows(hold, "SELECT state, presented FROM supervisor_items").first.map { $0[0].string == "stuck" && $0[1].int == 3 } == true, "the item is recorded as stuck after three presentations")
-        print("PASS: the lane does nothing without a Claude supervisor, while paused or past the supervisor's daily limit (one notice a day); an item that gets no effective action three times becomes one stuck notice and is not presented again")
+        print("PASS: the lane does nothing without a supervisor, with no provider connected, while paused or past a Claude supervisor's daily limit (one notice a day); an item that gets no effective action three times becomes one stuck notice and is not presented again")
 
         // 6. The user's case, replayed: Stage 2 is authorized with no tasks. Chief is asked to plan it, answers add_tasks with no keys and the second
         // task naming the first by its title, and the tasks are added on the first run; nothing goes stuck and the user gets no stuck notice.
@@ -471,5 +488,112 @@ import Foundation
         await tick(again)
         require(try calls(again).count == repairCalls && (try itemState(again, "stage:old:0")).state == "stuck" && (try notices(again, "stuck")).map { $0["status"] as? String ?? "" } == ["open", "closed"], "a second start repairs nothing more")
         print("PASS: at its start the lane reopens, once, the items an earlier Buddy marked stuck after a run that never started, and closes their stuck notice")
+
+        // 11. Supervision on ChatGPT. A supervisor whose selection is ChatGPT supervises over the ChatGPT subscription (the app-server), in a run with no
+        // tool surface, with the lane's own output schema, instructions and briefing; its actions are applied exactly as on Claude, it records no
+        // Claude spend, and a daily limit the person set for it (a limit on Claude spending) does not stop it.
+        let gpt = try world(base, "gpt")
+        try BuddyAgentModels(support: gpt.root).set(workspace: w, agent: chief, selection: .init(provider: "chatgpt", model: "fixture-gpt-chief"))
+        try mode(gpt, "auto"); try propose(gpt); _ = try step(gpt)
+        let g1 = jobs(gpt, "t1").first?["id"] as? String ?? ""
+        try finish(gpt.store, g1, result: "R1: the baseline reproduces to the third decimal.")
+        _ = try step(gpt)
+        try gpt.store.setLimit(workspace: w, scope: "agent", id: chief, amount: 0.0, setBy: "user", quote: "no spending today")
+        await tick(gpt)
+        let gptCalls = calls(gpt), gptCall = gptCalls.first ?? [:]
+        require(gptCalls.count == 1 && gptCall["transport"] as? String == "chatgpt" && (gptCall["items"] as? [String]) == ["result:\(gpt.keys["t1"] ?? ""):1"], "a supervisor on ChatGPT reviews the result over the ChatGPT transport: \(gptCalls) \(gpt.lane.status)")
+        require(gptCall["model"] as? String == "fixture-gpt-chief", "on the supervisor's own ChatGPT model: \(gptCall["model"] ?? "")")
+        require((gptCall["dynamicTools"] as? [Any])?.isEmpty == true && gptCall["apps"] as? Bool == false && gptCall["sandbox"] as? String == "read-only" && gptCall["approvalPolicy"] as? String == "never"
+                && gptCall["ephemeral"] as? Bool == true && (gptCall["mentions"] as? [Any])?.isEmpty == true, "in a run with no tool surface: \(gptCall)")
+        require(NSDictionary(dictionary: gptCall["outputSchema"] as? [String: Any] ?? [:]).isEqual(to: BuddySupervisorLane.schema), "with the lane's own output schema: \(gptCall["outputSchema"] ?? "")")
+        require(gptCall["policy"] as? Bool == true && gptCall["supervises"] as? Bool == true && gptCall["text"] as? Bool == true && gptCall["addTasks"] as? Bool == true, "with the same instructions as on Claude: \(gptCall)")
+        require((gptCall["you"] as? [String: Any])?["name"] as? String == "Chief" && (gptCall["authorization"] as? [String: Any])?["quote"] as? String == "get stage 1 done"
+                && (gptCall["results"] as? [String])?.first?.contains("R1: the baseline reproduces") == true, "and the same briefing: \(gptCall)")
+        require(try planTask(gpt, "t1")["status"] as? String == "done" && !((try gpt.store.job(g1))["acceptedAt"] as? String ?? "").isEmpty
+                && (try count(gpt, "SELECT COUNT(*) FROM plan_decisions WHERE kind = 'accept' AND decided_by = ? AND task_id = ?", [.text(chief), .text(gpt.keys["t1"] ?? "")])) == 1,
+                "its accept is applied as on Claude: t1 is done and the acceptance is the supervisor's decision")
+        require(gpt.lane.status["online"] as? Bool == true && (gpt.lane.status["lastError"] as? String ?? "x").isEmpty, "the lane is online: \(gpt.lane.status)")
+        let gptSpend = (try? String(contentsOf: gpt.root.appendingPathComponent("Claude/spend-\(month).jsonl"), encoding: .utf8)) ?? ""
+        require(try gptSpend.isEmpty && (try count(gpt, "SELECT COUNT(*) FROM supervisor_runs WHERE status = 'applied' AND cost = 0")) == 1, "a ChatGPT run records no Claude spend: \(gptSpend)")
+        require(!(try gpt.store.openDecisions(workspace: w)).contains { $0["title"] as? String == "Supervision waits for tomorrow" }, "and the Claude daily limit neither stops it nor sends a notice")
+        print("PASS: a supervisor on ChatGPT runs the lane over the ChatGPT transport, with no tools and the lane's own schema, instructions and briefing; its accept is applied as on Claude, no Claude spend is recorded, the Claude daily limit does not stop it, and the lane is online")
+
+        // 12. On ChatGPT an authorized stage with no tasks is planned on the first run, exactly as on Claude; with no ChatGPT model chosen, on the account's default.
+        let gptPlanning = try world(base, "gpt-planning")
+        try BuddyAgentModels(support: gptPlanning.root).set(workspace: w, agent: chief, selection: .init(provider: "chatgpt", model: ""))
+        try mode(gptPlanning, "auto")
+        let gs2 = try emptyStageTwo(gptPlanning)
+        await tick(gptPlanning)
+        let gPlanCall = calls(gptPlanning).last ?? [:]
+        require(gPlanCall["transport"] as? String == "chatgpt" && (gPlanCall["kinds"] as? [String]) == ["stage_plan"] && gPlanCall["model"] as? String == "fixture-gpt", "the lane asks Chief to plan Stage 2 over ChatGPT, on the account's default model: \(gPlanCall) \(gptPlanning.lane.status)")
+        let gPlanned = try stageTasks(gptPlanning, gs2)
+        require(gPlanned.count == 2 && (gPlanned.last?["dependsOn"] as? [String]) == [gPlanned.first?["id"] as? String ?? "?"] && gPlanned.first?["assignee"] as? String == forge && gPlanned.last?["assignee"] as? String == vera,
+                "Chief's add_tasks is applied on the first run, the dependency named by title included: \(gPlanned.map { [$0["title"] ?? "", $0["dependsOn"] ?? ""] })")
+        require(try (try itemState(gptPlanning, "stage_plan:\(gs2)")).state == "handled" && (try notices(gptPlanning, "stuck")).isEmpty, "the planning item is handled and nothing is stuck")
+        print("PASS: on ChatGPT an authorized stage with no tasks is planned on the first run with add_tasks, as on Claude, on the account's default model when the supervisor chose none")
+
+        // 13. Supervision does not stop while the supervisor's own provider is unusable and the other one is usable: a supervisor on Claude with Claude
+        // disconnected supervises on ChatGPT; a supervisor on ChatGPT whose app-server is not signed in supervises on Claude (on Claude's default model,
+        // having had none there). With neither usable the lane is offline and says what to connect.
+        let claudeOff = try world(base, "claude-off")
+        _ = try BuddyAISettings(support: claudeOff.root).update(w, enabled: ("claude", false))
+        try mode(claudeOff, "auto"); try propose(claudeOff); _ = try step(claudeOff)
+        try finish(claudeOff.store, jobs(claudeOff, "t1").first?["id"] as? String ?? "", result: "R1")
+        _ = try step(claudeOff)
+        await tick(claudeOff)
+        let offCall = calls(claudeOff).last ?? [:]
+        require(try calls(claudeOff).count == 1 && offCall["transport"] as? String == "chatgpt" && offCall["model"] as? String == "fixture-gpt" && (try planTask(claudeOff, "t1"))["status"] as? String == "done" && claudeOff.lane.status["online"] as? Bool == true,
+                "a supervisor on Claude, with Claude disconnected and ChatGPT connected, supervises on ChatGPT: \(calls(claudeOff)) \(claudeOff.lane.status)")
+        let signedOut = try world(base, "signed-out")
+        try BuddyAgentModels(support: signedOut.root).set(workspace: w, agent: chief, selection: .init(provider: "chatgpt", model: "fixture-gpt-chief"))
+        try mode(signedOut, "signedout"); try propose(signedOut); _ = try step(signedOut)
+        try finish(signedOut.store, jobs(signedOut, "t1").first?["id"] as? String ?? "", result: "R1")
+        _ = try step(signedOut)
+        await tick(signedOut)
+        let outCall = calls(signedOut).last ?? [:]
+        require(try calls(signedOut).count == 1 && outCall["transport"] == nil && outCall["model"] as? String == "claude-sonnet-4-6" && (try planTask(signedOut, "t1"))["status"] as? String == "done" && signedOut.lane.status["online"] as? Bool == true,
+                "a supervisor on ChatGPT, with the app-server not signed in and Claude connected, supervises on Claude: \(calls(signedOut)) \(signedOut.lane.status)")
+        signedOut.key = nil
+        await tick(signedOut)
+        require(calls(signedOut).count == 1 && signedOut.lane.status["online"] as? Bool == false && signedOut.lane.status["lastError"] as? String == "Connect ChatGPT or Claude in AI provider settings so Chief can supervise the team in the background.",
+                "with ChatGPT not signed in and no Claude key to read, the lane is offline and says what to connect: \(signedOut.lane.status)")
+        print("PASS: when the supervisor's own provider is unusable the lane runs on the other one (ChatGPT for a Claude supervisor with Claude disconnected, Claude for a ChatGPT supervisor not signed in); with neither usable it is offline and says what to connect")
+
+        // 14. A ChatGPT run that fails before answering, ends with an empty answer, or loses the app-server half way is a technical failure, exactly as on
+        // Claude: it counts for no breaker and makes nothing stuck, the lane retries, and after 30 minutes of failures the user gets one notice, settled
+        // when a run is applied again.
+        let gptFail = try world(base, "gpt-fail")
+        try BuddyAgentModels(support: gptFail.root).set(workspace: w, agent: chief, selection: .init(provider: "chatgpt", model: "fixture-gpt-chief"))
+        try propose(gptFail); _ = try step(gptFail)
+        try finish(gptFail.store, jobs(gptFail, "t1").first?["id"] as? String ?? "", result: "R1")
+        _ = try step(gptFail)
+        let failKey = "result:\(gptFail.keys["t1"] ?? ""):1"
+        try mode(gptFail, "fail")
+        for _ in 0..<5 { await tick(gptFail) }
+        let failState = try itemState(gptFail, failKey)
+        require(try calls(gptFail).count == 5 && calls(gptFail).allSatisfy { $0["transport"] as? String == "chatgpt" } && failState.state == "open" && failState.presented == 0 && (try notices(gptFail, "stuck")).isEmpty,
+                "five ChatGPT runs that failed before answering make nothing stuck and count no presentation: \(calls(gptFail).count) \(failState)")
+        require(gptFail.lane.status["lastError"] as? String == "ChatGPT hit an error before answering." && gptFail.lane.status["online"] as? Bool == false, "the lane says why and is not online: \(gptFail.lane.status)")
+        try mode(gptFail, "empty")
+        await tick(gptFail)
+        require(try calls(gptFail).count == 6 && gptFail.lane.status["lastError"] as? String == "The supervisor's run ended without an answer." && (try itemState(gptFail, failKey)).presented == 0, "an empty answer is a technical failure too: \(gptFail.lane.status)")
+        try mode(gptFail, "crash")
+        await tick(gptFail)
+        require(try calls(gptFail).count == 7 && gptFail.lane.status["lastError"] as? String == "The ChatGPT connection closed. Try again to reconnect." && gptFail.lane.status["online"] as? Bool == false && (try itemState(gptFail, failKey)).presented == 0,
+                "so is the app-server going away half way through the run: \(gptFail.lane.status)")
+        func gptCantStart() throws -> [[String: Any]] { (try gptFail.store.openDecisions(workspace: w)).filter { $0["title"] as? String == "Background supervision can't start" } }
+        require(try gptCantStart().isEmpty, "fourteen minutes of failures do not bother the user yet")
+        try mode(gptFail, "fail")
+        for _ in 0..<9 { await tick(gptFail) }
+        let gptCant = try gptCantStart()
+        require(calls(gptFail).count == 16 && gptCant.count == 1 && gptCant.first?["audience"] as? String == "user"
+                && gptCant.first?["question"] as? String == "Chief can't supervise the team in the background: ChatGPT hit an error before answering. Buddy keeps trying every minute; results and questions wait for Chief meanwhile.",
+                "after 30 minutes of failures the user gets one plain notice with the reason: \(calls(gptFail).count) \(gptCant)")
+        require(try notices(gptFail, "stuck").isEmpty && (try itemState(gptFail, failKey)).state == "open", "and still nothing is stuck")
+        try mode(gptFail, "auto")
+        await tick(gptFail)
+        require(try planTask(gptFail, "t1")["status"] as? String == "done" && (try gptCantStart()).isEmpty && gptFail.lane.status["online"] as? Bool == true && calls(gptFail).last?["transport"] as? String == "chatgpt",
+                "the next ChatGPT run that answers reviews the result and settles the notice: \(gptFail.lane.status)")
+        print("PASS: a ChatGPT run that fails before answering, answers nothing or loses the app-server is a technical failure: nothing goes stuck, the lane retries, one notice after 30 minutes, settled when it runs again")
     }
 }

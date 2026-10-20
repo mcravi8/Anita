@@ -5,3 +5,10 @@
 .worker-private{padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--bg)}.worker-private strong{font-size:14px}.worker-private p,.worker-auth>p{font-size:13px;line-height:1.65;color:var(--text2)}.worker-private small{display:block;font-size:11px;line-height:1.6;color:var(--text3);margin-top:10px}.worker-profile{display:flex;align-items:center;gap:12px;padding:18px 0;border-bottom:1px solid var(--line)}.worker-profile>.worker-profile-label{display:flex;flex-direction:column;gap:5px;flex:1}.worker-profile strong{font-size:14px}.worker-profile small{font-size:11px;color:var(--text3)}.worker-profile .border-button{font-size:12px;padding:9px 12px}.worker-auth .worker-toolbar{gap:8px}.worker-auth .border-button,.worker-auth .primary-button{font-size:12px;padding:10px 12px}
 
 .worker-day-picker{border:0;padding:0;margin:0 0 18px;min-width:0}.worker-day-picker[hidden]{display:none}.worker-day-picker legend{font-size:12px;color:var(--text2);margin-bottom:9px}.worker-day-picker>div{display:flex;gap:7px;flex-wrap:wrap}.worker-day-picker label{display:flex;align-items:center;gap:5px;font-size:12px;min-height:36px}.worker-day-picker input{accent-color:var(--text4)}.worker-day-picker input:focus-visible{outline:2px solid var(--text3);outline-offset:3px}
+
+/* An approval is answered with two buttons; its question reads as what they answer. */
+.worker-review .worker-review-question{font-size:13px;line-height:1.5;color:var(--text2);margin:12px 0 2px}
+/* Once answered, the approval's chat message is one line: what was asked, and what was decided. The full line and any reason show on hover. */
+.worker-decided .bot-bubble{min-width:0}
+.worker-decided .reply-content{min-width:0}
+.worker-decided .reply-content p{margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

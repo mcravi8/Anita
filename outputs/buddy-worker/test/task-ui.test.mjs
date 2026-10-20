@@ -32,11 +32,11 @@ test('ordinary website task requests review and returns its verified result in t
   assert.equal(await page.locator('#message-input').inputValue(),'My existing draft');
   await page.getByRole('button',{name:'Review task'}).click();
   await page.locator('[data-worker-review="create-inbox-review"]').waitFor();
-  await page.getByRole('button',{name:'Continue',exact:true}).click();
-  await page.getByText('Answer each question to continue.',{exact:true}).waitFor();
+  // An approval is answered with one of two buttons; nothing is sent until one is chosen.
+  assert.equal(await page.locator('[data-worker-review="create-inbox-review"] select').count(),0);
   assert.equal(await page.evaluate(()=>taskCalls.some(c=>c.operation==='review')),false);
-  await page.locator('[data-worker-question="operation"]').selectOption('Accept');
-  await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await page.getByRole('button',{name:'Approve',exact:true}).click();
+  await page.waitForFunction(()=>taskCalls.some(c=>c.operation==='review'));
   await page.evaluate(()=>closeModal());
   await page.locator('.reply-content').filter({hasText:'The requested inbox was created and verified on the website.'}).waitFor();
   assert.equal(await page.evaluate(()=>state.messages.chief.length),2);

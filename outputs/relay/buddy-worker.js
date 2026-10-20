@@ -29,8 +29,85 @@
     if(t.status==='paused'){const why=brief.replace(/^paused[:.]?\s*/i,'');return `**${String(t.title||'This task').slice(0,90)}** is paused. ${why?why[0].toUpperCase()+why.slice(1):'Open the task for details.'}`;}
     return `I couldn’t finish **${String(t.title||'this task').slice(0,90)}**. ${brief||'Open the task for details.'}`;
   }
+  // An approval asks one thing: may this exact step go ahead? Its question offers "Accept" (the operation and command questions), and it is
+  // answered with two buttons. A review that asks something else (a name, a choice between sizes) keeps its own inputs.
+  const approvalQuestion=q=>Array.isArray(q?.options)&&q.options.some(o=>o?.label==='Accept');
+  const isApproval=r=>!!r&&r.kind!=='authentication'&&r.kind!=='checkpoint'&&(r.questions||[]).some(approvalQuestion);
+  // What answering sends. Approve is what choosing "Approve once" (the Accept option) and then Continue sent; Disapprove is what "Cancel action"
+  // sent. The Mac app reads this shape as it always has.
+  function reviewRequest(taskId,r,draft,operation){
+    const values={...(draft||{})};
+    if(operation==='approve')for(const q of r.questions||[])if(approvalQuestion(q))values[q.id]='Accept';
+    const answers=Object.fromEntries(Object.entries(values).map(([k,v])=>[k,[v]]));
+    return {operation:'review',taskId,id:r.id,answers,cancel:operation==='decline',accept:operation==='approve'&&(answers.operation?.[0]==='Accept'||r.kind==='coding'&&answers.command?.[0]==='Accept')};
+  }
+  // What was asked, in a few words, on one line: the command itself (shortened from the middle) or the action's name.
+  const plain=value=>String(value??'').replace(/\s+/g,' ').replace(/[*_`[\]<>#|~\\]/g,'').trim();
+  function shortCommand(text){
+    const line=String(text||'').replace(/\s+/g,' ').trim().replace(/`/g,"'");
+    if(line.length<=40)return line;
+    const words=line.split(' '),first=words[0],last=words.at(-1);
+    if(words.length>1&&first.length<=16&&last.length<=28)return `${first} … ${last}`;
+    return `${line.slice(0,18).trimEnd()}…${line.slice(-18).trimStart()}`;
+  }
+  function requestTitle(r){
+    if(r?.kind==='checkpoint')return 'Check the work';
+    const a=r?.tool?.arguments||{},name=plain(r?.tool?.name);
+    if(typeof a.command==='string'&&a.command.trim())return `Request to run \`${shortCommand(a.command)}\``;
+    if(!name)return 'Request to continue';
+    const action=/^[A-Z][a-z]/.test(name)?name[0].toLowerCase()+name.slice(1):name;
+    return `Request to ${action.length>56?action.slice(0,55).trimEnd()+'…':action}`;
+  }
+  const verdicts={approved:'approved',disapproved:'disapproved',changes:'changes requested'};
+  const decisionLine=d=>`${d.title} — ${verdicts[d.verdict]||'answered'}${d.by==='supervisor'&&plain(d.byName)?` by ${plain(d.byName).slice(0,24)}`:''}`;
+  // The reviews an approval message was posted for: kept on the message, or, for one saved before that, read from its delivery id.
+  function reviewIds(m){
+    if(Array.isArray(m.workerReviewIds))return m.workerReviewIds;
+    const prefix=`worker-${m.workerTaskID}-${m.workerAttempt}-waiting_review-`;
+    if(typeof m.id!=='string'||!m.id.startsWith(prefix))return [];
+    try{return decodeURIComponent(m.id.slice(prefix.length)).split(':').filter(Boolean);}catch{return [];}
+  }
+  function decisionTarget(state,taskId,reviewId,strict=false){
+    for(const list of Object.values(state.messages||{})){
+      if(!Array.isArray(list))continue;
+      const asked=list.filter(m=>m?.workerTaskID===taskId&&m.workerStatus==='waiting_review');
+      const decided=asked.find(m=>m.workerDecision?.reviewId===reviewId);if(decided)return decided;
+      const open=asked.filter(m=>!m.workerDecision),match=open.find(m=>reviewIds(m).includes(reviewId));if(match)return match;
+      // Only the person's own click, which answers the review on screen, may fall back to the one message that does not say which review it was.
+      const unknown=open.filter(m=>!reviewIds(m).length);if(!strict&&unknown.length===1)return unknown[0];
+    }
+    return null;
+  }
+  // The approval message becomes the record of the answer, in place: "Request to run `npm test` — approved". It is saved with the chat, so it
+  // reads the same after a reload, and the next approval in the same run gets a message of its own.
+  function recordDecision(state,taskId,decision,{replace=false}={}){
+    const m=decisionTarget(state,taskId,decision.reviewId,replace);if(!m||m.workerDecision&&!replace)return false;
+    const next={reviewId:decision.reviewId,title:String(decision.title||'Request to continue'),verdict:decision.verdict,by:decision.by==='supervisor'?'supervisor':'user',...(decision.byName?{byName:String(decision.byName).slice(0,80)}:{}),...(decision.reason?{reason:String(decision.reason).slice(0,2000)}:{}),at:decision.at||new Date().toISOString()};
+    if(m.workerDecision&&['verdict','by','byName','reason'].every(k=>m.workerDecision[k]===next[k]))return false;
+    m.workerDecision=next;m.body=decisionLine(next);return true;
+  }
+  // The Mac app says who answered each review (the person, or the team's supervisor on their behalf) and why. A record without that is left
+  // alone: an older record cannot tell a person's "no" from a run that simply stopped.
+  function verdictOf(r){
+    if(r.kind==='checkpoint')return r.status==='answered'?'approved':r.status==='cancelled'?'changes':'';
+    return ['cancelled','declined'].includes(r.status)?'disapproved':['answered','dispatched','completed','uncertain','not_sent'].includes(r.status)?'approved':'';
+  }
+  function reconcile(state,t){
+    if(!t||t.workspace!==state.conversationWorkspace)return false;let changed=false;
+    for(const r of t.reviews||[]){
+      if(!r||r.status==='pending'||!['user','supervisor'].includes(r.answeredBy)||!(isApproval(r)||r.kind==='checkpoint'))continue;
+      const verdict=verdictOf(r);if(!verdict)continue;
+      if(recordDecision(state,t.id,{reviewId:r.id,title:requestTitle(r),verdict,by:r.answeredBy,byName:r.answeredBy==='supervisor'?r.answeredByName:undefined,reason:r.answerReason,at:r.answeredAt},{replace:true}))changed=true;
+    }
+    return changed;
+  }
   function presentation(state,m){
     if(!m.workerTaskID)return {body:m.body,hidden:false};
+    const d=m.workerDecision;
+    if(d){
+      const line=decisionLine(d),reason=d.reason?`${plain(d.byName)||(d.by==='supervisor'?'The supervisor':'You')}: ${d.reason}`:'';
+      return {body:line,hidden:false,link:false,decided:true,tooltip:[line.replace(/`/g,''),reason].filter(Boolean).join('\n'),...(reason?{details:reason}:{})};
+    }
     const messages=state.messages[m.who]||[],index=messages.indexOf(m);
     const superseded=attention(m.workerStatus)&&index>=0&&messages.slice(index+1).some(n=>n.workerTaskID===m.workerTaskID);
     return {body:attention(m.workerStatus)?taskMessage({status:m.workerStatus,progress:m.body}):m.body,hidden:superseded};
@@ -40,14 +117,17 @@
     state.messages[t.agentId]||=[];const id=deliveryID(t);if(state.messages[t.agentId].some(m=>m.id===id))return false;
     const body=taskMessage(t);
     if(!body)return false;
-    const message={id,who:t.agentId,body,time:new Date(t.updatedAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}),live:true,status:'completed',workerTaskID:t.id,workerStatus:t.status,workerAttempt:Number(t.attempt)||0,workerUpdatedAt:t.updatedAt,coverage:t.coverage||[],files:t.files||[]};
-    const prior=attention(t.status)?state.messages[t.agentId].find(m=>m.workerTaskID===t.id&&attention(m.workerStatus)&&(m.workerAttempt===message.workerAttempt||m.id.startsWith(`worker-${t.id}-${message.workerAttempt}-`))):null;
+    const message={id,who:t.agentId,body,time:new Date(t.updatedAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}),live:true,status:'completed',workerTaskID:t.id,workerStatus:t.status,workerAttempt:Number(t.attempt)||0,workerUpdatedAt:t.updatedAt,coverage:t.coverage||[],files:t.files||[],workerReviewIds:t.status==='waiting_review'&&Array.isArray(t.reviews)?pending(t).map(r=>r.id):undefined};
+    // A message that already records an answer is never reused: it stays as that answer, and what comes next is a message of its own.
+    const prior=attention(t.status)?state.messages[t.agentId].find(m=>m.workerTaskID===t.id&&attention(m.workerStatus)&&!m.workerDecision&&(m.workerAttempt===message.workerAttempt||m.id.startsWith(`worker-${t.id}-${message.workerAttempt}-`))):null;
     if(prior){if(prior.workerUpdatedAt&&prior.workerUpdatedAt>t.updatedAt)return false;Object.assign(prior,message);}else state.messages[t.agentId].push(message);return true;
   }
-  const api={labels,canResume,needsAllowance,pending,unconfirmed,authTitle,systemPause,deliverable,deliveryID,deliverResult,taskMessage,presentation};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
+  const api={labels,canResume,needsAllowance,pending,unconfirmed,authTitle,systemPause,deliverable,deliveryID,deliverResult,taskMessage,presentation,isApproval,reviewRequest,requestTitle,recordDecision,reconcile,reviewIds};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
   let snapshot={online:false,tasks:[],routines:[],paused:false},detail=null,view='list',routine=null,busy=false,error='',last='',preview=null;
   const drafts=new Map();
+  // Reviews answered from this page: their buttons stay off, so a second click cannot answer the same review again.
+  const answered=new Set();
   const ordered=value=>Array.isArray(value)?value.map(ordered):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(k=>[k,ordered(value[k])])):value;
   const detailKey=()=>JSON.stringify(ordered([detail,snapshot.privateBrowser]));
   const key=()=>`buddy.worker.draft.${state.conversationWorkspace}`;
@@ -85,16 +165,24 @@
     if(r.kind==='authentication')return `<section class="worker-review worker-auth"><strong>${esc(authTitle(r.mode))}</strong><small>${esc(r.origin)}${r.accountEmail?` · ${esc(r.accountEmail)}`:''}</small><p>${esc(r.reason||'Continue your requested task.')}</p><p class="worker-caption">${r.mode==='signup'?'Choose or generate the new credential in private Chrome. Chrome can save it to Google Password Manager.':'Chrome keeps passwords private. Buddy receives the sign-in result.'} Allow email verification for this website during this sign-in.</p><div class="worker-toolbar">${button('auth-decline','Not now',`data-review-id="${esc(r.id)}"`)}${r.mode==='signin'?button('auth-saved','Use saved login',`data-review-id="${esc(r.id)}"`):''}${r.mode==='verification'?button('auth-verify','Verify email',`data-review-id="${esc(r.id)}"`,true):''}${button('auth-private',r.mode==='signup'?'Create privately':'Open privately',`data-review-id="${esc(r.id)}"`,r.mode!=='verification')}</div></section>`;
     const args={...r.tool?.arguments};const body=BuddyActions.messagePreview(args.payload);if(body)args.message=body;
     const data=Object.entries(args).filter(([k])=>!['payload'].includes(k));
-    return `<section class="worker-review" data-worker-review="${esc(r.id)}"><strong>${esc(r.tool?.name||'Review action')}</strong><small>${esc(r.tool?.service||'Buddy private browser')}</small>${data.length?`<dl>${data.map(([k,v])=>`<div><dt>${esc(k.replace(/_/g,' '))}</dt><dd>${esc(typeof v==='string'?v:JSON.stringify(v,null,2))}</dd></div>`).join('')}</dl>`:''}${(r.questions||[]).map((q,i)=>`<fieldset><legend>${esc(q.question)}</legend>${q.options?.length?`<select data-worker-question="${esc(q.id)}"><option value="">Choose…</option>${q.options.map(o=>`<option value="${esc(o.label)}" ${drafts.get(r.id)?.[q.id]===o.label?'selected':''}>${esc(o.label==='Accept'?'Approve once':o.label)}</option>`).join('')}</select>`:`<textarea data-worker-question="${esc(q.id)}" rows="3" maxlength="10000">${esc(drafts.get(r.id)?.[q.id]||'')}</textarea>`}</fieldset>`).join('')}<div class="worker-toolbar">${button('decline','Cancel action',`data-review-id="${esc(r.id)}"`)}${button('approve','Continue',`data-review-id="${esc(r.id)}"`,true)}</div></section>`;
+    // An approval is answered with Approve or Disapprove; its question is shown as what the buttons answer. Any other question keeps its input.
+    const approval=isApproval(r),off=answered.has(r.id)?'disabled':'';
+    const asked=(r.questions||[]).map(q=>approval&&approvalQuestion(q)?`<p class="worker-review-question">${esc(q.question)}</p>`:`<fieldset><legend>${esc(q.question)}</legend>${q.options?.length?`<select data-worker-question="${esc(q.id)}"><option value="">Choose…</option>${q.options.map(o=>`<option value="${esc(o.label)}" ${drafts.get(r.id)?.[q.id]===o.label?'selected':''}>${esc(o.label==='Accept'?'Approve once':o.label)}</option>`).join('')}</select>`:`<textarea data-worker-question="${esc(q.id)}" rows="3" maxlength="10000">${esc(drafts.get(r.id)?.[q.id]||'')}</textarea>`}</fieldset>`).join('');
+    return `<section class="worker-review" data-worker-review="${esc(r.id)}"><strong>${esc(r.tool?.name||'Review action')}</strong><small>${esc(r.tool?.service||'Buddy private browser')}</small>${data.length?`<dl>${data.map(([k,v])=>`<div><dt>${esc(k.replace(/_/g,' '))}</dt><dd>${esc(typeof v==='string'?v:JSON.stringify(v,null,2))}</dd></div>`).join('')}</dl>`:''}${asked}<div class="worker-toolbar">${button('decline',approval?'Disapprove':'Cancel action',`data-review-id="${esc(r.id)}" ${off}`)}${button('approve',approval?'Approve':'Continue',`data-review-id="${esc(r.id)}" ${off}`,true)}</div></section>`;
   }
   function taskBody(t){
     return `<div class="worker-task-heading">${findAgent(t.agentId)?avatar(t.agentId):''}<div><h3>${esc(t.title)}</h3><small>${esc(agentName(t.agentId))} · ${t.provider==='claude'?'Claude credits':'ChatGPT'}</small></div></div><p class="worker-status" role="status">${esc(labels[t.status]||t.status)}</p><p class="worker-progress">${esc(needsAllowance(t)?'Choose an additional Claude allowance to continue this task. Previous unconfirmed usage stays recorded.':t.progress||'')}</p>${snapshot.privateBrowser?.taskId===t.id?privateBanner():''}${pending(t).map(review).join('')}${unconfirmed(t).map(unconfirmedCard).join('')}${typeof reviewCoverage==='function'?reviewCoverage(t.coverage):''}${t.result?`<article class="reply-markdown worker-result">${BuddyMarkdown.render(t.result)}</article>`:''}${t.fileList?.length?`<div class="worker-files"><h4>Task files</h4>${t.fileList.map(f=>`<button class="menu-row" data-worker-file="${esc(f.path)}">${icon('file')}<span>${esc(f.path)}</span>${icon('chevron')}</button>`).join('')}</div>`:''}<div>${needsAllowance(t)&&canResume(t.status,t.kind)&&!snapshot.privateBrowser?`<label class="field"><span>Additional Claude allowance (USD)</span><input type="number" min="0.10" max="10" step="0.10" data-worker-allowance aria-label="Additional Claude allowance in USD" value="${esc(drafts.get(t.id)?.allowance||'')}" placeholder="Choose an amount"><small>Authorizes this attempt only. Earlier unconfirmed usage: $${Number((t.reservedBudgetUSD||0)+(t.uncertainBudgetUSD||0)).toFixed(2)}.</small></label>`:''}${canResume(t.status,t.kind)&&!snapshot.privateBrowser?`<label class="field"><span>What should they do next?</span><textarea data-worker-update rows="3" maxlength="10000" placeholder="Add a missing detail, answer a question, or say what you changed in the browser.">${esc(drafts.get(t.id)?.update||'')}</textarea></label>`:''}</div><div class="worker-toolbar">${canResume(t.status,t.kind)&&!snapshot.privateBrowser?button('resume',t.kind==='coding'?'Continue coding':needsAllowance(t)?'Resume with this allowance':'Resume task','',true):''}${['queued','running','waiting_review'].includes(t.status)?button('pause','Pause'):''}${!['completed','cancelled'].includes(t.status)?button('cancel','Cancel task'):''}</div><details class="worker-more"><summary>Task details${icon('down')}</summary><p class="worker-brief">${esc(t.goal||'')}</p><p class="worker-caption">Saved ${esc(new Date(t.updatedAt).toLocaleString())}${t.spentUSD!=null?` · Estimated Claude usage $${Number(t.spentUSD).toFixed(4)}`:''}</p>${t.kind==='coding'?`<p class="worker-caption">Project: ${esc(t.codingProject||'Private task files')} · Saved coding context${t.codingSessionID?' available':''}</p>${t.commands?.length?`<details class="worker-receipt"><summary>Commands & checks</summary>${t.commands.map(c=>`<details><summary>${esc(c.code)} · ${c.status==='completed'?`exit ${esc(c.exitCode??c.signal??'unknown')}${c.timedOut?' · timed out':''}`:esc(c.status)}</summary><pre>${esc(c.output||'')}</pre></details>`).join('')}</details>`:''}`:`${button('browser','Open task browser')}<p class="worker-caption">Opening the browser pauses the queue. Use Chrome’s password manager, then choose Finish private sign-in.</p>`}${t.events?.length?`<details class="worker-receipt"><summary>Work activity</summary><ul>${t.events.map(e=>`<li>${esc(e.tool)} · ${esc(e.status)}</li>`).join('')}</ul></details>`:''}${(t.reviews||[]).filter(r=>r.status!=='pending').map(r=>`<details class="worker-receipt"><summary>${esc(r.tool?.name||'Action')} · ${esc(r.status)}</summary><pre>${esc(JSON.stringify(r.receipt||r.tool?.arguments||{},null,2))}</pre></details>`).join('')}</details>`;
   }
   function drawDetail(){shell(`${button('back','← All tasks')}<div data-worker-live>${taskBody(detail)}</div>`);last=detailKey();}
+  // Both answers go off the moment one is chosen, so a double click cannot answer twice while the first answer is on its way.
+  function hold(reviewId){document.querySelectorAll(`[data-worker-review="${CSS.escape(reviewId)}"] [data-worker-op]`).forEach(b=>{b.disabled=true;});}
+  // The chat's approval message now says what was decided. It is saved with the chat, so it reads the same after a reload.
+  function chatChanged(){save();if(ui.view.kind==='chat')refreshLiveChat(ui.view.target);}
+  function decided(task,r,verdict){if(recordDecision(state,task.id,{reviewId:r.id,title:requestTitle(r),verdict,by:'user'}))chatChanged();}
   function showError(e){error=String(e.message||e);const el=document.querySelector('[data-worker-error]');if(el)el.textContent=error;else showToast(error);}
   async function refresh(redraw=true){
     const listKey=s=>JSON.stringify([s.online,s.paused,s.defaultProvider,s.privateBrowser?.agentId,s.privateBrowser?.taskId,s.tasks.map(t=>[t.id,t.title,t.agentId,t.status]),(s.routines||[]).map(r=>[r.id,r.status,r.nextRun])]);
-    try{const before=listKey(snapshot);snapshot=await request({operation:'status'});await deliverRoutineResults();error='';const message=document.querySelector('[data-worker-error]');if(message)message.textContent='';if(redraw&&document.querySelector('[data-worker-panel]')){if(view==='list'&&before!==listKey(snapshot))list();else if(view==='routine'&&routine&&before!==listKey(snapshot)){const r=snapshot.routines?.find(r=>r.id===routine.id);if(r)routineDetail(r);else{view='list';list();}}else if(view==='task'&&detail){const result=await request({operation:'detail',taskId:detail.id});detail=result.task;const live=document.querySelector('[data-worker-live]');if(live&&!(live.contains(document.activeElement)&&document.activeElement.matches('input,textarea,select'))&&last!==detailKey()){live.innerHTML=taskBody(detail);last=detailKey();}}}badge();window.BuddyActivity?.acceptWorker(snapshot);}
+    try{const before=listKey(snapshot);snapshot=await request({operation:'status'});await deliverRoutineResults();error='';const message=document.querySelector('[data-worker-error]');if(message)message.textContent='';if(redraw&&document.querySelector('[data-worker-panel]')){if(view==='list'&&before!==listKey(snapshot))list();else if(view==='routine'&&routine&&before!==listKey(snapshot)){const r=snapshot.routines?.find(r=>r.id===routine.id);if(r)routineDetail(r);else{view='list';list();}}else if(view==='task'&&detail){const result=await request({operation:'detail',taskId:detail.id});detail=result.task;if(reconcile(state,detail))chatChanged();const live=document.querySelector('[data-worker-live]');if(live&&!(live.contains(document.activeElement)&&document.activeElement.matches('input,textarea,select'))&&last!==detailKey()){live.innerHTML=taskBody(detail);last=detailKey();}}}badge();window.BuddyActivity?.acceptWorker(snapshot);}
     catch(e){window.BuddyActivity?.workerError(e.message||e);const wasOnline=snapshot.online!==false;snapshot.online=false;if(redraw&&view==='list'){if(wasOnline)list();showError(e);}}
     // Whatever the poll found, the plan strip and the figures read it now rather than at the next full render.
     finally{polled=Date.now();window.dispatchEvent(new CustomEvent('buddy-worker-snapshot'));}
@@ -108,9 +196,28 @@
     let changed=false;
     for(const id of [...examined.keys()])if(!snapshot.tasks.some(t=>t.id===id&&deliverable(t)))examined.delete(id);
     for(const t of snapshot.tasks.filter(t=>deliverable(t)&&findAgent(t.agentId)&&examined.get(t.id)!==outcome(t)&&!(state.messages[t.agentId]||[]).some(m=>m.id===deliveryID(t))).slice(0,10)){
-      const value=(await request({operation:'detail',taskId:t.id})).task;examined.set(t.id,outcome(t));if(deliverResult(state,value)){changed=true;}
+      const value=(await request({operation:'detail',taskId:t.id})).task;examined.set(t.id,outcome(t));if(reconcile(state,value))changed=true;if(deliverResult(state,value)){changed=true;}
+    }
+    // An approval answered without this page (the team's supervisor answering for the person) is read from the task once it stops waiting on it,
+    // so the chat's message says who answered. Each waiting message is looked up at most a few times.
+    for(const t of answeredElsewhere().slice(0,5)){
+      const value=(await request({operation:'detail',taskId:t.id})).task;if(reconcile(state,value))changed=true;
     }
     if(changed){save();if(ui.view.kind==='chat')refreshLiveChat(ui.view.target);else render();}
+  }
+  const looked=new Map();
+  function answeredElsewhere(){
+    const out=[];
+    for(const t of snapshot.tasks||[]){
+      if(!findAgent(t.agentId))continue;
+      const still=t.status==='waiting_review'?String(t.attentionKey||'').split(':'):[],seen=`${t.status}|${t.attentionKey||''}`;
+      const open=(state.messages[t.agentId]||[]).filter(m=>m.workerTaskID===t.id&&m.workerStatus==='waiting_review'&&!m.workerDecision&&reviewIds(m).some(id=>!/\s/.test(id)&&!still.includes(id)));
+      const due=open.filter(m=>{const l=looked.get(m.id);return !l||l.seen!==seen&&l.count<3;});
+      if(!due.length)continue;
+      for(const m of due){const l=looked.get(m.id);looked.set(m.id,{seen,count:(l?.count||0)+1});}
+      out.push(t);
+    }
+    return out;
   }
   function badge(){if(window.BuddyActivity){BuddyActivity.paint();return;}const count=snapshot.tasks.filter(t=>['waiting_review','waiting_user','failed','interrupted'].includes(t.status)).length+(snapshot.routines||[]).filter(r=>r.status==='needs_attention').length+(snapshot.scheduleError?1:0);document.querySelectorAll('[data-worker-badge]').forEach(el=>{el.textContent=count||'';el.hidden=!count;});}
   api.refresh=refresh;api.snapshot=()=>snapshot;api.request=request;api.pulse=()=>snapshot.pulse||{agents:{}};
@@ -137,7 +244,7 @@
     if(busy)return;busy=true;error='';
     try{
       if(routineEntry){const r=snapshot.routines?.find(r=>r.id===routineEntry.dataset.workerRoutine);if(r)routineDetail(r);}
-      else if(task){detail=(await request({operation:'detail',taskId:task.dataset.workerTask})).task;view='task';drawDetail();}
+      else if(task){detail=(await request({operation:'detail',taskId:task.dataset.workerTask})).task;view='task';drawDetail();if(reconcile(state,detail))chatChanged();}
       else if(file){preview=await request({operation:'preview',taskId:detail.id,path:file.dataset.workerFile});view='preview';shell(`${button('task-back','← Task')}<h3>${esc(preview.path)}</h3><div class="worker-document">${BuddyDocuments.preview(preview)}</div>`);}
       else {
         const operation=op.dataset.workerOp;
@@ -161,21 +268,28 @@
           const r=pending(detail).find(r=>r.id===op.dataset.reviewId&&r.kind==='checkpoint');if(!r)throw Error('This check ended. Refresh the task.');
           const feedback=String(document.querySelector(`[data-worker-review="${CSS.escape(r.id)}"] [data-worker-question="feedback"]`)?.value??drafts.get(r.id)?.feedback??'').slice(0,2000);
           if(operation==='checkpoint-no'&&!feedback.trim())throw Error('Say what needs changing so the agent can fix it.');
-          await request({operation:'review',taskId:detail.id,id:r.id,accept:operation==='checkpoint-yes',feedback});drafts.delete(r.id);await refresh();
+          const task=detail;hold(r.id);
+          await request({operation:'review',taskId:task.id,id:r.id,accept:operation==='checkpoint-yes',feedback});answered.add(r.id);drafts.delete(r.id);
+          decided(task,r,operation==='checkpoint-yes'?'approved':'changes');await refresh();
         }
         else if(operation==='approve'||operation==='decline'){
           const r=pending(detail).find(r=>r.id===op.dataset.reviewId);if(!r)throw Error('This review ended. Refresh the task.');
-          const answers=Object.fromEntries(Object.entries(drafts.get(r.id)||{}).map(([k,v])=>[k,[v]]));
-          if(operation==='approve'&&(r.questions||[]).some(q=>!answers[q.id]?.[0]))throw Error('Answer each question to continue.');
-          await request({operation:'review',taskId:detail.id,id:r.id,answers,cancel:operation==='decline',accept:operation==='approve'&&(answers.operation?.[0]==='Accept'||r.kind==='coding'&&answers.command?.[0]==='Accept')});drafts.delete(r.id);await refresh();
+          const body=reviewRequest(detail.id,r,drafts.get(r.id),operation);
+          if(operation==='approve'&&(r.questions||[]).some(q=>!body.answers[q.id]?.[0]))throw Error('Answer each question to continue.');
+          const task=detail;hold(r.id);
+          await request(body);answered.add(r.id);drafts.delete(r.id);
+          if(isApproval(r))decided(task,r,operation==='approve'?'approved':'disapproved');await refresh();
         }
         else if(['resume','pause','cancel','browser'].includes(operation)){let allowance={};if(operation==='resume'&&needsAllowance(detail)){const amount=Number(drafts.get(detail.id)?.allowance);if(!Number.isFinite(amount)||amount<0.1||amount>10)throw Error('Choose an additional Claude allowance from $0.10 to $10.');const draft=drafts.get(detail.id);draft.budgetAuthorizationID||=crypto.randomUUID();allowance={additionalBudgetUSD:amount,budgetAuthorizationID:draft.budgetAuthorizationID};}if(operation==='resume'&&detail.kind==='coding'&&detail.status==='completed'&&!drafts.get(detail.id)?.update?.trim())throw Error('Add what you want to change before continuing this coding session.');await request(operation==='resume'&&detail.kind==='coding'&&!allowance.additionalBudgetUSD?{operation:'coding',agentId:detail.agentId,arguments:{action:'continue',taskId:detail.id,goal:drafts.get(detail.id)?.update||'Continue the original task and reconcile current project files and command receipts before retrying interrupted work.'}}:{operation,taskId:detail.id,...allowance,message:operation==='resume'?(drafts.get(detail.id)?.update||(detail.kind==='coding'?'Continue the original task and reconcile current project files and command receipts before retrying interrupted work.':'')):''});if(operation==='resume')drafts.delete(detail.id);await refresh();}
       }
-    }catch(e){showError(e);}finally{busy=false;document.querySelectorAll('[data-worker-panel] [data-worker-op], #worker-new-form button').forEach(b=>b.disabled=false);}
+    }catch(e){showError(e);}finally{busy=false;document.querySelectorAll('[data-worker-panel] [data-worker-op], #worker-new-form button').forEach(b=>b.disabled=answered.has(b.dataset.reviewId));}
   });
   document.addEventListener('click',async e=>{const a=e.target.closest('[data-action]')?.dataset.action;if(view!=='preview'||!preview||!document.querySelector('.worker-document')||!['document-prev','document-next'].includes(a))return;try{preview=await request({operation:'preview',taskId:detail.id,path:preview.path,page:(preview.previewPage||1)+(a==='document-next'?1:-1)});document.querySelector('.worker-document').innerHTML=BuddyDocuments.preview(preview);}catch(e){showError(e);}});
   document.addEventListener('change',e=>{if(view==='preview'&&e.target.id==='document-sheet'&&preview&&document.querySelector('.worker-document'))document.querySelector('.worker-document').innerHTML=BuddyDocuments.preview(preview,Number(e.target.value));});
   setInterval(()=>{if(!busy&&!['new','routine-form'].includes(view)&&document.querySelector('[data-worker-panel]'))refresh();},2500);
   setInterval(()=>{if(!busy&&!document.querySelector('[data-worker-panel]')&&Date.now()-polled>=(live()?4500:14500))refresh(false);},5000);
   setTimeout(()=>refresh(false),1800);
+  // The page draws the open chat before this file has loaded, so its task messages were drawn without being read (an answered approval still
+  // offered "Review task"). Draw them again now that they can be.
+  if(typeof ui!=='undefined'&&ui.view?.kind==='chat'&&typeof refreshLiveChat==='function')refreshLiveChat(ui.view.target);
 })(typeof globalThis!=='undefined'?globalThis:this);

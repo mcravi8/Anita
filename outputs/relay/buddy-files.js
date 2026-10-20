@@ -16,6 +16,7 @@
   if(typeof document==='undefined')return;
   const native=()=>!!window.BuddyDesktop?.projectFiles;
   let folder=null,current=null,generation=0;
+  const loadedFolder=()=>folder;
   const message=error=>String(error.message||error);
   const fileIcon=()=>`<span class="artifact-icon">${icon('file')}</span>`;
   const bytes=n=>n<1024?`${n} B`:`${(n/1024).toFixed(1)} KB`;
@@ -25,12 +26,20 @@
     const files=savedFiles(receipts);if(!files.length)return '';
     return `<div class="saved-file-cards">${files.slice(0,3).map(file=>`<button class="artifact-card" data-action="project-file" data-path="${esc(file.path)}" data-folder-id="${esc(file.folderId)}">${fileIcon()}<span><strong>${esc(file.path.split('/').at(-1))}</strong><small>Saved by ${esc(file.actorName||'Your team')}</small></span>${icon('chevron')}</button>${file.warning?`<p class="file-warning">${esc(file.warning)}</p>`:''}`).join('')}${files.length>3?`<button class="drawer-bottom-link" data-action="project-files">See all ${files.length} saved files${icon('arrow')}</button>`:''}</div>`;
   }
-  async function loadFolder(){await persistWorkspace(state);folder=await window.BuddyDesktop.projectFiles(state.activeFolderId);return folder;}
-  function folderBody(){
+  // Every load of the folder is announced, so the docked project panel shows what the drawer shows. Reading the folder for the dock waits for
+  // a save already on its way instead of making one.
+  async function loadFolder({persist=true}={}){if(persist)await persistWorkspace(state);else if(typeof persistenceQueue!=='undefined')await persistenceQueue.catch(()=>{});folder=await window.BuddyDesktop.projectFiles(state.activeFolderId);window.dispatchEvent(new CustomEvent('buddy-project-folder',{detail:folder}));return folder;}
+  function folderBody(folder=loadedFolder()){
     return `<button class="project-text-link" data-buddy-desktop>Buddy desktop${icon('arrow')}</button>${folder.folders?.length>1?`<label class="project-folder-select"><span class="sr-only">Connected folder</span><select aria-label="Connected folder" data-project-folder>${folder.folders.map(f=>`<option value="${esc(f.folderId)}" ${f.folderId===folder.folderId?'selected':''}>${esc(f.name)}${f.available===false?' · Unavailable':''}</option>`).join('')}</select></label>`:''}<div class="project-folder-heading"><span class="menu-icon">${icon('folder')}</span><span><strong>${esc(folder.name)}</strong><small>${folder.files.length} files · Originals on your Mac</small></span><button class="icon-button" data-action="project-new" aria-label="Create a shared file">${icon('plus')}</button></div><div class="project-file-list">${folder.files.length||folder.directories?.length?treeHTML(folder):`<div class="project-empty"><p>A place for your team’s work.</p><small>Ask an agent to create a file, or start one yourself.</small><button class="border-button" data-action="project-new">New file${icon('plus')}</button></div>`}</div>${folder.limited?'<p class="connections-caption">Showing up to 200 files and eight folder levels. Agents can open other supported files by name.</p>':''}<details class="project-folder-details"><summary>Folder & access${icon('down')}</summary><p class="project-location">${esc(folder.location)}</p><p>Changes save to the original files here. Access is on by default; remove it in an agent’s settings.</p><div class="project-folder-actions"><button class="border-button" data-action="project-reveal">Show in Finder</button>${folder.primary!==false?'<button class="border-button" data-action="project-choose">Change shared folder</button>':'<button class="border-button" data-action="project-disconnect">Disconnect folder</button>'}${window.BuddyDesktop?.addProjectFolder?'<button class="border-button" data-action="project-add">Connect another folder</button>':''}</div><small>Documents up to 32 MB; text and raw binary tools up to 1 MB.</small></details>`;
   }
   async function show(){
     if(!native())return;
+    // While the project is docked beside the chat, asking for the files (the folder button, a viewer's Files) shows the dock instead of a drawer.
+    if(root.BuddyProjectDock?.docked()){
+      if(document.querySelector('#modal-root .modal-overlay'))closeModal();
+      root.BuddyProjectDock.reveal();current=null;
+      try{await loadFolder();return;}catch(error){root.BuddyProjectDock.lost();}
+    }
     const token=++generation;current=null;
     openDrawer('Files','<div data-project-list><p class="connections-loading" role="status">Opening your folder…</p></div>');
     try{await loadFolder();if(token===generation&&document.querySelector('[data-project-list]'))document.querySelector('[data-project-list]').innerHTML=folderBody();}
@@ -129,7 +138,8 @@
   let listTimer=null,listSeq=0;
   async function changed(detail){
     // While an agent writes, every streamed update says the folder changed. Reload the list once things go quiet, and never let those reloads cancel the first load of the drawer (they share no counter), or the list would not appear until the reply ended.
-    if(document.querySelector('[data-project-list]')){clearTimeout(listTimer);listTimer=setTimeout(async()=>{if(!document.querySelector('[data-project-list]'))return;const token=++listSeq;try{await loadFolder();if(token===listSeq&&document.querySelector('[data-project-list]')){const el=document.querySelector('[data-project-list]'),expanded=el.querySelector('details')?.open,scroll=el.closest('.modal-body').scrollTop;el.innerHTML=folderBody();const d=el.querySelector('details');if(d&&expanded)d.open=true;el.closest('.modal-body').scrollTop=scroll;}}catch(reason){showToast(message(reason));}},300);}
+    // The docked panel is refreshed the same way, from the same load: it repaints itself when the load is announced.
+    if(document.querySelector('[data-project-list],[data-project-dock]')){clearTimeout(listTimer);listTimer=setTimeout(async()=>{const drawer=!!document.querySelector('[data-project-list]');if(!drawer&&!document.querySelector('[data-project-dock]'))return;const token=++listSeq;try{await loadFolder({persist:drawer});if(token===listSeq&&document.querySelector('[data-project-list]')){const el=document.querySelector('[data-project-list]'),expanded=el.querySelector('details')?.open,scroll=el.closest('.modal-body').scrollTop;el.innerHTML=folderBody();const d=el.querySelector('details');if(d&&expanded)d.open=true;el.closest('.modal-body').scrollTop=scroll;}}catch(reason){showToast(message(reason));}},300);}
     if(current?.editing){const receipts=detail.files||[detail.file].filter(Boolean);if(detail.type==='project-files-changed'||receipts.some(file=>file.folderId===current.folderId&&file.path===current.path&&file.revision!==current.version)){const note=document.querySelector('.file-changed-note');if(note)note.hidden=false;const conflict=document.getElementById('project-conflict');if(conflict)conflict.hidden=false;}}
   }
   document.addEventListener('click',async event=>{
@@ -163,5 +173,5 @@
   window.addEventListener('buddy-conversation',event=>{if(['file','project-files-changed'].includes(event.detail?.type)||event.detail?.files?.length)changed(event.detail);});
   document.addEventListener('toggle',event=>{const el=event.target;if(!el.matches?.('[data-file-branch]'))return;const folderId=el.dataset.treeFolder;state.fileTreeExpanded||={};const next=new Set(state.fileTreeExpanded[folderId]||[]);el.open?next.add(el.dataset.fileBranch):next.delete(el.dataset.fileBranch);const values=[...next];if(JSON.stringify(values)!==JSON.stringify(state.fileTreeExpanded[folderId]||[])){state.fileTreeExpanded[folderId]=values;save();}},true);
   let polling=false;setInterval(async()=>{const file=current;if(polling||!file||!document.querySelector('[data-project-view]')||!window.BuddyDesktop?.projectFileVersion||document.hidden)return;polling=true;try{const latest=await BuddyDesktop.projectFileVersion({path:file.path,folderId:file.folderId});if(current===file&&latest.version!==file.version){const note=document.querySelector('.file-changed-note');if(note)note.hidden=false;if(file.editing){const conflict=document.getElementById('project-conflict');if(conflict)conflict.hidden=false;}}}catch(e){const el=document.getElementById('project-file-error');if(current===file&&el)el.textContent=message(e);}finally{polling=false;}},4000);
-  Object.assign(api,{native,show,open,newFile,cards,treeHTML,openFolder:async folderId=>{state.activeFolderId=folderId;save();await show();}});
+  Object.assign(api,{native,show,open,newFile,cards,treeHTML,body:folderBody,load:loadFolder,openFolder:async folderId=>{state.activeFolderId=folderId;save();await show();}});
 })(typeof globalThis!=='undefined'?globalThis:this);

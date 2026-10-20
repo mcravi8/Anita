@@ -1,0 +1,21 @@
+/* The project's files, docked to the right of the chat when the window has room. The chat column gives up the space; nothing covers it. The
+   panel reads the theme's tokens (the drawer's card colour and hairlines), so light and dark need nothing of their own. */
+.project-dock{flex:0 0 340px;width:340px;min-width:0;min-height:0;display:flex;justify-content:flex-start;overflow:hidden;background:var(--card);border-left:1px solid var(--line)}
+.project-dock-panel{flex:none;width:340px;min-height:0;display:flex;flex-direction:column}
+.project-dock-header{flex-shrink:0;display:flex;align-items:center;padding:22px 20px 14px;border-bottom:1px solid var(--line)}
+.project-dock-header h2{margin:0;font-size:15px;font-weight:600;letter-spacing:-.2px;color:var(--text)}
+.project-dock-body{flex:1;min-height:0;overflow-y:auto;padding:18px 20px 25px}
+.project-dock:focus{outline:none}
+.project-dock:focus-visible{outline:2px solid var(--text3);outline-offset:-2px}
+
+/* Arriving, it slides in from the right like the side panels do, while the chat column gives up the room. */
+@keyframes project-dock-open{from{flex-basis:0;width:0}}
+@keyframes project-dock-slide{from{transform:translateX(48px);opacity:0}}
+.project-dock.dock-enter{animation:project-dock-open .42s cubic-bezier(.2,.8,.2,1) both}
+.project-dock.dock-enter>.project-dock-panel{animation:project-dock-slide .42s cubic-bezier(.2,.8,.2,1) both}
+/* Asked for with the folder button: its heading lights up briefly. */
+@keyframes project-dock-attention{from{background:var(--hover)}}
+.project-dock-header.dock-attention{animation:project-dock-attention .9s ease-out}
+@media(prefers-reduced-motion:reduce){
+  .project-dock.dock-enter,.project-dock.dock-enter>.project-dock-panel,.project-dock-header.dock-attention{animation:none}
+}

@@ -254,7 +254,7 @@ import Darwin
                 return ["tasks":store.jobs.filter{$0["workspace"] as? String==current && whose.contains($0["agentId"] as? String ?? "") && $0["kind"] as? String=="coding"}.map { j in ["id":j["id"] ?? "","agentId":j["agentId"] ?? "","title":j["title"] ?? "","status":j["status"] ?? "","progress":j["progress"] ?? ""] }]
             }
             if action=="start" {
-                return try await handle(["operation":"create","workspace":current,"agentId":agentID,"requestId":request["requestId"] ?? "","title":args["title"] ?? "","goal":args["goal"] ?? "","kind":"coding","provider":"claude"])
+                return try await handle(["operation":"create","workspace":current,"agentId":agentID,"requestId":request["requestId"] ?? "","title":args["title"] ?? "","goal":args["goal"] ?? "","kind":"coding"])
             }
             guard ["continue","cancel"].contains(action),let id=args["taskId"] as? String else {throw BuddyWorkerFailure(message:"Choose start, status, continue or cancel with a coding task ID.")}
             let job=try store.job(id)
@@ -263,7 +263,7 @@ import Darwin
             if action=="cancel" {await stop(id,status:"cancelled",cause:cancelCause(agentID,job:job));return ["task":try store.job(id)]}
             // The task's own agent must still have file access, whoever continues it.
             let owner=try agent(job["agentId"] as? String ?? "",workspace:current)
-            guard (owner["tools"] as? [String:Bool])?["projectFiles"] != false,try providerSettings.current(current).claudeEnabled,keyReader(current) != nil else {throw BuddyWorkerFailure(message:"Reconnect Claude and enable this agent's file access before continuing coding work.")}
+            guard (owner["tools"] as? [String:Bool])?["projectFiles"] != false,BuddyCodexCoding.usable(job["provider"] as? String ?? "",choice:try providerSettings.current(current),claudeKey:keyReader(current) != nil) else {throw BuddyWorkerFailure(message:"Reconnect \(job["provider"] as? String=="chatgpt" ? "ChatGPT":"Claude") and enable this agent's file access before continuing coding work.")}
             guard browserOwner(job) != privateAgent,active != id,let goal=args["goal"] as? String,!goal.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,goal.count<=10000 else {throw BuddyWorkerFailure(message:"Finish or pause the active session and give a short follow-up brief.")}
             let updates=(job["updates"] as? [String] ?? [])+[from+goal];guard updates.joined().count<=30000 else {throw BuddyWorkerFailure(message:"Start a new coding task with a fresh brief.")}
             // (A coding task that stopped with nothing left carries on; runs have no limit of their own.)
@@ -503,13 +503,15 @@ import Darwin
         if coding {guard (a["tools"] as? [String:Bool])?["projectFiles"] != false else {throw BuddyWorkerFailure(message:"Enable this agent's file access before starting a coding session.")}}
         let choice = try providerSettings.current(current)
         let selected=try agentModels.selection(workspace:current,agent:id) ?? .initial(choice.provider)
-        let provider = coding ? "claude" : ((request["provider"] as? String).flatMap{$0.isEmpty ? nil:$0} ?? selected.provider), budget = request["budgetUSD"] as? Double ?? (provider == "claude" ? choice.claudeBudgetUSD : 0)
+        // A coding session runs on the agent's own provider (Claude Code on Claude, Codex on ChatGPT), or on the other one if only that is connected.
+        let provider = coding ? BuddyCodexCoding.provider(agent:selected.provider,chatgpt:choice.chatgptEnabled,claude:choice.claudeEnabled && keyReader(current) != nil) : ((request["provider"] as? String).flatMap{$0.isEmpty ? nil:$0} ?? selected.provider), budget = request["budgetUSD"] as? Double ?? (provider == "claude" ? choice.claudeBudgetUSD : 0)
         guard choice.enabled(provider) else { throw BuddyWorkerFailure(message: "Connect this provider in Settings → AI provider before starting a task.") }
         if provider == "claude" { guard keyReader(current) != nil, budget > 0 else { throw BuddyWorkerFailure(message: "Connect your Claude API key first.") } }
         let requestID = request["requestId"] as? String ?? ""
         let repeated = store.jobs.contains { $0["workspace"] as? String == current && $0["agentId"] as? String == id && $0["requestId"] as? String == requestID }
-        // A coding session runs on Claude whatever the agent chats on; after a switch to ChatGPT it keeps the Claude model the agent had.
-        let job = try store.create(workspace: current, agent: id, requestId: requestID, title: request["title"] as? String ?? "", goal: request["goal"] as? String ?? "", kind: request["kind"] as? String ?? "general", provider: provider, budget: budget,model:selected.model(on:provider))
+        // On the other provider a coding session uses the model the agent had there before a switch, else that provider's default.
+        let job = coding && provider == "chatgpt" ? try BuddyCodexCoding.create(in: store, workspace: current, agent: id, requestId: requestID, title: request["title"] as? String ?? "", goal: request["goal"] as? String ?? "", model: selected.model(on: provider))
+            : try store.create(workspace: current, agent: id, requestId: requestID, title: request["title"] as? String ?? "", goal: request["goal"] as? String ?? "", kind: request["kind"] as? String ?? "general", provider: provider, budget: budget,model:selected.model(on:provider))
         // A new task records who supervises the team now, so its questions and stops can go to them rather than the person.
         if !repeated, let state = try? state(), let supervisor = (try? monitor.store.policy(state))?["supervisorId"] as? String, !supervisor.isEmpty,
            (state["agents"] as? [[String: Any]] ?? []).contains(where: { $0["id"] as? String == supervisor }), let jobID = job["id"] as? String {
@@ -979,7 +981,9 @@ import Darwin
         guard !store.paused else { return }
         for job in store.jobs where job["workspace"] as? String == workspace && job["status"] as? String == "paused" && job["blockedBy"] as? String == "limit" {
             guard let id = job["id"] as? String, id != active, !(job["stopCause"] as? String ?? "").hasPrefix("user"), let agentID = job["agentId"] as? String else { continue }
-            if let room = BuddyBudget.headroom(support: support, workspace: workspace, agent: agentID), room.room < 0.01 { continue }
+            // The ChatGPT plan's usage limit ends at its reset; today's dollar limit is for Claude work.
+            if job["provider"] as? String == "chatgpt" { if BuddyCodexCoding.usageLimitHolds(job, now: Date()) { continue } }
+            else if let room = BuddyBudget.headroom(support: support, workspace: workspace, agent: agentID), room.room < 0.01 { continue }
             if let resumed = try? store.resume(id) { _ = try? store.update(id, ["stopCause": ""]); try? routines.resumeBlockedBy(resumed) }
         }
     }
@@ -1010,7 +1014,7 @@ import Darwin
         if var record = job["recovery"] as? [String: Any], record["state"] as? String == "pending" { record["state"] = "queued"; starting["recovery"] = record }
         try store.update(id, starting)
         let f = files(job); privateFiles = f; scope = try f.scope(workspace)
-        if job["kind"] as? String=="coding" {try executeCoding(job,agent:a,model:claudeModel ?? "claude-sonnet-4-6");return}
+        if job["kind"] as? String=="coding" {if job["provider"] as? String=="chatgpt" {try executeCodexCoding(job,agent:a)} else {try executeCoding(job,agent:a,model:claudeModel ?? "claude-sonnet-4-6")};return}
         let service = ConversationService(support: folder.appendingPathComponent("Conversation"), projectFiles: f, executable: executableOverride, grantsSupport: support); self.service = service
         service.connectionFilter = { [weak self] connection in connection.id != "connector_openai_search_service" || self?.permitted(job, tool: "web") == true }
         service.agentPermission = { [weak self] _, _ in self?.permitted(job) == true }
@@ -1091,6 +1095,61 @@ import Darwin
         var configuration:[String:Any] = ["command":"start","runId":runID,"model":model,"apiKey":key,"budget":BuddyRunLimit.bridge(budget,room:BuddyBudget.headroom(support:support,workspace:workspace,agent:a["id"] as? String ?? "")?.room),"cwd":project.path,"home":home.path,"prompt":prompt,"instructions":instructions,"tools":BuddyProjectFiles.tools+[Self.codingCopyTool,Self.codingCopyOutTool,Self.codingCommandTool,Self.tools.first{$0["name"] as? String=="buddy_checkpoint"}!,Self.requestDecisionTool]]
         if let resume=job["codingSessionID"] as? String {guard UUID(uuidString:resume) != nil else {throw BuddyWorkerFailure(message:"The saved coding session is invalid.")};configuration["resume"]=resume}
         try p.send(configuration)
+    }
+
+    // MARK: coding on ChatGPT (Codex). The session itself is BuddyCodexCodingSession (BuddyCodexCoding.swift); it reports in the Claude
+    // coding bridge's events, which `claudeEvent` handles for both.
+
+    private var codex: BuddyCodexCodingSession?
+    /// A coding attempt on ChatGPT: Codex on this task's own app-server connection, with the Claude path's brief, receipts, reviews, results and stops.
+    private func executeCodexCoding(_ job:[String:Any],agent a:[String:Any]) throws {
+        let id=job["id"] as! String,folder=directory(job),project=folder.appendingPathComponent("Files",isDirectory:true)
+        guard permitted(job,tool:"projectFiles"),let runID else {throw BuddyWorkerFailure(message:"Reconnect ChatGPT and enable file access for this coding session.")}
+        codingNeedsInput=false;attemptText="";attemptHeard=false
+        let current=try store.update(id,["codingProject":project.path,"progress":"Starting coding session"])
+        let service=ConversationService(support:folder.appendingPathComponent("Conversation"),projectFiles:files(job),executable:executableOverride,grantsSupport:support);self.service=service
+        let hooks=BuddyCodexCodingSession.Hooks(
+            event:{[weak self] event in guard let self,self.runID==runID else {return};self.codexEvent(event,job:job)},
+            receipts:{[weak self] commands,progress in
+                guard let self,self.active==id,self.runID==runID else {return}
+                var values:[String:Any]=["commands":commands];if (try? self.store.job(id))?["status"] as? String=="running" {values["progress"]=progress}
+                _ = try? self.store.update(id,values)},
+            review:{[weak self] key,tool,network in self?.codexReview(key,tool:tool,network:network,job:job)},
+            finished:{[weak self] review,status,receipt in try? self?.finishReview(review,job:id,status:status,receipt:receipt)})
+        let session=BuddyCodexCodingSession(service:service,runID:runID,cwd:project.path,commands:current["commands"] as? [[String:Any]] ?? [],hooks:hooks);codex=session
+        session.start(model:job["model"] as? String ?? "",instructions:BuddyCodexCoding.instructions(agent:a,memory:BuddyAgentMemory.guidance(a),decisions:decisionGuidance(job),project:project.path,folderID:id),prompt:BuddyCodexCoding.prompt(current),resume:job["codingSessionID"] as? String)
+    }
+    private func codexMayLeaveSandbox(_ job:[String:Any],network:Bool)->Bool {
+        active==job["id"] as? String && !stopped && !codingNeedsInput && permitted(job,tool:"projectFiles") && (!network || permitted(job,tool:"web")) && !BuddyAccessDiff.narrows(from:authorization,to:authorizationData(job))
+    }
+    /// Codex asking to leave its sandbox (a command with network, or files outside the project): the native review for coding commands, never
+    /// answered by itself. An approval is recorded as being sent before Codex hears it; a declined one is passed back as declined.
+    private func codexReview(_ key:String,tool:[String:Any],network:Bool,job:[String:Any]) {
+        let id=job["id"] as! String,review=UUID().uuidString
+        var reviews=((try? store.job(id))?["reviews"] as? [[String:Any]]) ?? []
+        guard codexMayLeaveSandbox(job,network:network),reviews.count<150 else {codex?.answer(key,approved:false);return}
+        reviews.append(["id":review,"kind":"coding","status":"pending","tool":tool,"questions":[["id":"command","question":network ? "Allow this command to run outside the project sandbox, with network access?":"Allow writing these files outside the project?","options":[["label":"Accept"],["label":"Decline"]]]]])
+        guard (try? store.update(id,["reviews":reviews,"status":"waiting_review","progress":network ? "A coding command needs network access":"A coding change needs to write outside the project"])) != nil else {codex?.answer(key,approved:false);return}
+        reviewDecisions[review]={[weak self] accepted in
+            guard let self else {return}
+            guard let session=self.codex,session.waiting(key) else {if accepted {try? self.finishReview(review,job:id,status:"not_sent",receipt:["withdrawn":true])};return}
+            guard accepted,self.codexMayLeaveSandbox(job,network:network),(try? self.dispatch(review,job:id)) != nil else {session.answer(key,approved:false);return}
+            session.answer(key,approved:true,review:review)
+        }
+    }
+    /// A Codex attempt's events. The plan's usage limit is handled here: a pause that ends by itself at the reset, never a failure. Everything
+    /// else is the coding bridge's own vocabulary and goes the Claude path's way.
+    private func codexEvent(_ event:[String:Any],job:[String:Any]) {
+        guard let id=active,id==job["id"] as? String,!stopped else {return}
+        let type=event["type"] as? String ?? ""
+        if ["result","limit"].contains(type) {try? store.settleActions(of:id,pending:"expired",cause:"run.ended")}
+        guard type=="limit" else {claudeEvent(event,job:job);return}
+        let saved=(try? store.job(id)) ?? job,now=Date(),stamp=ISO8601DateFormatter(),final=event["text"] as? String ?? ""
+        let until=(event["resetsAt"] as? String).flatMap{stamp.date(from:$0)} ?? now.addingTimeInterval(1800)
+        let said=final.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty ? attemptText:final
+        _ = try? store.update(id,["status":"paused","stopCause":"limit","blockedBy":"limit","blockedAt":stamp.string(from:now),"blockedUntil":stamp.string(from:until),"progress":BuddyCodexCoding.limitProgress(until:until,now:now),
+                                  "result":BuddyCodexCoding.result(said:said,prior:saved["result"] as? String ?? "",commands:saved["commands"] as? [[String:Any]] ?? [])],cause:"limit")
+        cleanup()
     }
     static let codingCommandTool:[String:Any] = ["type":"function","name":"buddy_coding_command","description":"Run a build/test or project command at this coding session's private project root on this Mac. OS sandbox permits writes only in this project and private scratch, reads only project/scratch/system runtimes, and nothing else. Does not inherit API keys, passwords, login profiles or user shell settings. Returns actual exitCode/output/timedOut. No network at all, internet or local services such as localhost, unless network=true, which requires exact native human review for THIS command. Explain why with reason. Never assume the network review was approved. Do not retry a command whose external result is uncertain.","inputSchema":["type":"object","additionalProperties":false,"properties":["code":["type":"string"],"network":["type":"boolean"],"reason":["type":"string"],"timeoutSeconds":["type":"integer","minimum":1,"maximum":300]],"required":["code"]]]
     /// Brings connected-folder files into the project without their contents passing through the model: reading a dataset and writing it back out
@@ -1207,7 +1266,7 @@ import Darwin
         let coding=job["kind"] as? String=="coding"
         if coding,event["type"] as? String=="session",let session=event["sessionId"] as? String,UUID(uuidString:session) != nil {try? store.update(id,["codingSessionID":session]);return}
         if event["type"] as? String == "call", let callID = event["id"] as? String, let name = event["tool"] as? String, let args = event["arguments"] as? [String: Any] {
-            let process = claude
+            let process = claude, codex = self.codex
             let callRun=runID
             recordTool(id,name:name,status:"started")
             Task { var result: [String: Any]; do {
@@ -1233,7 +1292,7 @@ import Darwin
             } catch { result = ["error": error.localizedDescription] }
                 guard self.active==id,self.runID==callRun,!self.stopped else{return}
                 self.lastActivityAt=Date();self.recordTool(id,name:name,status:result["error"] == nil ? "completed":"failed",error:result["error"] as? String)
-                try? process?.send(["command": "result", "runId":callRun ?? "", "id": callID, "result": result])
+                if let codex { codex.answer(call: callID, result) } else { try? process?.send(["command": "result", "runId":callRun ?? "", "id": callID, "result": result]) }
             }; return
         }
         if let text = event["text"] as? String, !text.isEmpty { try? store.update(id, ["result": String(text.suffix(100000))]) }
@@ -1628,7 +1687,7 @@ import Darwin
         if let active { try? store.releaseLeases(heldBy: active) }
         browserLease = nil; reviewWaitingSince = nil
         active = nil; runID = nil; privateFiles = nil; scope = nil
-        codingShell?.close();codingShell=nil;codingCommandBusy=false;codingNeedsInput=false;taskNeedsInput=false
+        codingShell?.close();codingShell=nil;codingCommandBusy=false;codingNeedsInput=false;taskNeedsInput=false;codex?.close();codex=nil
         let service = self.service, browser = self.browser, claude = self.claude; self.service = nil; self.browser = nil; self.claude = nil
         service?.shutdown(); browser?.close(); claude?.close()
     }

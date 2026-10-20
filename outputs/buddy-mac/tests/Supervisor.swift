@@ -475,7 +475,7 @@ import Foundation
         try raw.run("INSERT INTO supervisor_items(key, workspace, presented, state, last_run, updated_at) VALUES('stage:old:0', ?, 3, 'stuck', ?, '2026-10-20T16:46:00Z')", [.text(w), .text(appliedRun)])
         _ = try repair.plans.addNotice(planId: repair.planID, kind: "stuck", text: "The team is stuck on Stage 1 — Reproduce: Chief chose add_tasks. Tell me how to proceed.", chat: true, refs: ["itemKeys": ["stage:old:0"], "runId": appliedRun])
         _ = try repair.plans.addNotice(planId: repair.planID, kind: "stuck", text: "The team is stuck on Rerun the pipeline: Subprocess initialization did not complete within 30000ms — check authentication and network connectivity. Tell me how to proceed.", chat: true, refs: ["itemKeys": [repairKey], "runId": failedRun])
-        try raw.setMeta("supervisor.reopened.codex-saves-v1", "2026-10-20T00:00:00Z")   // that one-time repair is tested on its own below
+        try raw.setMeta("supervisor.reopened.codex-saves-v2", "2026-10-20T00:00:00Z")   // that one-time repair is tested on its own below
         try mode(repair, "auto")
         await tick(repair)
         require(try (calls(repair).last?["items"] as? [String]) == [repairKey] && (try planTask(repair, "t1"))["status"] as? String == "done", "after the update the result a run that never started marked stuck is reviewed: \(calls(repair).last?["items"] ?? "")")
@@ -504,12 +504,20 @@ import Foundation
         try db.run("INSERT OR REPLACE INTO supervisor_items(key, workspace, presented, state, last_run, updated_at) VALUES(?, ?, 3, 'stuck', ?, '2026-10-20T20:57:15Z')", [.text(savedKey), .text(w), .text(idleRun)])
         try db.run("INSERT OR REPLACE INTO supervisor_items(key, workspace, presented, state, last_run, updated_at) VALUES('stopped:legacy:1:failed', ?, 3, 'stuck', ?, '2026-10-20T20:57:15Z')", [.text(w), .text(idleRun)])
         _ = try saves.plans.addNotice(planId: saves.planID, kind: "stuck", text: "The team is stuck on Stage 1: the handoff repair confirmed a technical access blocker. Tell me how to proceed.", chat: true, refs: ["itemKeys": [savedKey], "runId": idleRun])
-        try db.run("DELETE FROM meta WHERE key = 'supervisor.reopened.codex-saves-v1'")
-        try mode(saves, "auto")
+        try db.run("DELETE FROM meta WHERE key = 'supervisor.reopened.codex-saves-v2'")
+        // Two earlier runs that also held it: with them the plan's no-progress rule would re-mark it stuck at the first new look.
+        for (n, at) in [("6F80FC78-0000-4000-8000-000000000004", "2026-10-20T20:56:51Z"), ("6F80FC78-0000-4000-8000-000000000005", "2026-10-20T20:57:00Z")] {
+            try db.run("INSERT INTO supervisor_runs(id, workspace, plan_id, items, status, output, started_at, finished_at, effective) VALUES(?, ?, ?, ?, 'applied', '{\"actions\":[]}', ?, ?, 0)",
+                       [.text(n), .text(w), .text(saves.planID), .text("[{\"key\":\"\(savedKey)\",\"kind\":\"result\"}]"), .text(at), .text(at)])
+        }
+        try mode(saves, "hold")
         let fresh = try world(base, "saves")
         fresh.planID = saves.planID; fresh.keys = saves.keys
         await tick(fresh)
         require(try (calls(fresh).last?["items"] as? [String]) == [savedKey], "after the update the stuck plan result is reviewed again: \(calls(fresh).last?["items"] ?? "")")
+        require(try ((calls(fresh).last?["notes"] as? [String])?.first ?? "").contains("buddy_copy_out_of_project"), "the supervisor is told what changed: \(calls(fresh).last?["notes"] ?? "")")
+        require(try calls(fresh).last?["askNotHold"] as? Bool == true, "and is told to ask the user for data or access only they can provide instead of holding")
+        require(try itemState(fresh, savedKey).state == "open", "a reopened item starts clean: holding it once more does not make it stuck because of runs before it was reopened: \(try itemState(fresh, savedKey))")
         require(try notices(fresh, "stuck").map { $0["status"] as? String ?? "" } == ["closed"], "its stuck notice is closed")
         require(try itemState(fresh, "stopped:legacy:1:failed").state == "stuck", "a stuck entry outside the plan is left alone")
         let savesCalls = try calls(fresh).count

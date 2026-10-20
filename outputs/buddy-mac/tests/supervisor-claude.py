@@ -38,6 +38,7 @@ for line in sys.stdin:
         'refused': [i.get('refused', '') for i in items], 'stages': [i.get('stage') for i in items], 'expected': [i.get('expected', '') for i in items],
         'addTasks': 'Each task is {key, title, assignee, kind, brief, deliverable, dependsOn}' in c['instructions'] and 'authorized stage with no tasks' in c['instructions'],
         'taskKey': 'key' in task_schema.get('properties', {}) and 'key' in task_schema.get('required', []),
+        'notes': [i.get('note', '') for i in items], 'askNotHold': 'never hold it' in c['instructions'],
     }
     with (folder / 'fixture-calls.jsonl').open('a') as f:
         f.write(json.dumps(call) + '\n')

@@ -15,13 +15,9 @@ import Foundation
     /// Whether a coding task's own provider can run it now (a continued task keeps the provider it was started on).
     static func usable(_ provider: String, choice: BuddyAIChoice, claudeKey: Bool) -> Bool { choice.enabled(provider) && (provider != "claude" || claudeKey) }
 
-    /// The worker store still accepts coding tasks only on Claude (BuddyWorkerCore.swift, outside this change), so a ChatGPT coding task is made
-    /// as a general task and becomes a coding task in the same synchronous step, before the queue can see it. The same request again returns
-    /// the task it made.
+    /// A coding task on ChatGPT. The same request again returns the task it made.
     static func create(in store: BuddyWorkerStore, workspace: String, agent: String, requestId: String, title: String, goal: String, model: String) throws -> [String: Any] {
-        let job = try store.create(workspace: workspace, agent: agent, requestId: requestId, title: title, goal: goal, kind: "general", provider: "chatgpt", budget: 0, model: model)
-        guard job["deduplicated"] == nil, job["kind"] as? String != "coding", let id = job["id"] as? String else { return job }
-        return try store.update(id, ["kind": "coding"])
+        try store.create(workspace: workspace, agent: agent, requestId: requestId, title: title, goal: goal, kind: "coding", provider: "chatgpt", budget: 0, model: model)
     }
 
     /// Buddy's coding brief for Codex: the Claude path's, with Codex's own shell and editing tools in place of Buddy's command tool.

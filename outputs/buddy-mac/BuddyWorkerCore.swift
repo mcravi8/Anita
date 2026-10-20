@@ -361,7 +361,7 @@ struct BuddyAttempt {
         guard UUID(uuidString: workspace) != nil, UUID(uuidString: agent) != nil, !requestId.isEmpty, requestId.count <= 200,
               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, title.count <= 150,
               !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, goal.count <= 30000,
-              ["research", "applications", "email", "general", "coding"].contains(kind), ["chatgpt", "claude"].contains(provider), (kind != "coding" || provider=="claude"), budget.isFinite, budget >= 0, budget <= BuddyRunLimit.none else { throw BuddyWorkerFailure(message: "Add a short task title, a clear brief, and a supported provider.") }
+              ["research", "applications", "email", "general", "coding"].contains(kind), ["chatgpt", "claude"].contains(provider), budget.isFinite, budget >= 0, budget <= BuddyRunLimit.none else { throw BuddyWorkerFailure(message: "Add a short task title, a clear brief, and a supported provider.") }
         // The same request again returns the task it already made, marked so the caller can tell (the mark is never saved).
         if let old = jobs.first(where: { $0["workspace"] as? String == workspace && $0["agentId"] as? String == agent && $0["requestId"] as? String == requestId }) { var found = old; found["deduplicated"] = true; return found }
         let heavy = liveBytes > Self.archiveSizeTrigger

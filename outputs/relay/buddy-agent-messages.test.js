@@ -25,3 +25,9 @@ test('legacy clock labels use adjacent dated records across midnight and saved u
  const out=M.mergeTimeline(s,'chief',messages,[event('before-midnight',at(17,23,59)),event('before-notice',at(18,0,9)),event('after-notice',at(18,0,11))],{notice:at(18,0,10)});
  assert.deepEqual(out.map(m=>m.id),['legacy','agent-activity-before-midnight','dated','agent-activity-before-notice','notice','agent-activity-after-notice','reply']);
 });
+test('check-ins that were cut short or dropped are not shown in the agent-message history, saved ones included',()=>{
+ const s={conversationWorkspace:'w',agents:[{id:'chief'},{id:'inbox'}]},row=(id,status,extra={})=>({id,fromAgentId:'chief',toAgentId:'inbox',question:'',body:'',status,createdAt:'2026-10-20T14:30:01Z',startedAt:'2026-10-20T14:30:01Z',...extra});
+ const stopped='This check stopped because access, settings, or its time limit changed.';
+ const rows=[row('434788FF','interrupted',{error:stopped}),row('40AB5B6B','interrupted',{error:stopped}),row('dropped','cancelled',{error:'Team settings changed before this check finished.'}),row('answered','completed',{body:'Inbox is clear.'}),row('asked','running'),row('broken','failed',{error:'The check-in returned no verified structured result.'})];
+ assert.deepEqual(M.validRows(s,{workspace:'w',messages:rows}).map(r=>r.id),['answered','asked','broken']);
+});

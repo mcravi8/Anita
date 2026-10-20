@@ -730,12 +730,12 @@ struct BuddyAttempt {
     struct DecisionSpec { let id: String, kind: String, title: String, question: String, label: String, payload: [String: Any]; var audience = "user" }
     /// The blockers a task's state implies right now, each with the identity that makes it the same blocker next time. One sign-in problem is one
     /// entry, however many places show it. Every stop is seen by someone: a stop the person made needs nobody, a stop being retried by itself needs
-    /// nobody yet, and any other stop goes to the task's supervisor if it names one, else to the person. Reviews, sign-ins, unconfirmed actions
-    /// and daily limits are always the person's.
+    /// nobody yet, and any other stop goes to the task's supervisor if it names one, else to the person. Reviews, sign-ins, unconfirmed actions,
+    /// daily limits and a provider account that needs the person (`provider.account`: a sign-in, a refused key, credit) are always the person's.
     static func desiredDecisions(_ job: [String: Any]) -> [DecisionSpec] {
         let id = job["id"] as? String ?? "", status = job["status"] as? String ?? "", attempt = job["attempt"] as? Int ?? 0, title = job["title"] as? String ?? "Background task"
         let progress = String((job["progress"] as? String ?? "").prefix(300)), cause = job["stopCause"] as? String ?? ""
-        let watcher = (job["supervisorId"] as? String ?? "").isEmpty ? "user" : "supervisor"
+        let watcher = (job["supervisorId"] as? String ?? "").isEmpty || cause == "provider.account" ? "user" : "supervisor"
         var out: [DecisionSpec] = []
         for review in job["reviews"] as? [[String: Any]] ?? [] {
             guard let reviewID = review["id"] as? String else { continue }
@@ -1087,7 +1087,8 @@ enum BuddyRoutineGoals {
         guard let rule=routines.first(where:{$0["id"] as? String==job["routineID"] as? String && $0["workspace"] as? String==job["workspace"] as? String && $0["agentId"] as? String==job["agentId"] as? String}),let owner=rule["browserAgentId"] as? String,let origin=rule["browserOrigin"] as? String else{return nil}
         return ["browserAgentId":owner,"browserOrigin":origin]
     }
-    func runNow(_ id:String,workspace:String,agent:String,requestID:String,store:BuddyWorkerStore) throws -> [String:Any] {
+    /// `supervisor` is the team's supervisor now, if there is one: a run records it like any task, so its stops reach the supervisor first.
+    func runNow(_ id:String,workspace:String,agent:String,requestID:String,store:BuddyWorkerStore,supervisor:String?=nil) throws -> [String:Any] {
         guard UUID(uuidString:requestID) != nil,let index=routines.firstIndex(where:{$0["id"] as? String==id && $0["workspace"] as? String==workspace && $0["agentId"] as? String==agent}),routines[index]["status"] as? String=="active" else{throw BuddyWorkerFailure(message:"Choose an active saved routine to run now.")}
         let rule=routines[index]
         let request="routine:manual:"+id+":"+requestID
@@ -1098,6 +1099,7 @@ enum BuddyRoutineGoals {
         let job=try store.create(workspace:workspace,agent:agent,requestId:request,title:rule["title"] as! String,goal:rule["goal"] as! String,kind:rule["kind"] as! String,provider:rule["provider"] as! String,budget:rule["provider"] as? String=="claude" ? BuddyRunLimit.none:(rule["budgetUSD"] as? Double ?? 0),model:rule["model"] as? String)
         var fields:[String:Any]=["routineID":id,"inboxQuery":rule["query"] ?? "","previousRoutineResult":prior?["result"] ?? "","manualRun":true]
         for key in ["routineSeriesID","browserAgentId","browserOrigin"] {if let value=rule[key]{fields[key]=value}}
+        if let supervisor,!supervisor.isEmpty {fields["supervisorId"]=supervisor}
         let saved=try store.update(job["id"] as! String,fields)
         let old=routines;routines[index]["lastTaskID"]=saved["id"]
         do{try persist()}catch{routines=old;throw error}
@@ -1134,7 +1136,8 @@ enum BuddyRoutineGoals {
             if !NSArray(array:original).isEqual(to:routines){try persist()}
         } catch {routines=original;throw error}
     }
-    func enqueueDue(store:BuddyWorkerStore,workspace:String,now:Date=Date()) throws {
+    /// `supervisor` is the team's supervisor now, if there is one: each run records it, as `runNow` does.
+    func enqueueDue(store:BuddyWorkerStore,workspace:String,now:Date=Date(),supervisor:String?=nil) throws {
         let original=routines
         do {
             /// The latest run of the routine's series (or of the routine): what the next run builds on, and what it must not overlap.
@@ -1163,7 +1166,9 @@ enum BuddyRoutineGoals {
                 guard let due=r["nextRun"] as? String,let date=ISO8601DateFormatter().date(from:due),date<=now else { continue }
                 let job=try store.create(workspace:workspace,agent:r["agentId"] as! String,requestId:"routine:"+id+":"+due,title:r["title"] as! String,goal:r["goal"] as! String,kind:r["kind"] as! String,provider:r["provider"] as! String,budget:r["provider"] as? String=="claude" ? BuddyRunLimit.none:(r["budgetUSD"] as? Double ?? 0),model:r["model"] as? String)
                 // Queue creation is idempotent if the process dies before saving nextRun.
-                try store.update(job["id"] as! String,["routineID":id,"inboxQuery":r["query"] as! String,"previousRoutineResult":prior?["result"] ?? "","scheduledFor":due])
+                var fields:[String:Any]=["routineID":id,"inboxQuery":r["query"] as! String,"previousRoutineResult":prior?["result"] ?? "","scheduledFor":due]
+                if let supervisor,!supervisor.isEmpty {fields["supervisorId"]=supervisor}
+                try store.update(job["id"] as! String,fields)
                 if let series {try store.update(job["id"] as! String,["routineSeriesID":series])}
                 if let owner=r["browserAgentId"] as? String,let origin=r["browserOrigin"] as? String {try store.update(job["id"] as! String,["browserAgentId":owner,"browserOrigin":origin])}
                 routines[i]["lastTaskID"]=job["id"];routines[i]["lastScheduledFor"]=due

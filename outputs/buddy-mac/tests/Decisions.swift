@@ -249,6 +249,27 @@ import Foundation
         try routed.update(supervised, ["status": "paused", "stopCause": "provider.disconnected", "progress": "Paused: Claude was disconnected."])
         got = try mine(supervised)
         require(kinds(got) == ["paused"] && got[0]["audience"] as? String == "supervisor", "and so does a pause the system made")
+        // A task that has to change before it can run is the supervisor's too; a provider account that needs the person (a sign-in, a refused key,
+        // credit) stays the person's whoever supervises.
+        let invalid = try start(routed, w, a, request: "invalid")
+        try routed.update(invalid, ["supervisorId": chief, "status": "failed", "stopCause": "task.invalid", "progress": "This OpenAI model is unavailable."])
+        got = try mine(invalid)
+        require(kinds(got) == ["stopped"] && got[0]["audience"] as? String == "supervisor", "a task that must change first goes to the supervisor: \(got)")
+        let account = try start(routed, w, a, request: "account")
+        try routed.update(account, ["supervisorId": chief, "status": "failed", "stopCause": "provider.account", "progress": "Sign in with ChatGPT, then retry this message."])
+        got = try mine(account)
+        require(kinds(got) == ["stopped"] && got[0]["audience"] as? String == "user", "a provider account that needs the person stays the person's, even with a supervisor named: \(got)")
+        // A later run of the same routine series that finishes supersedes an earlier stopped run, and that run's open entry is resolved with it,
+        // whoever it was for. (Inbox's 06:00 check, saved by the older build with no cause and no supervisor, was the person's.)
+        let earlier = try start(routed, w, a, request: "series-0600")
+        try routed.update(earlier, ["routineID": "r0600", "routineSeriesID": "inbox-series", "status": "failed", "progress": "failed to refresh installed connector runtime state: failed to refresh tools for MCP server 'codex_apps'"])
+        require(try mine(earlier).map { $0["audience"] as? String ?? "" } == ["user"], "the older build's stop is the person's: \(try mine(earlier))")
+        let later = try start(routed, w, a, request: "series-0800")
+        try routed.update(later, ["routineID": "r0800", "routineSeriesID": "inbox-series", "status": "completed", "result": "Nothing new needs attention."])
+        let settledRow = try BuddyOperationsDB(directory: audienceDirectory, existing: true).rows("SELECT status, resolution FROM decisions WHERE id = ?", [.text("stopped:\(earlier):1:failed")]).first
+        let supersededRun = try routed.job(earlier), stillOpen = try mine(earlier)
+        require(supersededRun["stopCause"] as? String == "superseded" && stillOpen.isEmpty && settledRow?[0].string == "resolved" && settledRow?[1].string == "state_changed",
+                "a later run of the series that finishes supersedes it and resolves its entry: \(supersededRun["status"] ?? "") \(settledRow.map { "\($0[0].string ?? "") \($0[1].string ?? "")" } ?? "none")")
 
         let asking = try start(routed, w, a, request: "asking")
         var checkpoint: [String: Any] = ["id": "c1", "question": "Which draft should go first?", "options": [String](), "recommendation": "The shorter one", "context": "", "routedTo": "supervisor", "at": "2026-10-19T12:00:00Z"]

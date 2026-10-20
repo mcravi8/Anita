@@ -74,9 +74,11 @@
       if(!run||!['completed','failed'].includes(run.status))continue;
       const text=String(run.text||'').split('\n')[0];add({id:`reply:${run.runId}:${run.status}`,kind:run.status==='completed'?'finished':'needs',label:run.status==='completed'?'Reply ready':'Couldn’t reply',title:text.length>90?text.slice(0,87)+'…':text||'Agent reply',description:run.status==='failed'?describe(run.error):`${a.name} has replied.`,agentId:a.id,at:run.updatedAt||run.createdAt,action:'chat',target:a.id,actionLabel:'Open chat'});
     }
+    // A check-in that was cut short (interrupted) is queued again or given up by Buddy itself: it never needs the person, and the app leaves
+    // it out of what it sends; one saved by an older build is skipped the same way.
     const latest=new Map();
-    if(team.workspace===state.conversationWorkspace)for(const c of team.checks||[])if(agents.has(c.agentId))latest.set(c.agentId+':'+c.kind,c);
-    for(const c of latest.values())if(['failed','interrupted','budget'].includes(c.status))add({id:`check:${c.id}:${c.status}`,kind:'needs',title:`${name(c.agentId)} · ${c.kind==='memory'?'Saved preferences':'Team update'}`,description:describe(c.error),agentId:c.agentId,at:c.finishedAt||c.startedAt||c.createdAt,checkId:c.id,actionLabel:c.kind==='memory'?'Review preferences':'Review update'});
+    if(team.workspace===state.conversationWorkspace)for(const c of team.checks||[])if(agents.has(c.agentId)&&c.status!=='interrupted')latest.set(c.agentId+':'+c.kind,c);
+    for(const c of latest.values())if(['failed','budget'].includes(c.status))add({id:`check:${c.id}:${c.status}`,kind:'needs',title:`${name(c.agentId)} · ${c.kind==='memory'?'Saved preferences':'Team update'}`,description:describe(c.error),agentId:c.agentId,at:c.finishedAt||c.startedAt||c.createdAt,checkId:c.id,actionLabel:c.kind==='memory'?'Review preferences':'Review update'});
     for(const p of state.teamPlans||[])if(p.status==='pending')add({id:'plan:'+p.id,kind:'needs',title:p.label||'Team suggestion',description:'Review this proposed team before adding it.',agentId:p.actorId,at:p.createdAt,planId:p.id,actionLabel:'Review team'});
     for(const p of state.proposals||[])if(p.status==='pending'&&!p.sample)add({id:'proposal:'+p.id,kind:'needs',title:p.draft?.name||'Agent suggestion',description:'Review this proposed agent before adding them.',at:p.createdAt,action:'review-proposal',target:p.id,actionLabel:'Review agent'});
     return items.filter(i=>!i.groupId||groups.has(i.groupId)).sort((a,b)=>(a.kind==='needs'?0:1)-(b.kind==='needs'?0:1)||String(b.at||'').localeCompare(String(a.at||'')));
@@ -87,7 +89,10 @@
   // Unread alerts about background work: the number on the Background work entry, which must agree with the bell and the chat badges.
   function workUnread(items){return items.filter(i=>i.unread&&(i.taskId||i.routineId||i.id.startsWith('routine-group:')||i.id.startsWith('scheduler:'))).length;}
   function unreadCounts(items){return {needs:items.filter(i=>i.kind==='needs'&&i.unread).length,finished:items.filter(i=>i.kind==='finished'&&i.unread).length};}
-  const api={collect,splitChats,describe,markRead,dismiss,unreadCounts,workUnread};root.BuddyActivity=api;if(typeof module!=='undefined')module.exports=api;if(typeof document==='undefined')return;
+  // The agents with something unread that needs the person: what the bell and each chat's badge count. An agent's "needs you" figure follows
+  // it, so an item the person has read or dismissed (here or in the app) no longer makes the figure pulse.
+  function needingAgents(items){return new Set(items.filter(i=>i.kind==='needs'&&i.unread&&i.agentId).map(i=>i.agentId));}
+  const api={collect,splitChats,describe,markRead,dismiss,unreadCounts,workUnread,needingAgents};root.BuddyActivity=api;if(typeof module!=='undefined')module.exports=api;if(typeof document==='undefined')return;
   let worker={},team={},workerError='',tab='needs';
   // Marks alerts read, unread or dismissed. The page copy changes at once; the app's copy is the shared one and answers with the full state.
   function setState(ids,patch){
@@ -116,6 +121,8 @@
     const workCount=workUnread(list);document.querySelectorAll('[data-worker-badge]').forEach(el=>{el.textContent=workCount||'';el.hidden=!workCount;});
   }
   api.paint=paint;
+  // On the page, from the live list (the same items, keys, read and dismissed state as the bell).
+  api.needingAgents=(items=all())=>needingAgents(items);
   function draw(){
     const panel=document.querySelector('[data-activity-panel]');if(!panel)return;
     const focus=document.activeElement?.dataset?.activityToggle,list=all(),count=counts(),shown=list.filter(i=>i.kind===tab);
@@ -124,7 +131,8 @@
     panel.innerHTML=`<div class="activity-tabs" role="tablist" aria-label="Notifications">${tabButton('needs','Needs you',count.needs)}${tabButton('working','Working',list.filter(i=>i.kind==='working').length)}${tabButton('finished','Finished',count.finished)}</div><div class="activity-toolbar"><p>Badges count unread updates. Reading or dismissing an alert never approves anything, and work that still needs you stays in its task.</p>${tab!=='working'&&shown.length?`<span class="activity-toolbar-actions">${shown.some(i=>i.unread)?'<button type="button" class="small-link" data-activity-read-all>Mark all as read</button>':''}<button type="button" class="small-link" data-activity-dismiss-all>Dismiss all</button></span>`:''}</div>${workerError?`<p class="field-error" role="status">Couldn’t refresh background work. Showing saved updates. <button type="button" class="small-link" data-activity-refresh>Try again</button></p>`:''}<div class="activity-list" id="activity-list" role="tabpanel" aria-labelledby="activity-${tab}">${shown.map(i=>`<section class="activity-entry ${i.unread?'unread':''}"><button type="button" class="activity-item ${i.unread?'unread':''}" data-activity-id="${esc(i.id)}" ${i.taskId?`data-worker-task="${esc(i.taskId)}"`:i.routineId?`data-worker-routine="${esc(i.routineId)}"`:i.planId?`data-team-plan="${esc(i.planId)}"`:i.checkId?`data-team-open-check="${esc(i.checkId)}"`:i.changeId?`data-change-confirm="${esc(i.changeId)}"`:i.ruleId?`data-rule-open="${esc(i.agentId||'')}"`:`data-action="${esc(i.action)}" ${i.target?`data-id="${esc(i.target)}"`:''}`}><span>${i.agentId&&findAgent(i.agentId)?avatar(i.agentId,true):i.groupId?groupAvatar(i.groupId,true):icon(i.kind==='needs'?'info':i.kind==='working'?'clock':'check')}</span><span><strong>${esc(i.title)}</strong><span class="activity-description">${esc(i.description)}</span>${i.note?`<span class="activity-note">${esc(i.note)}</span>`:''}<small>${esc(i.agentId?agentName(i.agentId):i.groupId?'Team':'Buddy')}${i.at?` · ${esc(date(i.at))}`:''}</small><span class="activity-caption ${i.kind}">${esc(i.actionLabel||(i.kind==='needs'?'Review':'View result'))}</span></span>${icon('chevron')}</button>${i.kind==='working'?'':`<div class="activity-entry-footer"><span>${i.unread?'Unread':'Read'}${!i.unread&&i.kind==='needs'?' · Still needs attention':''}</span><span class="activity-entry-actions"><button type="button" class="small-link" data-activity-toggle="${esc(i.id)}">Mark as ${i.unread?'read':'unread'}</button><button type="button" class="small-link" data-activity-dismiss="${esc(i.id)}">Dismiss</button></span></div>`}</section>`).join('')||`<div class="agent-messages-empty"><h3>${emptyText[0]}</h3><p>${emptyText[1]}</p></div>`}</div>`;
     if(focus)panel.querySelector(`[data-activity-toggle="${CSS.escape(focus)}"]`)?.focus();
   }
-  function changed(){readOpenChat();paint();draw();}
+  // Reading or dismissing an alert also settles the figures at once, rather than at the next status poll.
+  function changed(){readOpenChat();paint();draw();window.BuddyFigureModes?.sync?.(state);}
   // The page keeps its own copy of the app's answer, so marking something read here never edits what the caller handed in.
   api.acceptWorker=value=>{if(value.workspace!==state.conversationWorkspace)return;worker={...value,notifications:{...(value.notifications||{})}};workerError='';changed();};
   api.acceptTeam=value=>{if(value.workspace!==state.conversationWorkspace)return;team=value;changed();};

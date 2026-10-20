@@ -9,7 +9,13 @@ import Foundation
     private let keyReader:(String)->String?
     private var process:BuddyWorkerProcess?,gpt:ConversationService?
     private var active:[String:Any]?,runID:String?,started=Date(),providerRevision=""
-    private var scanning=false,lastScan=Date.distantPast
+    private var scanning=false,lastScan=Date.distantPast,lastTick=Date()
+    /// A check cut short by its time limit or a reconnect waits this long before it runs again, as an automatic retry does, and is queued again at
+    /// most `requeueLimit` times (internal: tests shorten the wait).
+    static var requeueDelay:TimeInterval=600
+    static let requeueLimit=3
+    /// Saved on a check that can no longer happen (its agent, the team settings or its provider changed) and was dropped without a word.
+    static let dropped="This check was dropped: its agent, the team settings or its AI provider changed. Nothing needs you."
     var lastError=""
     init(support:URL,makeClaude:(()->BuddyWorkerProcess)?=nil,makeGPT:(()->ConversationService)?=nil,keyReader:@escaping (String)->String?=BuddyClaudeKey.read)throws {
         self.support=support;store=try BuddyTeamMonitorStore(support:support);memory=try BuddyAgentMemory(support:support);self.makeClaude=makeClaude ?? {BuddyWorkerProcess()};self.makeGPT=makeGPT ?? {ConversationService(support:support)};self.keyReader=keyReader
@@ -123,16 +129,34 @@ import Foundation
     }
     func tick(state raw:[String:Any],jobs:[[String:Any]],paused:Bool,now:Date=Date()) async {
         guard !scanning else{return};scanning=true;defer{scanning=false}
+        // Time the Mac spends asleep is not time a check took: it does not count toward the three-minute limit.
+        let slept=BuddyWorkerLiveness.asleep(since:lastTick,now:now);lastTick=now
+        if slept>0 {started=BuddyWorkerLiveness.creditingSleep(started,gap:slept,now:now)}
         do {
             try memory.synchronize(raw);let state=try BuddyAgentMemory.overlay(raw,support:support),policy=try store.policy(state)
             if let active {
                 let settings=try BuddyAISettings(support:support).current(active["workspace"] as! String),provider=active["provider"] as! String
-                if paused || !valid(active,state:state,policy:policy) || !settings.enabled(provider) || settings.revision(provider) != providerRevision || (provider=="claude" && keyReader(active["workspace"] as! String)==nil) || now.timeIntervalSince(started)>180 {await stop("This check stopped because access, settings, or its time limit changed.");return}
+                // None of this is the person's business. A check that can no longer happen (its agent or the team settings changed, or the person
+                // disconnected its provider) is dropped; one cut short by a pause, a reconnect or its time limit is queued again under the current
+                // settings. A Claude key that can't be read for a moment (the Keychain locks with the Mac) does not matter to a check that has it.
+                if !valid(active,state:state,policy:policy) || !settings.enabled(provider) {await stop(Self.dropped,status:"cancelled");return}
+                if paused || settings.revision(provider) != providerRevision || now.timeIntervalSince(started)>180 {await requeue(counting:!paused,state:state,policy:policy,now:now);return}
                 return
             }
             guard !paused else{return}
             if now.timeIntervalSince(lastScan)>=10 {lastScan=now;try plan(state,jobs:jobs,policy:policy,now:now)}
-            let queued=store.checks.filter{$0["workspace"] as? String==state["conversationWorkspace"] as? String && $0["status"] as? String=="queued"}
+            let w=state["conversationWorkspace"] as? String ?? "",settings=try BuddyAISettings(support:support).current(w)
+            // A check-in or summary on a provider the person disconnected can no longer happen and is dropped without a word. One queued again
+            // waits its turn, and one on Claude waits while the key can't be read (the Keychain locks with the Mac), starting once it can.
+            var waiting=[[String:Any]]()
+            for job in store.checks where job["workspace"] as? String==w && job["status"] as? String=="queued" {
+                if job["kind"] as? String != "memory",!settings.enabled(job["provider"] as? String ?? "") {try store.update(job["id"] as! String,["status":"cancelled","error":Self.dropped]);continue}
+                if let at=(job["retryAt"] as? String).flatMap({ISO8601DateFormatter().date(from:$0)}),at>now {continue}
+                waiting.append(job)
+            }
+            func needsKey(_ j:[String:Any])->Bool {j["kind"] as? String != "memory" && j["provider"] as? String=="claude"}
+            let keyReady = !waiting.contains(where:needsKey) || keyReader(w) != nil
+            let queued=waiting.filter{!needsKey($0) || keyReady}
             func rank(_ j:[String:Any])->Int {let input=j["input"] as? [String:Any] ?? [:];return input["urgent"] as? Bool==true ? 0:j["kind"] as? String=="overview" ? 1:j["kind"] as? String=="memory" ? 2:3}
             guard let job=queued.enumerated().min(by:{rank($0.element)==rank($1.element) ? $0.offset<$1.offset:rank($0.element)<rank($1.element)})?.element else{return}
             guard valid(job,state:state,policy:policy) else{try store.update(job["id"] as! String,["status":"cancelled","error":"This agent or its saved settings changed."]);return}
@@ -165,14 +189,17 @@ import Foundation
             // A check-in that failed or was cut short (the worker restarts on every update) is tried again a little later, up to three times, instead of being
             // treated as done: the blocker it was about would otherwise never reach the person.
             let finishedAt=(prior?["finishedAt"] as? String ?? prior?["createdAt"] as? String).flatMap{ISO8601DateFormatter().date(from:$0)} ?? .distantPast
-            let retries=store.checks.filter{$0["workspace"] as? String==w && $0["agentId"] as? String==id && $0["kind"] as? String=="checkin" && $0["fingerprint"] as? String==observation["fingerprint"] as? String && ["failed","interrupted"].contains($0["status"] as? String ?? "")}.count
+            // Each time a check was queued again after being cut short counts as a retry too, so the bound holds however it was spent.
+            let retries=store.checks.filter{$0["workspace"] as? String==w && $0["agentId"] as? String==id && $0["kind"] as? String=="checkin" && $0["fingerprint"] as? String==observation["fingerprint"] as? String && ["failed","interrupted"].contains($0["status"] as? String ?? "")}.reduce(0){$0+1+($1["requeues"] as? Int ?? 0)}
             let retry=["failed","interrupted"].contains(prior?["status"] as? String ?? "") && retries<3 && now.timeIntervalSince(finishedAt)>=600
             if prior?["fingerprint"] as? String==observation["fingerprint"] as? String,prior?["status"] as? String != "cancelled",prior?["policyRevision"] as? Int==policy["revision"] as? Int,!retry {continue}
             let last=(prior?["createdAt"] as? String).flatMap{ISO8601DateFormatter().date(from:$0)} ?? .distantPast
             let interval=observation["urgent"] as? Bool==true ? 60.0:Double(policy["intervalMinutes"] as? Int ?? 15)*60
             guard now.timeIntervalSince(last)>=interval else{continue}
             var input=observation;input["agent"]=["id":id,"name":BuddyAgentMemory.privateText(a["name"] as? String ?? "Buddy")];input["requesterId"]=chief ?? "";input["priorReport"]=prior?["output"] ?? NSNull()
-            _ = try store.enqueue(kind:"checkin",workspace:w,agent:id,input:input,fingerprint:observation["fingerprint"] as! String,policy:policy,selection:oversight(a,workspace:w,policy:policy),now:now,force:retry)
+            // None is queued on a provider the person disconnected: it could not run, and would only be dropped.
+            let selection=try oversight(a,workspace:w,policy:policy);guard settings.enabled(selection.provider) else{continue}
+            _ = try store.enqueue(kind:"checkin",workspace:w,agent:id,input:input,fingerprint:observation["fingerprint"] as! String,policy:policy,selection:selection,now:now,force:retry)
         }
         if let supervisor,let chief,!store.checks.contains(where:{$0["workspace"] as? String==w && $0["kind"] as? String=="overview" && ["queued","running","budget"].contains($0["status"] as? String ?? "")}) {
             let reported=Set(store.checks.filter{$0["workspace"] as? String==w && $0["kind"] as? String=="overview" && $0["status"] as? String=="completed"}.flatMap{($0["input"] as? [String:Any])?["checkinIds"] as? [String] ?? []})
@@ -184,7 +211,8 @@ import Foundation
                 // A check-in that had nothing to say, and that nobody asked for, adds nothing to a summary and only invites it to repeat old news.
                 let chosen=Array(validResponses.filter{($0["output"] as? [String:Any])?["notify"] as? Bool==true || $0["force"] as? Bool==true}.suffix(30)),ids=chosen.compactMap{$0["id"] as? String}
                 let input:[String:Any]=["agent":["id":chief,"name":BuddyAgentMemory.privateText(supervisor["name"] as? String ?? "Buddy")],"checkinIds":ids,"reports":chosen.map{["id":$0["id"]!,"agentId":$0["agentId"]!,"name":(($0["input"] as? [String:Any])?["agent"] as? [String:Any])?["name"] ?? "Buddy","report":$0["output"] ?? [:],"checkedAt":$0["startedAt"] ?? "","sources":($0["input"] as? [String:Any])?["sources"] ?? []]},"pendingOrFailed":Self.pendingOrFailed(store.checks,workspace:w,agents:agents,now:now),"recentOutcomes":Self.recentOutcomes(jobs.filter{$0["workspace"] as? String==w},agents:agents,now:now)]
-                _ = try store.enqueue(kind:"overview",workspace:w,agent:chief,input:input,fingerprint:BuddyTeamMonitorStore.hash(ids),policy:policy,selection:oversight(supervisor,workspace:w,policy:policy),now:now)
+                let selection=try oversight(supervisor,workspace:w,policy:policy)
+                if settings.enabled(selection.provider) {_ = try store.enqueue(kind:"overview",workspace:w,agent:chief,input:input,fingerprint:BuddyTeamMonitorStore.hash(ids),policy:policy,selection:selection,now:now)}
             }
         }
     }
@@ -280,6 +308,7 @@ import Foundation
     }
     /// The check-ins a team summary may mention as failed or not answered yet: each agent's latest check-in, only while it is still open and from the last
     /// day, by ID and name. A failure that a later check-in replaced is not news; carrying it forward told the person the same failure for days.
+    /// Nor is a check-in cut short (interrupted, or queued again to wait its turn): the summary never mentions it.
     static func pendingOrFailed(_ checks:[[String:Any]],workspace:String,agents:[[String:Any]],now:Date)->[[String:Any]] {
         var names=[String:String]();for a in agents {if let id=a["id"] as? String {names[id]=a["name"] as? String ?? "An agent"}}
         var latest=[String:Int]()
@@ -287,7 +316,7 @@ import Foundation
         let formatter=ISO8601DateFormatter()
         return latest.values.sorted().compactMap{i in
             let check=checks[i],status=check["status"] as? String ?? "",at=(check["finishedAt"] ?? check["createdAt"]) as? String ?? ""
-            guard ["queued","running","failed","interrupted","budget"].contains(status),let id=check["id"] as? String,let name=names[check["agentId"] as? String ?? ""],let when=formatter.date(from:at),now.timeIntervalSince(when)<86400 else{return nil}
+            guard ["queued","running","failed","budget"].contains(status),BuddyTeamMonitorStore.shown(check),let id=check["id"] as? String,let name=names[check["agentId"] as? String ?? ""],let when=formatter.date(from:at),now.timeIntervalSince(when)<86400 else{return nil}
             return ["id":"check:"+id,"agent":BuddyAgentMemory.privateText(name),"status":status,"at":at,"error":String((check["error"] as? String ?? "").prefix(200))]
         }
     }
@@ -326,7 +355,22 @@ import Foundation
         // Native task/routine notifications remain authoritative and visible.
         var output=value;var seen=Set<String>();output["sourceIds"]=normalized.filter{seen.insert($0).inserted};return output
     }
-    private func stop(_ reason:String) async {guard let job=active else{return};active=nil;let run=runID;runID=nil;process?.close();process=nil;if let run{_ = try? await gpt?.stop(run)};gpt?.shutdown();gpt=nil;let cancelled=store.checks.first(where:{$0["id"] as? String==job["id"] as? String})?["status"] as? String=="cancelled";try? store.update(job["id"] as! String,["status":cancelled ? "cancelled":"interrupted","error":reason])}
+    /// Ends the running check's model run without saving anything about it, and returns the check.
+    private func halt() async -> [String:Any]? {guard let job=active else{return nil};active=nil;let run=runID;runID=nil;process?.close();process=nil;if let run{_ = try? await gpt?.stop(run)};gpt?.shutdown();gpt=nil;return job}
+    private func stop(_ reason:String,status:String="interrupted") async {guard let job=await halt() else{return};let cancelled=store.checks.first(where:{$0["id"] as? String==job["id"] as? String})?["status"] as? String=="cancelled";try? store.update(job["id"] as! String,["status":cancelled ? "cancelled":status,"error":reason])}
+    /// Puts the running check back in the queue under the current settings (its agent's provider and model now). A pause does not count against
+    /// it, and it runs again with the queue; a reconnect or its time limit does, and it then waits `requeueDelay` as an automatic retry does.
+    /// Past `requeueLimit` it is given up: interrupted, which no view shows and which the planner counts toward its retries, so nothing loops.
+    private func requeue(counting:Bool,state:[String:Any],policy:[String:Any],now:Date) async {
+        guard let job=active,let id=job["id"] as? String else{return}
+        let tries=(store.checks.first{$0["id"] as? String==id}?["requeues"] as? Int ?? 0)+(counting ? 1:0)
+        guard tries<=Self.requeueLimit else{await stop("This check was cut short \(tries) times and was not tried again. Nothing needs you.");return}
+        _ = await halt()
+        guard store.checks.first(where:{$0["id"] as? String==id})?["status"] as? String=="running" else{return}
+        var fields:[String:Any]=["status":"queued","requeues":tries,"error":"","retryAt":counting ? BuddyTeamMonitorStore.stamp(now.addingTimeInterval(Self.requeueDelay)):""]
+        if job["kind"] as? String != "memory",let a=(state["agents"] as? [[String:Any]])?.first(where:{$0["id"] as? String==job["agentId"] as? String}),let selection=try? oversight(a,workspace:job["workspace"] as! String,policy:policy) {fields["provider"]=selection.provider;fields["model"]=selection.model}
+        try? store.update(id,fields)
+    }
     func shutdown(){guard let job=active else{return};active=nil;runID=nil;process?.close();gpt?.shutdown();try? store.update(job["id"] as! String,["status":"interrupted","error":"The worker stopped. This check has not been repeated."])}
     static let schema:[String:Any] = ["type":"object","additionalProperties":false,"properties":["notify":["type":"boolean"],"body":["type":"string"],"detail":["type":"string"],"priority":["type":"integer"],"sourceIds":["type":"array","items":["type":"string"]]],"required":["notify","body","priority","sourceIds"]]
     static func instructions(kind:String)->String {"""

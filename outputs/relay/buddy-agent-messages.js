@@ -1,9 +1,12 @@
 (function(root){
   'use strict';
+  // A check-in that was cut short (interrupted) or dropped (cancelled) said nothing and needs nobody, so it is not part of the history; the app
+  // leaves it out, and one saved by an older build is left out here too.
+  const quiet=new Set(['interrupted','cancelled']);
   function validRows(state,payload){
     if(payload?.workspace!==state.conversationWorkspace)return [];
     const ids=new Set(state.agents.map(a=>a.id));
-    return (payload.messages||[]).filter(r=>typeof r.id==='string'&&ids.has(r.fromAgentId)&&ids.has(r.toAgentId)&&r.fromAgentId!==r.toAgentId);
+    return (payload.messages||[]).filter(r=>typeof r.id==='string'&&ids.has(r.fromAgentId)&&ids.has(r.toAgentId)&&r.fromAgentId!==r.toAgentId&&!quiet.has(r.status));
   }
   const stamp=value=>{const n=Date.parse(value||'');return Number.isFinite(n)?n:NaN;};
   function mergeTimeline(state,agent,messages,events,updateTimes={}){

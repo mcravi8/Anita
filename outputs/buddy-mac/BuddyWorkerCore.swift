@@ -333,12 +333,25 @@ enum BuddyWebStep {
         let need = point["need"] as? String ?? ""
         let head = title(need: need, page: point["url"] as? String, account: need == "signin" ? point["account"] as? String : nil, target: point["target"] as? String)
         let what = (point["instruction"] as? String).map { " " + ($0.hasSuffix(".") ? $0 : $0 + ".") } ?? ""
-        return head + "." + what + (need == "file" ? " Open the page, save it there, then press Done." : " Open the page, then press Done.")
+        let file = point["download"] as? Bool == true ? " Open the page and sign in if it asks, then press Done: Buddy downloads it there with your sign-in. Or save it there yourself, then press Done."
+            : " Open the page, save it there, then press Done."
+        return head + "." + what + (need == "file" ? file : " Open the page, then press Done.")
     }
     /// One line of plain text, up to 300 characters; nil when empty.
     static func line(_ raw: String?) -> String? {
         let text = (raw ?? "").components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
         return text.isEmpty ? nil : String(text.prefix(300))
+    }
+    /// Why a download Buddy made for a file step can't be saved there, or nil: a web page in its place (a sign-in form, a CAPTCHA), an empty
+    /// file, or for a .pdf path something that isn't a PDF. The browser checks the same before it writes anything; this is checked again here.
+    static func downloadRefusal(_ data: Data, path: String) -> String? {
+        let start = String(decoding: data.prefix(1024), as: UTF8.self)
+        if data.isEmpty { return "The website sent an empty file. Nothing was saved." }
+        if start.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FEFF}"))).range(of: #"^<(!doctype html|html|head|body)\b"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return "The website sent a web page instead of the file, most likely a sign-in page or a CAPTCHA. Nothing was saved."
+        }
+        if (path as NSString).pathExtension.lowercased() == "pdf", !start.contains("%PDF-") { return "The website sent something that is not a PDF. Nothing was saved." }
+        return nil
     }
     /// A relative, non-hidden path inside a connected folder, with the file name; nil for anything else.
     static func path(_ raw: String?) -> String? {
@@ -360,21 +373,23 @@ enum BuddyWebStep {
         let doing = need == "captcha" ? "solve the CAPTCHA" : need == "verification" ? "verify" : need == "file" ? "get the file" : "sign in"
         return "Give the exact page: url must be the https address of the public page where the user must \(doing) (for example https://publisher.example/article/123), not a site's name or a local address. Buddy opens exactly that page for them. Nothing was asked of the user yet."
     }
-    static let codingRefusal = "A coding session can't use Buddy's Chrome or anything signed in there, so a sign-in, CAPTCHA or verification done in Chrome never lets your commands through. If a site blocks a download, call buddy_checkpoint with need file, url (the exact page), folderId (a connected folder from buddy_list_folders) and path (where in that folder the user saves it, with the file name); or ask for the one fact you need from the page with buddy_request_decision. Nothing was asked of the user yet."
+    static let codingRefusal = "A coding session can't use Buddy's Chrome or anything signed in there, so a sign-in, CAPTCHA or verification done in Chrome never lets your commands through. If a site blocks a download, call buddy_checkpoint with need file, url (the file's own address, such as the PDF link, else the exact page), folderId (a connected folder from buddy_list_folders) and path (where in that folder it is saved, with the file name): when the user presses Done, Buddy downloads it there with their sign-in in Buddy's Chrome, or they save it themselves; or ask for the one fact you need from the page with buddy_request_decision. Nothing was asked of the user yet."
     static let folderRefusal = "Give folderId: a connected folder from buddy_list_folders where the user saves the file, not your own project copy (the user can't reach it). Nothing was asked of the user yet."
     static let pathRefusal = "Give path: where in that folder the user saves the file, relative and with the file name (for example stages/S01/sources/article.pdf). Nothing was asked of the user yet."
     /// The line every coding brief carries about a site that blocks a download.
-    static let codingGuidance = "A coding session can't use Buddy's Chrome or anything signed in there: a website that blocks a download (a CAPTCHA, a sign-in, a paywall) is never fixed by the user signing in, so never ask them to sign in or solve a CAPTCHA for your commands. Instead call buddy_checkpoint with need file, url (the exact page), folderId (a connected folder from buddy_list_folders, such as the project's) and path (where in that folder to save it, with the file name), then end the attempt; when you are resumed, check the file is there with buddy_list_files and bring it in with buddy_copy_into_project. If you need only one fact from that page, ask for exactly that fact with buddy_request_decision instead."
+    static let codingGuidance = "A coding session can't use Buddy's Chrome or anything signed in there: a website that blocks a download (a CAPTCHA, a sign-in, a paywall) is never fixed by the user signing in, so never ask them to sign in or solve a CAPTCHA for your commands. Instead call buddy_checkpoint with need file, url (the file's own address, such as the PDF link, else the exact page), folderId (a connected folder from buddy_list_folders, such as the project's) and path (where in that folder to save it, with the file name), then end the attempt: when the user presses Done, Buddy downloads it there with what they signed in to in Buddy's Chrome, or they save it themselves; when you are resumed, check the file is there with buddy_list_files and bring it in with buddy_copy_into_project. If you need only one fact from that page, ask for exactly that fact with buddy_request_decision instead."
     /// The note a task is resumed with after the person's Done on its step. `checked`: Buddy looked at the page again in the task's own
     /// session and it no longer asks for anything; `present`: whether Buddy sees the saved file at its path.
-    static func doneNote(_ job: [String: Any], checked: Bool, present: Bool?) -> String {
+    static func doneNote(_ job: [String: Any], checked: Bool, present: Bool?, downloaded: [String: Any]? = nil) -> String {
         let point = job["checkpoint"] as? [String: Any] ?? [:], need = point["need"] as? String ?? "", coding = job["kind"] as? String == "coding"
         let where_ = page(of: job) ?? site(of: job)
         let asked = String((point["question"] as? String ?? "").prefix(300))
         if need == "file" {
             let folder = point["folderId"] as? String ?? "", path = point["path"] as? String ?? "", target = point["target"] as? String ?? path
             let seen = present == true ? "Buddy sees a file there. " : present == false ? "Buddy doesn't see a file at that exact path yet: look in that folder with buddy_list_files for one saved under another name. " : ""
-            return "[Buddy] The user says they saved the file from \(where_ ?? "the page") as \(target) (folderId \(folder), path \(path)). " + seen
+            let how = downloaded.map { got in "[Buddy] Buddy downloaded the file from \(host(got["url"] as? String) ?? where_ ?? "the page") with what the user signed in to in Buddy's Chrome, and saved it as \(target) (folderId \(folder), path \(path); \(got["bytes"] as? Int ?? 0) bytes, sha256 \(got["sha256"] as? String ?? "")). " }
+                ?? "[Buddy] The user says they saved the file from \(where_ ?? "the page") as \(target) (folderId \(folder), path \(path)). "
+            return how + seen
                 + "Check it with buddy_list_files" + (coding ? " and bring it into the project with buddy_copy_into_project" : "") + " before using it, then continue. If it isn't there, ask again with buddy_checkpoint need file."
         }
         if coding {

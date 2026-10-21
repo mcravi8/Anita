@@ -3,9 +3,9 @@ import {lookup} from 'node:dns/promises';
 import {isIP} from 'node:net';
 import {startGuardProxy,publicAddress} from './network-guard.mjs';
 import {randomUUID, createHash} from 'node:crypto';
-import {mkdir, chmod, lstat, readlink, unlink} from 'node:fs/promises';
+import {mkdir, chmod, lstat, readlink, unlink, writeFile} from 'node:fs/promises';
 import {hostname} from 'node:os';
-import {resolve} from 'node:path';
+import {resolve, isAbsolute} from 'node:path';
 import {createInterface} from 'node:readline';
 import {pathToFileURL} from 'node:url';
 import {realpathSync} from 'node:fs';
@@ -49,6 +49,10 @@ const frame=value=>JSON.stringify(value,(key,item)=>typeof item==='string'?item.
 // in to them in Buddy's Chrome window.
 const identityProvider=host=>/(^|\.)(google|microsoft|microsoftonline|live|apple|icloud)\.com$/i.test(host);
 const OPEN_FOR_YOU='Private sign-in is open: Buddy’s private Chrome is open for you. Agents wait until you choose Done.';
+// The largest file Buddy downloads for a step: what a connected folder takes in one file.
+const DOWNLOAD_LIMIT=32*1024*1024;
+// A web page where a file was expected: a sign-in form, a CAPTCHA, an error page.
+const webPage=(type,body)=>/^(text\/html|application\/xhtml\+xml)$/.test(type)||/^\s*<(!doctype html|html|head|body)\b/i.test(body.subarray(0,512).toString('latin1').replace(/^\uFEFF/,''));
 
 // The account a task must use (the Mac app pins it from the person's own words; a model never sets it). With several Google accounts signed
 // in to the one Chrome, Google opens a page as the default account (/u/0) unless the address says otherwise, so a pinned task's Google pages
@@ -372,6 +376,35 @@ class BrowserSession {
   // form target or another page is a different request.
   async formSignature(){
     return hash(await this.page.evaluate(()=>({url:location.origin+location.pathname,title:document.title,forms:[...document.forms].map(f=>[f.getAttribute('action'),f.method,f.target]),fields:[...document.querySelectorAll('input,select,textarea,button,[role=button]')].filter(e=>e.type!=='hidden').slice(0,200).map(e=>[e.tagName,e.getAttribute('type'),e.getAttribute('name'),e.getAttribute('autocomplete'),e.getAttribute('aria-label'),(e.labels?.[0]?.textContent||'').trim().slice(0,80),e.tagName==='BUTTON'?e.textContent.trim().slice(0,80):'',e.form?[...document.forms].indexOf(e.form):-1])})));
+  }
+  /** The file a step asked the person for, fetched for them once they press Done: with the shared profile's cookies (what they signed in to
+   *  in Buddy's Chrome) and through the same network guard as every page, each redirect checked like a page and kept to a delegated
+   *  website's scope. Only the file itself is saved, to `dest` (a new `.part` file the Mac app names in the task's own folder), never over
+   *  another; a web page in its place (a sign-in form, a CAPTCHA), an error, or a file over the limit is refused and nothing is written.
+   *  `expect` 'pdf' also requires a PDF. Nothing is done on a page: the agent's page, if any, is left as it was. */
+  async download(url,dest,{expect='',maxBytes=DOWNLOAD_LIMIT}={}){
+    if(typeof dest!=='string'||!isAbsolute(dest)||!dest.endsWith('.part'))throw Error('Choose where Buddy saves the download.');
+    const limit=Math.min(Number(maxBytes)||DOWNLOAD_LIMIT,DOWNLOAD_LIMIT),{resolver,testOrigins}=this.browser;
+    let target=await publicURL(url,resolver,testOrigins);this.assertScope(target);target=this.pinURL(target,true)||target;
+    const context=await this.browser.ensureContext();
+    for(let hop=0;hop<=5;hop++){
+      const response=await context.request.get(target,{maxRedirects:0,timeout:60000,failOnStatusCode:false});
+      try{
+        const status=response.status(),headers=response.headers();
+        if(status>=300&&status<400&&headers.location){target=await publicURL(new URL(headers.location,target).href,resolver,testOrigins);this.assertScope(target);continue;}
+        if(status<200||status>=300)throw Error(`The website answered ${status} instead of the file. Nothing was saved.`);
+        const megabytes=Math.round(limit/1048576);
+        if(Number(headers['content-length']||0)>limit)throw Error(`The file is larger than ${megabytes} MB, so Buddy didn't download it.`);
+        const body=await response.body(),type=(headers['content-type']||'').split(';')[0].trim().toLowerCase();
+        if(body.length>limit)throw Error(`The file is larger than ${megabytes} MB, so Buddy didn't download it.`);
+        if(!body.length)throw Error('The website sent an empty file. Nothing was saved.');
+        if(webPage(type,body))throw Error('The website sent a web page instead of the file, most likely a sign-in page or a CAPTCHA. Nothing was saved.');
+        if(expect==='pdf'&&!body.subarray(0,1024).toString('latin1').includes('%PDF-'))throw Error('The website sent something that is not a PDF. Nothing was saved.');
+        await writeFile(dest,body,{flag:'wx',mode:0o600}).catch(error=>{throw error?.code==='EEXIST'?Error('A download is already saved there. Nothing was replaced.'):error;});
+        return {saved:true,bytes:body.length,sha256:createHash('sha256').update(body).digest('hex'),contentType:type,origin:new URL(target).origin};
+      }finally{await response.dispose().catch(()=>{});}
+    }
+    throw Error('The website redirected too many times. Nothing was saved.');
   }
   assertScope(url=this.page.url()){if(this.scope&&new URL(url).origin!==this.scope)throw Error('This shared session is available only for '+this.scope+'.');}
   // A page that never yields (a script that spins) must not block the bridge for good: after the deadline this agent's page is closed and
@@ -699,7 +732,7 @@ export class PrivateBrowser extends SharedBrowser {
 if(process.argv[1]&&import.meta.url===pathToFileURL(realpathSync(process.argv[1])).href){
   const browser=new SharedBrowser(process.argv[2]);
   const lanes=new Map();
-  const pageCommands={open:(s,r)=>s.navigate(r.url),read:s=>s.read(),prepare:(s,r)=>s.prepare(r.arguments),commit:(s,r)=>s.commit(r.token,r.upload),prepareSignIn:(s,r)=>s.prepareSignIn(r.mode),useSaved:(s,r)=>s.useSaved(r.token),verificationPlan:s=>s.verificationPlan(),verifyEmail:(s,r)=>s.verifyEmail(r.token,r.code),secretPlan:s=>s.secretPlan(),fillSecret:(s,r)=>s.fillSecret(r.token,r.value),recheck:(s,r)=>s.recheck({reload:r.reload===true,url:typeof r.url==='string'?r.url:''})};
+  const pageCommands={download:(s,r)=>s.download(r.url,r.to,{expect:typeof r.expect==='string'?r.expect:'',maxBytes:r.maxBytes}),open:(s,r)=>s.navigate(r.url),read:s=>s.read(),prepare:(s,r)=>s.prepare(r.arguments),commit:(s,r)=>s.commit(r.token,r.upload),prepareSignIn:(s,r)=>s.prepareSignIn(r.mode),useSaved:(s,r)=>s.useSaved(r.token),verificationPlan:s=>s.verificationPlan(),verifyEmail:(s,r)=>s.verifyEmail(r.token,r.code),secretPlan:s=>s.secretPlan(),fillSecret:(s,r)=>s.fillSecret(r.token,r.value),recheck:(s,r)=>s.recheck({reload:r.reload===true,url:typeof r.url==='string'?r.url:''})};
   async function answer(request){
     if(Object.hasOwn(pageCommands,request.command))return pageCommands[request.command](browser.session(request.session,request.scope??'',request.account??''),request);
     if(request.command==='manual')return browser.manual(undefined,{session:typeof request.session==='string'?request.session:undefined,url:typeof request.url==='string'?request.url:undefined,page:typeof request.page==='string'&&request.page?request.page:undefined,account:typeof request.account==='string'?request.account:undefined});

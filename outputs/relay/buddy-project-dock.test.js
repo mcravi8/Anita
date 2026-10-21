@@ -16,3 +16,18 @@ test('a folder is a project when the person connected it, or when Buddy’s own 
  assert.equal(dock.isProject({folderId:'w',name:'Buddy files',managed:true,files:[],directories:[{path:'drafts'}]}),true);
  for(const value of [null,undefined,{},{folderId:'f'},{files:[]},'folder'])assert.equal(dock.isProject(value),false);
 });
+
+test('the panel shows the plan, the files, or both as two tabs, and remembers which one the person chose',()=>{
+ assert.deepEqual(dock.sections({plan:true,files:true,tab:''}),{list:['plan','files'],shown:'plan'},'the plan first');
+ assert.deepEqual(dock.sections({plan:true,files:true,tab:'files'}),{list:['plan','files'],shown:'files'});
+ assert.deepEqual(dock.sections({plan:true,files:false,tab:'files'}),{list:['plan'],shown:'plan'},'a plan with no folder: the plan alone');
+ assert.deepEqual(dock.sections({plan:false,files:true,tab:'plan'}),{list:['files'],shown:'files'},'a folder with no plan: the files alone');
+ assert.deepEqual(dock.sections({plan:false,files:false}),{list:[],shown:''},'nothing to show, no panel');
+});
+
+test('closed or open is the person’s choice, read safely from the saved workspace',()=>{
+ assert.deepEqual(dock.preference(undefined),{closed:false,tab:''},'open by default');
+ assert.deepEqual(dock.preference({closed:true,tab:'files'}),{closed:true,tab:'files'});
+ assert.deepEqual(dock.preference({closed:'yes',tab:'<b>'}),{closed:false,tab:''},'only a real choice counts');
+ assert.deepEqual(dock.preference('closed'),{closed:false,tab:''});
+});

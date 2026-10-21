@@ -47,6 +47,16 @@
 .plan-actions p{flex:1 1 220px;margin:0;color:var(--text2);font-size:12px;line-height:1.5}
 .plan-actions .border-button{min-height:34px;padding:7px 14px;font-size:12.5px}
 .plan-strip button:disabled{opacity:.5;cursor:default}
+/* Docked in the project panel beside the chat: the same strip, always open, without its card. Its first line is the live status, and the panel
+   scrolls it as a whole. */
+.plan-strip.docked{margin:0;border:0;border-radius:0;background:transparent;overflow:visible}
+.plan-strip.docked .plan-strip-head{min-height:0;padding:0 0 4px;cursor:default;align-items:flex-start}
+.plan-strip.docked .plan-strip-head:hover{background:transparent}
+.plan-strip.docked .plan-dot{margin-top:6px}
+.plan-strip.docked .plan-banner{display:block;-webkit-line-clamp:unset;font-size:13.5px}
+.plan-strip.docked .plan-strip-body{max-height:none;overflow:visible;padding:0;border-top:0}
+.plan-strip.docked .plan-error{padding:4px 0 6px 18px}
+.plan-strip.docked .plan-objective{margin-top:12px}
 .activity-note{display:block;margin-top:5px;font-size:11.5px;line-height:1.5;color:var(--warn)}
 @media (max-width:680px){
   .plan-strip-head{min-height:44px;padding:10px 12px}

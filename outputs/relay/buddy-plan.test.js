@@ -120,3 +120,44 @@ test('chat notices arrive once, in the group or the supervisor’s chat, and nev
  assert.deepEqual(P.noticesToDeliver(JSON.parse(JSON.stringify(state)),plans),[],'including after the workspace is saved and reopened');
  assert.equal(P.noticesToDeliver({...state,messages:{}},[{...plans[0],supervisorId:'gone'}])[0].message.who,'team','with no supervisor left, the group itself speaks');
 });
+
+// A stage's deliverables: the files its tasks' background work saved, as the worker's result messages in each agent's chat carry them.
+const receipt=(path,date,extra={})=>({id:'r-'+path+date,folderId:'research',path,revision:'v-'+date,kind:'created',actor:'lyra',actorName:'Lyra',date,...extra});
+const result=(agent,workerTaskID,files,extra={})=>({id:`worker-${workerTaskID}-1-completed`,who:agent,body:'Done.',live:true,status:'completed',workerTaskID,workerStatus:'completed',files,...extra});
+function finishedPlan(){
+ return plan('holding',{state:'stage_done'},{scope:{...scope,status:'achieved'},stages:[
+  stage(1,'done',[task('t1','done',{workerTaskId:'w1'}),task('t2','done',{assignee:'forge',workerTaskId:'w2'}),task('t3','waived')]),
+  stage(2,'proposed',[task('t4','pending',{workerTaskId:'w4'})]),stage(3,'proposed')]});
+}
+const workState=()=>({agents:[{id:'chief',name:'Chief'},{id:'lyra',name:'Lyra'},{id:'forge',name:'Forge'}],groups:[{id:'team',members:['chief','lyra','forge']}],messages:{
+ team:[{id:'hello',who:'you',body:'hi'}],
+ lyra:[result('lyra','w1',[receipt('paper_draft.md','2026-10-20T10:00:00Z'),receipt('notes/sources.md','2026-10-20T10:01:00Z')])],
+ forge:[result('forge','w2',[receipt('paper_draft.md','2026-10-20T11:00:00Z',{kind:'edited',actor:'forge',actorName:'Forge'}),receipt('figures/fig1.png','2026-10-20T11:02:00Z',{actor:'forge',actorName:'Forge'})]),
+  result('forge','w4',[receipt('stage2.md','2026-10-20T12:00:00Z')],{id:'worker-w4-1-completed'}),result('forge','other',[receipt('unrelated.md','2026-10-20T12:00:00Z')],{id:'worker-other-1-completed'}),
+  {id:'chat',who:'forge',body:'Saved it.',live:true,status:'completed',files:[receipt('chat-only.md','2026-10-20T12:00:00Z')]}]}});
+
+test('a finished stage’s deliverables are the files its tasks saved: one per file, the latest save of each, newest first',()=>{
+ const state=workState(),p=finishedPlan();
+ const files=P.stageDeliverables(state,p,'s1');
+ assert.deepEqual(files.map(f=>f.path),['figures/fig1.png','paper_draft.md','notes/sources.md']);
+ assert.equal(files.find(f=>f.path==='paper_draft.md').kind,'edited','the newest save of a file wins');assert.equal(files.find(f=>f.path==='paper_draft.md').actorName,'Forge');
+ assert.deepEqual(P.stageDeliverables(state,p,2).map(f=>f.path),['stage2.md'],'by stage number too, and only that stage’s tasks');
+ assert.deepEqual(P.stageDeliverables(state,p,'s3'),[],'a stage with no tasks saved nothing');
+ assert.deepEqual(P.stageDeliverables(state,p,'missing'),[]);
+ const bad=workState();bad.messages.lyra[0].files.push({path:'no-folder.md',revision:'r'},null,{folderId:'research',path:'no-revision.md'});
+ assert.equal(P.stageDeliverables(bad,p,'s1').length,3,'a receipt without its folder or revision is not a file to open');
+});
+
+test('a stage report goes to the group chat with that stage’s files attached; other notices carry text only',()=>{
+ const state=workState(),p={...finishedPlan(),notices:[
+  {id:'a1',kind:'authorized',text:'Stage 1 authorized.',chat:true,status:'open',at:'2026-10-20T09:00:00Z'},
+  {id:'r1',kind:'stage_report',text:'Stage 1 — Research is done.\n\nNext is Stage 2 — Build.',chat:true,status:'open',at:'2026-10-20T12:30:00Z',refs:{stageId:'s1'}},
+  {id:'r2',kind:'stage_report',text:'Stage 2 — Build is done.',chat:true,status:'open',at:'2026-10-20T13:30:00Z'}]};
+ const out=P.noticesToDeliver(state,[p]);
+ assert.deepEqual(out.map(i=>i.message.id),['plan-notice-a1','plan-notice-r1','plan-notice-r2']);
+ assert.equal(out[0].message.files,undefined,'an authorization has no deliverables');
+ assert.deepEqual(out[1].message.files.map(f=>f.path),['figures/fig1.png','paper_draft.md','notes/sources.md']);
+ assert.deepEqual(out[2].message.files.map(f=>f.path),['stage2.md'],'a report without its stage reference is read by the stage it names');
+ assert.equal(out[1].message.noticeKind,'stage_report');
+ assert.deepEqual(P.noticeFiles(state,p,p.notices[1]).map(f=>f.path),['figures/fig1.png','paper_draft.md','notes/sources.md'],'the same files for a report delivered before, read when it is drawn');
+});

@@ -113,7 +113,29 @@
     return `Working on Stage ${stage?.n??1} of ${total}`;
   }
 
+  // What a stage's tasks saved: the file receipts on their background work's result messages (each task's worker task id is on the plan), one
+  // per file, the latest save of each, newest first. A receipt without its folder or revision is not a file that can be opened.
+  function stageDeliverables(state,plan,stageRef){
+    const stage=stagesOf(plan).find(s=>s.id===stageRef||Number.isFinite(Number(stageRef))&&Number(s.n)===Number(stageRef));if(!stage)return [];
+    const ids=new Set(tasksOf(stage).map(t=>t?.workerTaskId).filter(Boolean));if(!ids.size)return [];
+    const latest=new Map(),when=f=>Date.parse(f.date||'')||0;
+    for(const list of Object.values(state?.messages||{}))for(const m of Array.isArray(list)?list:[]){
+      if(!m||!ids.has(m.workerTaskID)||!Array.isArray(m.files))continue;
+      for(const f of m.files){
+        if(!f||typeof f.folderId!=='string'||!f.folderId||typeof f.path!=='string'||!f.path||typeof f.revision!=='string')continue;
+        const key=`${f.folderId}:${f.path}`,prior=latest.get(key);if(!prior||when(f)>=when(prior))latest.set(key,f);
+      }
+    }
+    return [...latest.values()].sort((a,b)=>when(b)-when(a));
+  }
+  // A stage report names its stage in its references, or, for one written without them, in its first words ("Stage 2 — Build is done").
+  function noticeFiles(state,plan,notice){
+    if(notice?.kind!=='stage_report')return [];
+    const ref=notice.refs?.stageId||Number(String(notice.text||'').match(/^\s*Stage\s+(\d+)\b/i)?.[1]);
+    return ref?stageDeliverables(state,plan,ref):[];
+  }
   // Notices the plan marks for the chat, not yet in it: each goes to the group's chat, or to the supervisor's own chat for a plan with no group.
+  // A stage report brings the files that stage's work saved, so the deliverables are in the chat without anyone asking for them.
   function noticeTarget(state,plan){
     if(plan.groupId&&(state.groups||[]).some(g=>g.id===plan.groupId))return plan.groupId;
     return plan.supervisorId&&(state.agents||[]).some(a=>a.id===plan.supervisorId)?plan.supervisorId:'';
@@ -127,7 +149,8 @@
       for(const n of Array.isArray(plan.notices)?plan.notices:[]){
         if(n?.chat!==true||!n.id||!String(n.text||'').trim())continue;
         const id='plan-notice-'+n.id;if(have.has(id))continue;have.add(id);
-        out.push({target,plan,notice:n,message:{id,who,body:String(n.text),time:clock(n.at),...(n.at?{createdAt:n.at}:{}),live:true,status:'completed',planNotice:true,planId:plan.id,noticeKind:n.kind}});
+        const files=noticeFiles(state,plan,n);
+        out.push({target,plan,notice:n,message:{id,who,body:String(n.text),time:clock(n.at),...(n.at?{createdAt:n.at}:{}),live:true,status:'completed',planNotice:true,planId:plan.id,noticeKind:n.kind,...(files.length?{files}:{})}});
       }
     }
     return out;
@@ -154,7 +177,10 @@
 
   const chevron='<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>';
   const TONE={draft:'ready',working:'working',waiting_on_supervisor:'review',needs_you:'needs',stage_done:'done',stopped:'idle',idle:'idle'};
-  function stripHTML(plan,pulse,names,{open=false,busy=false,now=Date.now(),offline=false,error=''}={}){
+  const tone=plan=>plan?TONE[runState(plan)]||'idle':'';
+  // The same strip, folded above the composer or, docked in the project panel beside the chat, always open: its first line is then the live status,
+  // not a toggle. Every button in it is the same button, handled the same way, wherever it is shown.
+  function stripHTML(plan,pulse,names,{open=false,busy=false,now=Date.now(),offline=false,error='',docked=false}={}){
     if(!plan)return '';
     const state=runState(plan),sup=nameOf(names,plan.supervisorId)||'Chief',first=firstOpen(plan),off=busy?' disabled':'';
     const choosing=!!first&&!scopeActive(plan)&&['draft','holding'].includes(plan.status),body=`plan-strip-body-${String(plan.id||'plan').replace(/[^A-Za-z0-9_-]/g,'')}`;
@@ -167,10 +193,13 @@
     };
     const through=scopeActive(plan)?Number(plan.scope.through)||0:0;
     const footer=through?`<div class="plan-actions"><p>The team works through Stage ${through}, then stops. ${esc(sup)} reports when it’s done and only asks you about sign-ins, money, anything sent in your name, or a change to the plan.</p><button type="button" class="border-button" data-plan-stop${off}>Stop</button></div>`:'';
-    return `<section class="plan-strip tone-${TONE[state]||'idle'}${open?' open':''}${offline?' offline':''}" data-plan-strip="${esc(plan.id)}" data-plan-state="${esc(state)}" aria-label="Team plan"><button type="button" class="plan-strip-head" data-plan-toggle aria-expanded="${open}" aria-controls="${body}"><span class="plan-dot" aria-hidden="true"></span><span class="plan-banner">${esc(banner(plan,pulse,names,now))}</span>${chevron}</button>${error?`<p class="plan-error" role="alert">${esc(error)}</p>`:''}<div class="plan-strip-body" id="${body}"${open?'':' hidden'}>${offline?'<p class="plan-offline">Background work is offline, so this may be out of date.</p>':''}${plan.objective?`<p class="plan-objective"><span>Objective</span>${esc(plan.objective)}</p>`:''}${state==='needs_you'?'<button type="button" class="small-link plan-needs" data-activity-open>See what needs you</button>':''}<ol class="plan-stages">${stagesOf(plan).map(stage).join('')}</ol>${footer}</div></section>`;
+    if(docked)open=true;
+    const line=`<span class="plan-dot" aria-hidden="true"></span><span class="plan-banner">${esc(banner(plan,pulse,names,now))}</span>`;
+    const head=docked?`<div class="plan-strip-head">${line}</div>`:`<button type="button" class="plan-strip-head" data-plan-toggle aria-expanded="${open}" aria-controls="${body}">${line}${chevron}</button>`;
+    return `<section class="plan-strip tone-${TONE[state]||'idle'}${open?' open':''}${docked?' docked':''}${offline?' offline':''}" data-plan-strip="${esc(plan.id)}" data-plan-state="${esc(state)}" aria-label="Team plan">${head}${error?`<p class="plan-error" role="alert">${esc(error)}</p>`:''}<div class="plan-strip-body" id="${body}"${open?'':' hidden'}>${offline?'<p class="plan-offline">Background work is offline, so this may be out of date.</p>':''}${plan.objective?`<p class="plan-objective"><span>Objective</span>${esc(plan.objective)}</p>`:''}${state==='needs_you'?'<button type="button" class="small-link plan-needs" data-activity-open>See what needs you</button>':''}<ol class="plan-stages">${stagesOf(plan).map(stage).join('')}</ol>${footer}</div></section>`;
   }
 
-  const api={planFor,stageChip,taskChip,banner,noticesToDeliver,deliverNotices,stripHTML,currentStage,replyOutcome};
+  const api={planFor,stageChip,taskChip,banner,noticesToDeliver,deliverNotices,stripHTML,currentStage,replyOutcome,tone,stageDeliverables,noticeFiles};
   root.BuddyPlan=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
 
@@ -187,16 +216,20 @@
     for(const name of ['data-plan-toggle','data-plan-authorize','data-plan-change','data-plan-stop'])if(el?.hasAttribute?.(name)){const v=el.getAttribute(name);return v?`[${name}="${CSS.escape(v)}"]`:`[${name}]`;}
     return null;
   }
-  // Same pattern as the setup offer: the strip sits at the top of the composer area and is redrawn only when what it says changes.
+  // The plan of the chat on screen, if it has one (the project panel shows it when there is room).
+  const active=()=>typeof ui!=='undefined'&&ui.view?.kind==='chat'?planFor(state,ui.view,current().plans):null;
+  // Same pattern as the setup offer: the strip sits at the top of the composer area and is redrawn only when what it says changes. While the
+  // project panel beside the chat has a place for the plan, the strip is there instead, open, and not above the composer.
   function mount(){
     const strips=[...document.querySelectorAll('.plan-strip')];
-    const wrap=typeof ui!=='undefined'&&ui.view?.kind==='chat'?document.querySelector('.composer-wrap'):null;
+    const inChat=typeof ui!=='undefined'&&ui.view?.kind==='chat',slot=inChat?document.querySelector('[data-project-plan-slot]'):null;
+    const wrap=inChat?slot||document.querySelector('.composer-wrap'):null,docked=!!slot;
     const {snapshot,plans}=current(),plan=wrap?planFor(state,ui.view,plans):null,old=strips.find(el=>el.parentElement===wrap);
     for(const el of strips)if(el!==old||!plan)el.remove();
     if(!plan)return;
     // A refusal stays on the strip until the next tap, or until the plan itself moves on.
     if(failures.has(plan.id)&&failures.get(plan.id).state!==keyOf(plan))failures.delete(plan.id);
-    const html=stripHTML(plan,root.BuddyWorkerUI?.pulse?.(),names(),{open:isOpen(plan),busy,offline:snapshot.online===false,error:failures.get(plan.id)?.message||''});
+    const html=stripHTML(plan,root.BuddyWorkerUI?.pulse?.(),names(),{open:isOpen(plan),docked,busy,offline:snapshot.online===false,error:failures.get(plan.id)?.message||''});
     if(old&&shown.get(old)===html)return;
     const chat=document.getElementById('chat-body'),bottom=!!chat&&chat.scrollHeight-chat.scrollTop-chat.clientHeight<120;
     const focus=old&&old.contains(document.activeElement)?focusKey(document.activeElement):null,scroll=old?.querySelector('.plan-strip-body')?.scrollTop||0;
@@ -240,14 +273,29 @@
   });
   root.addEventListener('buddy-view-updated',mount);
   root.addEventListener('buddy-worker-snapshot',()=>{deliver();mount();});
+  // A stage report brings its stage's files. One delivered before they were kept with it is drawn with them too, read from the plan; what was
+  // saved stays as it was. A chat is drawn again for every streamed word, so they are looked up once per status reply (each brings new plan
+  // objects, and with them any new results).
+  const looked=new WeakMap();
+  function deliverablesOf(m){
+    if(Array.isArray(m?.files)&&m.files.length)return m.files;
+    if(m?.noticeKind!=='stage_report')return [];
+    const plan=current().plans.find(p=>p?.id===m.planId),notice=(Array.isArray(plan?.notices)?plan.notices:[]).find(n=>'plan-notice-'+n?.id===m.id);
+    if(!plan||!notice)return [];
+    let known=looked.get(plan);if(!known)looked.set(plan,known=new Map());
+    if(!known.has(m.id))known.set(m.id,noticeFiles(state,plan,notice));
+    return known.get(m.id);
+  }
   // In a group, a plan notice is Chief's message: shown under Chief's name and figure, like each member's own message in the group.
   if(typeof root.messageHTML==='function'){
     const original=root.messageHTML;
     root.messageHTML=function(m){
-      const agent=m?.planNotice&&typeof findAgent==='function'?findAgent(m.who):null;
-      if(!agent||typeof findGroup!=='function'||!findGroup(ui.view?.target))return original.apply(this,arguments);
+      if(!m?.planNotice)return original.apply(this,arguments);
+      const files=deliverablesOf(m),agent=typeof findAgent==='function'?findAgent(m.who):null;
+      if(!agent||typeof findGroup!=='function'||!findGroup(ui.view?.target))return original.call(this,files.length&&!m.files?.length?{...m,files}:m);
       const author=typeof authorColor==='function'?`<button type="button" class="message-author" style="${authorColor(agent)}" data-action="agent-info" data-id="${esc(agent.id)}">${esc(agent.name)}</button>`:`<strong>${esc(agent.name)}</strong>`;
-      return `<div class="message bot-message team-chat-contribution plan-notice">${avatar(agent.id,true)}<div class="bot-bubble"><div class="team-chat-author">${author}<span>Team plan</span></div><div class="reply-markdown">${BuddyMarkdown.render(m.body)}</div><time>${esc(m.time||'')}</time></div></div>`;
+      return `<div class="message bot-message team-chat-contribution plan-notice">${avatar(agent.id,true)}<div class="bot-bubble"><div class="team-chat-author">${author}<span>Team plan</span></div><div class="reply-markdown">${BuddyMarkdown.render(m.body)}</div>${root.BuddyFiles?.cards?.(files)||''}<time>${esc(m.time||'')}</time></div></div>`;
     };
   }
+  Object.assign(api,{active,mount});
 })(typeof globalThis!=='undefined'?globalThis:this);

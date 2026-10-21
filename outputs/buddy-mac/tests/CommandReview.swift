@@ -44,6 +44,12 @@ import Foundation
             "curl -fL https://arxiv.org/pdf/2106.07040 -o a.pdf; curl -fL https://arxiv.org/abs/2106.07040 -o a.html",
         ]
         for command in lines { let v = assess(command); require(v.routine, "routine, line by line: \(command) → \(v.reason)") }
+        // Chief's real SSRN request (21 Oct 2026): an unquoted query in the address is part of the address, not a wildcard.
+        let ssrn = assess("/bin/zsh -lc 'curl -fL --connect-timeout 15 --max-time 60 -o stages/S01_protocol/attempt_02/literature/ssrn.html https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3866131'")
+        require(ssrn.routine && ssrn.hosts == ["papers.ssrn.com"], "an address with ?query is a plain download: \(ssrn.reason)")
+        for command in ["curl -fL https://arxiv.org/pdf/x -o ?.pdf", "curl -fL https://arxiv.org/pdf/x -o a.pdf && ls data?"] {
+            require(!assess(command).routine && assess(command).reason == BuddyCommandReview.unclear, "a ? outside an address is still a wildcard: \(command)")
+        }
         let three = assess(lines[1])
         require(three.reason == "3 downloads from arxiv.org and researchportal.ip-paris.fr into the project." && three.writes.count == 3, "several downloads read as one line: \(three.reason)")
         require(assess(lines[0]).reason == "A download from arxiv.org into the project.", "one download still reads as before: \(assess(lines[0]).reason)")

@@ -135,6 +135,9 @@ enum BuddyCommandReview {
                 // Codex writes several commands as lines of one script. A blank line, or a line break after `&&`, adds nothing.
                 endWord(); if !current.isEmpty { segments.append(current); current = [] }
             default:
+                // A `?` inside a web address (an unquoted query such as papers.cfm?abstract_id=1) is part of the address: no file path starts
+                // with "http", so it can't match anything as a wildcard. Anywhere else it is still refused.
+                if c == "?", word.lowercased().hasPrefix("http://") || word.lowercased().hasPrefix("https://") { word.append(c); started = true; i += 1; continue }
                 if "|<>()$`{}*?[]!~#\\^".contains(c) { return nil }
                 word.append(c); started = true
             }

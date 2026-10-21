@@ -76,7 +76,7 @@ with tempfile.TemporaryDirectory(prefix='buddy-worker-test-') as temp:
 
 with tempfile.TemporaryDirectory(prefix='buddy-worker-integration-') as temp:
  binary=Path(temp)/'buddy-worker-integration'
- names=['BuddyWorkerCore.swift','BuddyOperationsDB.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyCodexCoding.swift','BuddyPlan.swift','BuddySupervisor.swift','BuddyMigrations.swift','BuddyWorkerClient.swift','BuddyAgentMemory.swift','BuddyTeamMonitorStore.swift','BuddyTeamMonitor.swift','BuddyAISettings.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/WorkerIntegration.swift']
+ names=['BuddyWorkerCore.swift','BuddyOperationsDB.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyCodexCoding.swift','BuddyPlan.swift','BuddySupervisor.swift','BuddyMigrations.swift','BuddyWorkerClient.swift','BuddyAgentMemory.swift','BuddyTeamMonitorStore.swift','BuddyTeamMonitor.swift','BuddyAISettings.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','BuddyCredentials.swift','BuddyCommandReview.swift','tests/WorkerIntegration.swift']
  subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
  subprocess.run([str(binary),str(source/'tests/worker-server.py'),str(source/'tests/coding-claude.py'),shutil.which('python3'),str(worker/'coding-shell.mjs'),shutil.which('node'),str(worker/'test/native-worker-session.mjs'),str(source/'tests/signin-browser.py'),str(source/'tests/process-timeout.py')],check=True)
 
@@ -105,9 +105,17 @@ with tempfile.TemporaryDirectory(prefix='buddy-mail-test-') as temp:
 
 with tempfile.TemporaryDirectory(prefix='buddy-signin-integration-') as temp:
  binary=Path(temp)/'buddy-signin-integration'
- names=['BuddyWorkerCore.swift','BuddyOperationsDB.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyCodexCoding.swift','BuddyPlan.swift','BuddySupervisor.swift','BuddyMigrations.swift','BuddyWorkerClient.swift','BuddyAgentMemory.swift','BuddyTeamMonitorStore.swift','BuddyTeamMonitor.swift','BuddyAISettings.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','tests/SignInIntegration.swift']
+ names=['BuddyWorkerCore.swift','BuddyOperationsDB.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyCodexCoding.swift','BuddyPlan.swift','BuddySupervisor.swift','BuddyMigrations.swift','BuddyWorkerClient.swift','BuddyAgentMemory.swift','BuddyTeamMonitorStore.swift','BuddyTeamMonitor.swift','BuddyAISettings.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','BuddyCredentials.swift','BuddyCommandReview.swift','tests/SignInIntegration.swift']
  subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
  subprocess.run([str(binary),str(source/'tests/signin-server.py'),str(source/'tests/signin-browser.py'),shutil.which('python3')],check=True)
+
+# Service sign-ins for commands (WRDS) and the supervisor answering routine coding command reviews, through the real worker, Buddy's command
+# runner and stand-ins for Claude, Codex and the supervisor. Sign-ins are a fake account in memory; the Keychain check uses a test-only service.
+with tempfile.TemporaryDirectory(prefix='buddy-signin-command-',suffix='.noindex') as temp:
+ binary=Path(temp)/'buddy-signin-command'
+ names=['BuddyWorkerCore.swift','BuddyOperationsDB.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyCodexCoding.swift','BuddyPlan.swift','BuddySupervisor.swift','BuddyMigrations.swift','BuddyWorkerClient.swift','BuddyAgentMemory.swift','BuddyTeamMonitorStore.swift','BuddyTeamMonitor.swift','BuddyAISettings.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','BuddyCredentials.swift','BuddyCommandReview.swift','tests/SignInCommand.swift']
+ subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
+ subprocess.run([str(binary),str(source/'tests/signin-command-claude.py'),shutil.which('python3'),str(worker/'coding-shell.mjs'),shutil.which('node'),str(source/'tests/codex-coding-server.py')],check=True)
 
 with tempfile.TemporaryDirectory(prefix='buddy-inbox-review-') as temp:
  binary=Path(temp)/'inbox-tests'
@@ -188,8 +196,10 @@ for test in sorted((source/'tests').glob('*.swift')):
  m=re.match(r'//\s*run-tests:\s*(.*)$',test.read_text().split('\n',1)[0])
  if not m: continue
  part=m.group(1).split(' -- ',1); names=part[0].split(); extra=part[1].split() if len(part)>1 else []
- # The worker host's coding sessions on ChatGPT live beside it, so every header that compiles the host gets that file too.
- if 'BuddyWorkerHost.swift' in names and 'BuddyCodexCoding.swift' not in names: names.append('BuddyCodexCoding.swift')
+ # The worker host's coding sessions on ChatGPT, its saved sign-ins and its command review classifier live beside it, so every header that
+ # compiles the host gets those files too.
+ for companion in ['BuddyCodexCoding.swift','BuddyCredentials.swift','BuddyCommandReview.swift']:
+  if 'BuddyWorkerHost.swift' in names and companion not in names: names.append(companion)
  args=[str(source/a[4:]) if a.startswith('src:') else (shutil.which(a[6:]) if a.startswith('which:') else a) for a in extra]
  with tempfile.TemporaryDirectory(prefix='buddy-'+test.stem.lower()+'-',suffix='.noindex') as temp:
   binary=Path(temp)/test.stem

@@ -25,15 +25,43 @@ export function sandboxProfile(project,scratch,network=false) {
 ${network?'(allow mach-lookup (global-name "com.apple.mDNSResponder"))':''}
 ${network?'(allow network-outbound (remote ip "*:*"))\n(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))\n(allow network-inbound (local ip "localhost:*"))\n(allow network-bind (local ip "localhost:*"))':''}`;
 }
+// A command that signs in gets the person's saved sign-in as environment variables of its own process, and nothing else does: not this
+// runner, not a later command, not the shell's history (zsh -f keeps none). The values never come back: every one, as written and as it
+// appears in a web address, is replaced in the output, including where keeping the start and end of a long output cuts one in two.
+const HIDDEN='[hidden]';
+export function signInEnvironment(secrets,base){
+  if(secrets==null)return {};
+  if(typeof secrets!=='object'||Array.isArray(secrets))throw Error('Invalid sign-in for this command.');
+  const entries=Object.entries(secrets);
+  if(entries.length>4||entries.some(([key,value])=>!/^[A-Z][A-Z0-9_]{0,63}$/.test(key)||key in base||typeof value!=='string'||!value||value.length>4096||value.includes('\0')))throw Error('Invalid sign-in for this command.');
+  return Object.fromEntries(entries);
+}
+export function redact(text,values){
+  const forms=[...new Set(values.filter(v=>typeof v==='string'&&v).flatMap(v=>[v,encodeURIComponent(v)]))].sort((a,b)=>b.length-a.length);
+  let out=text;for(const form of forms)out=out.split(form).join(HIDDEN);
+  return out;
+}
+// A cut piece of output: whole values are hidden, and so is the part of one that the cut left at the end (`side` 'end') or start ('start').
+export function redactPiece(text,values,side){
+  let out=redact(text,values);
+  const forms=[...new Set(values.filter(v=>typeof v==='string'&&v).flatMap(v=>[v,encodeURIComponent(v)]))];
+  for(const form of forms)for(let k=form.length-1;k>0;k--){
+    if(side==='end'&&out.endsWith(form.slice(0,k))){out=out.slice(0,out.length-k)+HIDDEN;break;}
+    if(side==='start'&&out.startsWith(form.slice(form.length-k))){out=HIDDEN+out.slice(k);break;}
+  }
+  return out;
+}
 export class CodingShell {
   constructor(){this.child=null;this.closed=false;}
-  async run({cwd,scratch,code,network=false,timeoutSeconds=120}) {
+  async run({cwd,scratch,code,network=false,timeoutSeconds=120,secrets}) {
     if(this.closed||this.child)throw Error('The coding command runner is stopped or busy.');
     if(process.platform!=='darwin')throw Error('This coding runner requires the macOS sandbox.');
     if(typeof code!=='string'||!code.trim()||code.length>10000||code.includes('\0'))throw Error('Choose a command under 10,000 characters.');
     const project=await realpath(cwd);await mkdir(scratch,{recursive:true,mode:0o700});scratch=await realpath(scratch);
     const seconds=Math.min(300,Math.max(1,Number(timeoutSeconds)||120));
-    const env={PATH:'/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',HOME:scratch,TMPDIR:scratch,TMPPREFIX:scratch+'/zsh',LANG:'en_US.UTF-8',TERM:'dumb',CI:'1',NO_COLOR:'1',GIT_TERMINAL_PROMPT:'0',PYTHONNOUSERSITE:'1',npm_config_cache:scratch+'/npm',npm_config_userconfig:'/dev/null',PIP_CACHE_DIR:scratch+'/pip'};
+    const base={PATH:'/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',HOME:scratch,TMPDIR:scratch,TMPPREFIX:scratch+'/zsh',LANG:'en_US.UTF-8',TERM:'dumb',CI:'1',NO_COLOR:'1',GIT_TERMINAL_PROMPT:'0',PYTHONNOUSERSITE:'1',npm_config_cache:scratch+'/npm',npm_config_userconfig:'/dev/null',PIP_CACHE_DIR:scratch+'/pip'};
+    const signIn=signInEnvironment(secrets,base),hidden=Object.values(signIn);
+    const env={...base,...signIn};
     return await new Promise((resolve,reject)=>{
       const at=Date.now();let output='',tail='',truncated=false,timedOut=false,settled=false;
       const child=spawn('/usr/bin/sandbox-exec',['-p',sandboxProfile(project,scratch,network),'/bin/zsh','-f','-c',code],{cwd:project,env,detached:true,stdio:['ignore','pipe','pipe']});this.child=child;
@@ -44,7 +72,9 @@ export class CodingShell {
       child.once('error',error=>{if(settled)return;settled=true;clearTimeout(timer);this.child=null;reject(error);});
       // 'close' waits for the output pipes, which a background process started in its own session can hold open for as long as it likes.
       // So finish as soon as the shell itself has exited (after a moment for its last output), and let go of the pipes.
-      const finish=(exitCode,signal)=>{if(settled)return;settled=true;clearTimeout(timer);terminate();child.stdout.destroy();child.stderr.destroy();this.child=null;resolve({exitCode,signal,output:truncated?output.slice(0,16000)+'\n… (the middle of the output is left out) …\n'+tail:output,truncated,timedOut,durationMs:Date.now()-at,network,project});};
+      const kept=()=>!hidden.length?(truncated?output.slice(0,16000)+'\n… (the middle of the output is left out) …\n'+tail:output)
+        :truncated?redactPiece(output.slice(0,16000),hidden,'end')+'\n… (the middle of the output is left out) …\n'+redactPiece(tail,hidden,'start'):redact(output,hidden);
+      const finish=(exitCode,signal)=>{if(settled)return;settled=true;clearTimeout(timer);terminate();child.stdout.destroy();child.stderr.destroy();this.child=null;resolve({exitCode,signal,output:kept(),truncated,timedOut,durationMs:Date.now()-at,network,project});};
       child.once('close',finish);
       child.once('exit',(exitCode,signal)=>setTimeout(()=>finish(exitCode,signal),300));
     });

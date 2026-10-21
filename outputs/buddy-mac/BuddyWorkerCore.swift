@@ -742,6 +742,13 @@ struct BuddyAttempt {
             let tool = (review["tool"] as? [String: Any])?["name"] as? String ?? "an action", auth = review["kind"] as? String == "authentication"
             switch review["status"] as? String ?? "" {
             case "pending":
+                // A coding command Buddy judged routine is the team supervisor's to answer (`command_review`); the page shows it to the person
+                // only when the supervisor lane is not answering.
+                if review["route"] as? String == "supervisor", review["kind"] as? String == "coding" {
+                    out.append(DecisionSpec(id: "review:" + reviewID, kind: "command_review", title: "Review: \(tool)", question: "Allow this exact command? " + ((review["assessment"] as? [String: Any])?["reason"] as? String ?? ""),
+                                            label: "Review", payload: ["taskId": id, "reviewId": reviewID], audience: "supervisor"))
+                    continue
+                }
                 let check = review["kind"] as? String == "checkpoint", ask = ((review["questions"] as? [[String: Any]])?.first?["question"] as? String) ?? ""
                 out.append(DecisionSpec(id: "review:" + reviewID, kind: auth ? "signin" : "review", title: auth ? "Sign-in needs your choice" : check ? "Check the work: \(title)" : "Review: \(tool)",
                                         question: auth ? "Choose how to sign in to \(review["origin"] as? String ?? "this site")." : check ? (ask.isEmpty ? "Look at the work and say whether to continue." : ask) : "Allow this exact operation?", label: check ? "Check work" : "Review", payload: ["taskId": id, "reviewId": reviewID]))
@@ -752,12 +759,24 @@ struct BuddyAttempt {
             }
         }
         if status == "waiting_user" {
+            let point = job["checkpoint"] as? [String: Any]
             if cause == "review.parked" {
                 out.append(DecisionSpec(id: "waiting:\(id):\(attempt)", kind: "waiting", title: title, question: "Buddy set this aside so other work could run. Resume it when you can review the step it was waiting for.", label: "Open task", payload: ["taskId": id]))
+            } else if point?["need"] as? String == "credential", let profile = point?["profile"] as? String, !profile.isEmpty {
+                // A sign-in is always the person's. Its card opens Buddy's own sign-in box; nothing about it is ever asked in a chat.
+                let service = (point?["service"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "This service"
+                out.append(DecisionSpec(id: "credential:\(id):\(attempt):\(profile)", kind: "credential", title: "\(service) needs your sign-in", question: point?["question"] as? String ?? "Sign in to continue.",
+                                        label: "Sign in", payload: ["taskId": id, "profile": profile]))
             } else {
                 let routed = (job["checkpoint"] as? [String: Any])?["routedTo"] as? String == "supervisor" ? "supervisor" : "user"
                 out.append(DecisionSpec(id: "waiting:\(id):\(attempt)", kind: "waiting", title: title, question: progress.isEmpty ? "This task is waiting for you." : progress, label: "Open task", payload: ["taskId": id], audience: routed))
             }
+        }
+        // A command signing in with the person's saved sign-in waits for their second step (a Duo push on their phone): it is theirs while the
+        // command runs, and goes away by itself when the command ends.
+        if status == "running", let wait = job["mfaWait"] as? [String: Any], let service = wait["service"] as? String {
+            out.append(DecisionSpec(id: "mfa:\(id):\(wait["commandId"] as? String ?? "")", kind: "mfa", title: "Approve the \(service) Duo push on your phone",
+                                    question: "A command is signing in to \(service) with your saved sign-in. Approve the Duo push on your phone; this goes away when the command ends.", label: "Open task", payload: ["taskId": id]))
         }
         if status == "failed" || status == "interrupted" {
             // While the stop is being retried by itself there is nothing to decide; once the tries are used up it is a stopped task again.
@@ -780,7 +799,7 @@ struct BuddyAttempt {
         return out
     }
     /// Kinds kept equal to a task's state. `allowance` is no longer opened, but stays here so rows left from before are still resolved.
-    private static let derivedKinds = "('review', 'signin', 'waiting', 'allowance', 'stopped', 'unconfirmed', 'limit', 'paused', 'result')"
+    private static let derivedKinds = "('review', 'signin', 'waiting', 'allowance', 'stopped', 'unconfirmed', 'limit', 'paused', 'result', 'credential', 'mfa', 'command_review')"
     /// Keeps the open blockers of one task equal to what its state implies, in the transaction that saves it: new ones are opened, ones whose cause
     /// has ended are resolved, and each is an event, so a consumer can follow them.
     private static func syncDecisions(_ task: [String: Any], in db: BuddyOperationsDB) throws {

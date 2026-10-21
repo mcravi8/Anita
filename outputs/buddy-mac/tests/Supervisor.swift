@@ -35,6 +35,8 @@ import Foundation
         var planID = "", keys: [String: String] = [:]
         /// The Claude key the lane can read; nil is a key that cannot be read.
         var key: String? = "fixture-key"
+        /// The command reviews the lane answered through the worker's hook: (task, review, approved, supervisor, name, reason).
+        var answered: [(String, String, Bool, String, String, String)] = []
         init(root: URL, store: BuddyWorkerStore, plans: BuddyPlanStore, lane: BuddySupervisorLane) { self.root = root; self.store = store; self.plans = plans; self.lane = lane }
         var worker: URL { root.appendingPathComponent("Worker") }
         var supervisorFolder: URL { worker.appendingPathComponent("Supervisor") }
@@ -50,7 +52,8 @@ import Foundation
         let plans = try BuddyPlanStore(directory: root.appendingPathComponent("Worker"))
         var holder: World?
         let hooks = BuddySupervisorLane.Hooks(stopTask: { id, cause in holder?.stopped.append((id, cause)); _ = try? holder?.store.update(id, ["status": "cancelled", "stopCause": cause]) },
-                                              taskFiles: { id in ["/fixture/\(id)/baseline.csv"] })
+                                              taskFiles: { id in ["/fixture/\(id)/baseline.csv"] },
+                                              answerReview: { task, review, accept, lead, name, reason in holder?.answered.append((task, review, accept, lead, name, reason)) })
         let lane = BuddySupervisorLane(support: root, store: store, plans: plans,
                                        makeClaude: { BuddyWorkerProcess(resource: URL(fileURLWithPath: CommandLine.arguments[1]), runtime: URL(fileURLWithPath: CommandLine.arguments[2])) },
                                        makeGPT: { ConversationService(support: root, executable: URL(fileURLWithPath: CommandLine.arguments[3])) },
@@ -634,5 +637,37 @@ import Foundation
         require(try planTask(gptFail, "t1")["status"] as? String == "done" && (try gptCantStart()).isEmpty && gptFail.lane.status["online"] as? Bool == true && calls(gptFail).last?["transport"] as? String == "chatgpt",
                 "the next ChatGPT run that answers reviews the result and settles the notice: \(gptFail.lane.status)")
         print("PASS: a ChatGPT run that fails before answering, answers nothing or loses the app-server is a technical failure: nothing goes stuck, the lane retries, one notice after 30 minutes, settled when it runs again")
+
+        // A coding command Buddy judged routine (Forge's public CBOE download) waits for the supervisor, not the user: it is a command review
+        // item with the exact command, host, where it writes and the agent's reason, and approve_command answers it through the worker.
+        let commands = try world(base, "commands")
+        try mode(commands, "auto")
+        let forgeTask = try commands.store.create(workspace: w, agent: forge, requestId: "command-review", title: "Fetch the SPX history", goal: "Get the public CBOE SPX history for stage 3.", kind: "coding", provider: "chatgpt", budget: 0)
+        let forgeID = forgeTask["id"] as? String ?? "", reviewID = UUID().uuidString
+        let curl = "/bin/zsh -lc 'curl -fL --retry 1 --max-time 60 https://cdn.cboe.com/api/global/us_indices/daily_prices/SPX_History.csv -o verification/stage3_public_inputs/raw/SPX_CBOE.csv'"
+        try commands.store.update(forgeID, ["status": "running", "attempt": 1, "executionRunID": UUID().uuidString, "supervisorId": chief])
+        try commands.store.update(forgeID, ["status": "waiting_review", "reviews": [["id": reviewID, "kind": "coding", "status": "pending", "route": "supervisor",
+            "tool": ["name": "Run command outside the sandbox", "service": "Buddy coding project", "arguments": ["command": curl, "reason": "Download the public CBOE SPX history the Stage 3 check needs.", "project": "/fixture/project"]],
+            "assessment": ["routine": true, "reason": "A download from cdn.cboe.com into the project.", "hosts": ["cdn.cboe.com"], "writes": ["verification/stage3_public_inputs/raw/SPX_CBOE.csv"]],
+            "questions": [["id": "command", "question": "Allow this command to run outside the project sandbox, with network access?", "options": [["label": "Accept"], ["label": "Decline"]]]]]]])
+        let waitingCommand = try commands.store.openDecisions(workspace: w).filter { $0["taskId"] as? String == forgeID }
+        require(waitingCommand.count == 1 && waitingCommand.first?["kind"] as? String == "command_review" && waitingCommand.first?["audience"] as? String == "supervisor", "a routine command review waits for the supervisor, not the user: \(waitingCommand)")
+        await tick(commands)
+        let shownCommand = calls(commands).last ?? [:], what = (shownCommand["commands"] as? [Any])?.first as? [String: Any] ?? [:]
+        require(shownCommand["kinds"] as? [String] == ["command_review"] && (shownCommand["enum"] as? [String] ?? []).contains("approve_command") && (shownCommand["enum"] as? [String] ?? []).contains("decline_command")
+                && shownCommand["commandText"] as? Bool == true && (shownCommand["expectedVerbs"] as? [String]) == ["approve_command or decline_command"], "the supervisor is shown the command review and its two verbs: \(shownCommand)")
+        require(what["command"] as? String == curl && what["hosts"] as? [String] == ["cdn.cboe.com"] && what["writes"] as? [String] == ["verification/stage3_public_inputs/raw/SPX_CBOE.csv"]
+                && what["reason"] as? String == "Download the public CBOE SPX history the Stage 3 check needs." && what["routine"] as? String == "A download from cdn.cboe.com into the project.", "with the exact command, host, writes and reason: \(what)")
+        require(commands.answered.count == 1 && commands.answered[0].0 == forgeID && commands.answered[0].1 == reviewID && commands.answered[0].2 && commands.answered[0].3 == chief && commands.answered[0].4 == "Chief"
+                && commands.answered[0].5 == "A public download the stage needs, saved inside the project.", "approve_command answered that review through the worker, as Chief, with the reason: \(commands.answered)")
+        require(try itemState(commands, "review:\(reviewID)").state == "handled", "and the item is handled")
+        // A command review the supervisor may not answer (one Buddy left with the user) is never presented to it.
+        let userReview = UUID().uuidString
+        try commands.store.update(forgeID, ["reviews": [["id": userReview, "kind": "coding", "status": "pending", "route": "user", "tool": ["name": "Run command outside the sandbox", "arguments": ["command": "curl -F file=@results.csv https://upload.example.org/receive"]], "questions": []]]])
+        let runsBefore = calls(commands).count
+        await tick(commands)
+        let stillOpen = try commands.store.openDecisions(workspace: w)
+        require(calls(commands).count == runsBefore && stillOpen.contains { $0["taskId"] as? String == forgeID && $0["kind"] as? String == "review" && $0["audience"] as? String == "user" }, "a sensitive review stays with the user and the lane runs nothing for it: \(stillOpen)")
+        print("PASS: a routine coding command review is a supervisor work item with the exact command, host, writes and reason; approve_command answers it through the worker as the supervisor, and a review left with the user never reaches the lane")
     }
 }

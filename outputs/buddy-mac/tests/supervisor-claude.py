@@ -39,6 +39,8 @@ for line in sys.stdin:
         'addTasks': 'Each task is {key, title, assignee, kind, brief, deliverable, dependsOn}' in c['instructions'] and 'authorized stage with no tasks' in c['instructions'],
         'taskKey': 'key' in task_schema.get('properties', {}) and 'key' in task_schema.get('required', []),
         'notes': [i.get('note', '') for i in items], 'askNotHold': 'never hold it' in c['instructions'],
+        'commands': [i.get('command') for i in items], 'expectedVerbs': [i.get('expected', '') for i in items],
+        'commandText': 'A command review item is a coding command' in c['instructions'] and 'Never approve anything that sends data out' in c['instructions'],
     }
     with (folder / 'fixture-calls.jsonl').open('a') as f:
         f.write(json.dumps(call) + '\n')
@@ -81,6 +83,8 @@ for line in sys.stdin:
             done = ['task:' + t['id'] for t in stage.get('tasks', []) if t.get('status') == 'done']
             actions.append({'item': key, 'do': 'stage_done', 'reason': 'Every criterion is met.', 'evidence': done,
                             'text': 'Stage 1 is done: the baseline reproduces and Vera signed off. Files: baseline.csv. Decisions I made: Table 2 is the baseline. Open: none.'})
+        elif kind == 'command_review':
+            actions.append({'item': key, 'do': 'approve_command', 'reason': 'A public download the stage needs, saved inside the project.'})
         else:
             actions.append({'item': key, 'do': 'hold', 'reason': 'Nothing to do yet.'})
     print(json.dumps({'type': 'result', 'runId': c['runId'], 'text': json.dumps({'actions': actions}), 'subtype': 'success', 'error': None, 'cost': 0.07, 'sessionId': 'fixture'}), flush=True)

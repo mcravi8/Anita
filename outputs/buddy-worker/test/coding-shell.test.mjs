@@ -47,3 +47,25 @@ test('long command output keeps its end, where the error is, and says the middle
   assert.equal(result.truncated,true);assert.match(result.output,/HEAD-LINE/);assert.match(result.output,/TRACEBACK-AT-THE-END/,'the last lines survive');assert.match(result.output,/middle of the output is left out/);assert.ok(result.output.length<66000);
  }finally{await rm(root,{recursive:true,force:true});}
 });
+test('a saved sign-in reaches only the one command it is for, as its environment, and never comes back in the output',{skip:process.platform!=='darwin'},async()=>{
+ const {signInEnvironment,redact,redactPiece}=await import('../coding-shell.mjs');
+ const root=await mkdtemp('/tmp/buddy-coding-signin-'),shell=new CodingShell(),user='fixture-user-7Q2Z',pass='Fx!pw 93/ZK&not-real';
+ try{
+  await mkdir(root+'/project');
+  const run=(code,secrets)=>shell.run({cwd:root+'/project',scratch:root+'/scratch',code,...(secrets?{secrets}:{})});
+  let result=await run('node -e \'console.log("u="+process.env.PGUSER+" p="+process.env.PGPASSWORD+" q="+encodeURIComponent(process.env.PGPASSWORD));console.log(require("crypto").createHash("sha256").update(process.env.PGUSER+":"+process.env.PGPASSWORD).digest("hex"))\'',{PGUSER:user,PGPASSWORD:pass});
+  assert.equal(result.exitCode,0,result.output);
+  assert.match(result.output,/^u=\[hidden\] p=\[hidden\] q=\[hidden\]\n/,'the values, also as they appear in a web address, are hidden');
+  assert.ok(result.output.includes((await import('node:crypto')).createHash('sha256').update(user+':'+pass).digest('hex')),'the exact values reached the command');
+  assert.ok(!result.output.includes(user)&&!result.output.includes(pass));
+  result=await run('node -e \'console.log(String(process.env.PGUSER)+" "+String(process.env.PGPASSWORD))\'');
+  assert.equal(result.output,'undefined undefined\n','the next command has none of it');
+  // A long output keeps its start and end; a value cut in two at either cut is hidden too.
+  const long=await run('node -e \'process.stdout.write("a".repeat(15990)+process.env.PGPASSWORD+"b".repeat(60000)+process.env.PGPASSWORD.slice(0,5));process.stdout.write(process.env.PGPASSWORD.slice(5)+"c".repeat(100))\'',{PGPASSWORD:pass});
+  assert.ok(long.truncated&&!long.output.includes(pass)&&!long.output.includes(pass.slice(0,6))&&!long.output.includes(pass.slice(-6)),'no piece of it survives the cut');
+  for(const bad of [[],{path:'x'},{PATH:'/tmp'},{HOME:'/'},{PGPASSWORD:''},{PGPASSWORD:'a\0b'},{A:'1',B:'2',C:'3',D:'4',E:'5'}])assert.throws(()=>signInEnvironment(bad,{PATH:'',HOME:''}),/Invalid sign-in/,JSON.stringify(bad));
+  await assert.rejects(run('true',{PATH:'/tmp/evil'}),/Invalid sign-in/,'a sign-in can never replace the runner\'s own environment');
+  assert.equal(redact('x secret y secret',['secret']),'x [hidden] y [hidden]');
+  assert.equal(redactPiece('aaa sec',['secret'],'end'),'aaa [hidden]');assert.equal(redactPiece('ret bbb',['secret'],'start'),'[hidden] bbb');
+ }finally{shell.close();await rm(root,{recursive:true,force:true});}
+});

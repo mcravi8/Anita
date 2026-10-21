@@ -173,6 +173,7 @@ import AppKit
           exportFile: (name, content) => window.webkit.messageHandlers.buddy.postMessage({kind: 'exportFile', name, content}),
           connectionStatus: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'connectionStatus'}),
           signIn: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'signIn'}),
+          signin: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'signin', payload}),
           sendMessage: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'sendMessage', payload}),
           stopMessage: runId => window.webkit.messageHandlers.buddy.postMessage({kind: 'stopMessage', runId}),
           activeRuns: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'activeRuns'}),
@@ -383,6 +384,14 @@ import AppKit
             Task { do { replyHandler(try await conversations.setComputerAccess(enabled), nil) } catch { replyHandler(nil, error.localizedDescription) } }
         case "signIn":
             Task { do { let workspace = try workspaceContext().workspace; replyHandler(try await providerRequest(["operation": "connect", "provider": "chatgpt"], workspace: workspace), nil) } catch { replyHandler(nil, error.localizedDescription) } }
+        case "signin":
+            // A service sign-in (WRDS) typed into Buddy's own box and kept in Keychain. The reply never carries the username or password.
+            Task { do {
+                let workspace = try workspaceContext().workspace, payload = body["payload"] as? [String: Any] ?? [:]
+                if !(payload["taskId"] as? String ?? "").isEmpty { _ = try? await BuddyWorkerClient.start(support: supportURL, workspace: workspace) }
+                showWindow()
+                replyHandler(try await BuddySignInBox.handle(payload, workspace: workspace, support: supportURL), nil)
+            } catch { replyHandler(nil, error.localizedDescription) } }
         case "sendMessage":
             guard let payload = body["payload"] as? [String: Any] else { replyHandler(nil, "Invalid message."); return }
             do {

@@ -145,3 +145,16 @@ test('the agents that need the person are exactly those with an unread "needs yo
  assert.deepEqual([...A.needingAgents(A.collect(state,lane))],[],'nor one the supervisor is handling');
  assert.deepEqual([...A.needingAgents(A.collect(state,{workspace:'w',tasks:[{id:'t',agentId:'inbox',status:'completed'}],decisions:[]}))],[],'a finished result is not something that needs the person');
 });
+test('a task waiting for a sign-in is a Needs card with a Sign in action carrying only the profile; a routine command review waits for the supervisor unless the lane is offline',()=>{
+ const now=Date.parse('2026-10-20T12:00:00Z');
+ const people={...state,agents:[{id:'chief',name:'Chief'},{id:'forge',name:'Forge'}]};
+ const card={id:'credential:t1:1:wrds',kind:'credential',audience:'user',agentId:'forge',taskId:'t1',title:'WRDS needs your sign-in',question:'Sign in to WRDS so the agent can run the extract.',actionLabel:'Sign in',payload:{taskId:'t1',profile:'wrds'},createdAt:new Date(now-60000).toISOString()};
+ const duo={id:'mfa:t1:c1',kind:'mfa',audience:'user',agentId:'forge',taskId:'t1',title:'Approve the WRDS Duo push on your phone',question:'A command is signing in to WRDS.',actionLabel:'Open task',payload:{taskId:'t1'},createdAt:new Date(now-30000).toISOString()};
+ const routine={id:'review:r1',kind:'command_review',audience:'supervisor',agentId:'forge',taskId:'t2',title:'Review: Run command outside the sandbox',question:'Allow this exact command?',actionLabel:'Review',payload:{taskId:'t2',reviewId:'r1'},createdAt:new Date(now-60000).toISOString()};
+ const items=A.collect(people,{workspace:'w',tasks:[],decisions:[card,duo,routine],supervisorLane:{online:true}},{},now);
+ const signin=items.find(i=>i.id==='decision:'+card.id);
+ assert.equal(signin.kind,'needs');assert.equal(signin.title,'WRDS needs your sign-in');assert.equal(signin.actionLabel,'Sign in');assert.equal(signin.signin,'wrds');assert.equal(signin.taskId,'t1');
+ assert.equal(items.find(i=>i.id==='decision:'+duo.id).title,'Approve the WRDS Duo push on your phone','the Duo wait is a Needs item too');
+ assert.equal(items.some(i=>i.id==='decision:review:r1'),false,'Chief answers the routine command while the lane is online');
+ assert.equal(A.collect(people,{workspace:'w',tasks:[],decisions:[routine],supervisorLane:{online:false}},{},now).some(i=>i.id==='decision:review:r1'),true,'with the lane offline the person sees it');
+});

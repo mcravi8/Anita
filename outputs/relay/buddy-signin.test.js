@@ -42,7 +42,7 @@ test('answering in either chat answers both, and a request that ends closes both
  assert.ok(all(state).every(m=>m.status==='closed'&&m.result==='Sent — signed in'),'the outcome stays');
  const step=people();
  S.sync(step,snapshot([{key:'step:t2:c1',kind:'step',taskId:'t2',agentId:'bo',need:'signin',origin:'https://mail.example',instruction:'Sign in to mail.example in the Chrome window Buddy opened. When you’re finished, press Done.',chromeOpen:true}]));
- assert.equal(all(step)[0].body,'Finish signing in to mail.example.');
+ assert.equal(all(step)[0].body,'Sign in to mail.example.');
  S.sync(step,snapshot([]));
  assert.equal(all(step)[0].status,'closed');assert.equal(all(step)[0].result,'This step has ended.');
  // A field the answer says is gone is removed from the message (a step on the phone has nothing to type).
@@ -56,5 +56,28 @@ test('titles say what is asked in plain words',()=>{
  assert.equal(S.title({kind:'signin',origin:'https://shop.example',mode:'signup'}),'Create your account on shop.example');
  assert.equal(S.title({kind:'credential',service:'WRDS'}),'WRDS needs your sign-in');
  assert.equal(S.title({kind:'mfa',service:'WRDS'}),'Approve the WRDS Duo push on your phone');
- assert.equal(S.title({kind:'step',need:'captcha',origin:'https://shop.example'}),'Finish the check on shop.example');
+ assert.equal(S.title({kind:'step',need:'captcha',origin:'https://shop.example'}),'Finish the CAPTCHA on shop.example');
+});
+
+test('a step on a web page always says which site, and which account; never “the website”',()=>{
+ const article='https://iopscience.iop.org/article/10.1088/1742-5468/ac498c';
+ assert.equal(S.title({kind:'step',need:'captcha',url:article,origin:'https://iopscience.iop.org'}),'Finish the CAPTCHA on iopscience.iop.org');
+ assert.equal(S.title({kind:'step',need:'signin',url:article,account:'craviott@usc.edu'}),'Sign in to iopscience.iop.org as craviott@usc.edu','the site from the page itself, and the account');
+ assert.equal(S.title({kind:'step',need:'signin',origin:'https://mail.example'}),'Sign in to mail.example');
+ assert.equal(S.title({kind:'step',need:'verification',url:article}),'Finish verifying on iopscience.iop.org');
+ // A coding task's blocked download: the file goes into the person's connected folder.
+ assert.equal(S.title({kind:'step',need:'file',url:article,target:'Directed Research/stages/S01_protocol/sources/sethna-2022.pdf'}),'Save the PDF from iopscience.iop.org into Directed Research/stages/S01_protocol/sources');
+ assert.equal(S.title({kind:'step',need:'file',url:'https://data.example/table',target:'Project/data.csv'}),'Save the file from data.example into Project');
+ // A step saved without its page: Buddy says it doesn't know, and whom to ask.
+ assert.equal(S.title({kind:'step',need:'signin',unknownPage:true},'Chief'),'Buddy doesn’t know which page — ask Chief');
+ assert.equal(S.title({kind:'step',need:'signin',unknownPage:true}),'Buddy doesn’t know which page — ask the agent');
+ for(const r of [{kind:'step',need:'captcha'},{kind:'step',need:'signin',origin:''},{kind:'signin'}])assert.doesNotMatch(S.title(r),/the website/,JSON.stringify(r));
+ // The message keeps the page, where the file goes and whether it is a coding task.
+ const state=people();
+ S.sync(state,snapshot([{key:'step:t9:c1',kind:'step',taskId:'t9',agentId:'ada',need:'file',url:article,origin:'https://iopscience.iop.org',target:'Directed Research/a.pdf',coding:true,instruction:'Use the Download PDF button.',chromeOpen:false}]));
+ const kept=all(state).find(m=>m.chat==='ada').request;
+ assert.equal(kept.url,article);assert.equal(kept.target,'Directed Research/a.pdf');assert.equal(kept.coding,true);
+ assert.equal(all(state).find(m=>m.chat==='ada').body,'Save the PDF from iopscience.iop.org into Directed Research.');
+ S.sync(state,snapshot([{key:'step:t8:c1',kind:'step',taskId:'t8',agentId:'ada',need:'signin',unknownPage:true,origin:null}]));
+ assert.equal(all(state).find(m=>m.request.key==='step:t8:c1').body,'Buddy doesn’t know which page — ask Ada.','the agent’s name, from the workspace');
 });

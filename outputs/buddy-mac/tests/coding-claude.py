@@ -84,8 +84,15 @@ for line in sys.stdin:
             assert 'error' not in result and 'resumed with the answer' in result['instruction'],result
             emit({'type':'result','text':'Asked which data year to use; waiting for the answer.','cost':0.01,'sessionId':session})
         elif value['id']=='signin':
+            # A coding session's commands can't use Chrome: a sign-in step is refused, saying to ask for the file instead.
+            assert 'need file' in result.get('error',''),result
+            emit({'type':'call','id':'signin-folders','tool':'buddy_list_folders','arguments':{}})
+        elif value['id']=='signin-folders':
+            folder=next(f['folderId'] for f in result['folders'] if not f.get('primary') and f.get('available'))
+            emit({'type':'call','id':'signin-file','tool':'buddy_checkpoint','arguments':{'reason':'Save the fixture article PDF into the folder.','need':'file','url':'https://fixture.example/article/1','folderId':folder,'path':'sources/article.pdf'}})
+        elif value['id']=='signin-file':
             assert result['paused'] is True,result
-            emit({'type':'result','text':'Sign in to the fixture site, then I will continue.','cost':0.01,'sessionId':session})
+            emit({'type':'result','text':'Save the fixture article into the folder, then I will continue.','cost':0.01,'sessionId':session})
         else:
             if 'error' in result:
                 emit({'type':'result','text':'The native command was declined. It did not run.','cost':0.01,'sessionId':session})

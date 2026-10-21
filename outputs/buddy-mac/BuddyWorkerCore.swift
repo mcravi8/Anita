@@ -257,6 +257,137 @@ enum BuddyAccountPin {
     }
 }
 
+/// A step the person does on a web page for a task (a sign-in, a CAPTCHA, a verification: `buddy_checkpoint` need signin, captcha or
+/// verification), or a file they save from one into a connected folder (need file: a coding session's blocked download, since its commands
+/// never use Chrome or anything signed in there). A step always names its exact page (`url`), so Buddy opens that very page and every message
+/// says which site it is on; never "the website". A step saved before steps named their page uses the one page its task's own words name.
+enum BuddyWebStep {
+    /// The steps done on a page in Buddy's Chrome, and with the file step every step the person finishes with Done.
+    static let pageNeeds: Set<String> = ["signin", "captcha", "verification"]
+    static let needs: Set<String> = pageNeeds.union(["file"])
+    /// A real public https page, as given, or nil: no other scheme, no user name or password in it, and no local, private-network or bare
+    /// IP host. (The browser checks where the name really leads before it opens anything.)
+    static func page(_ raw: String?) -> String? {
+        guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty, text.count <= 2048, !text.contains(where: { $0.isWhitespace }),
+              let url = URL(string: text), url.scheme?.lowercased() == "https", url.user == nil, url.password == nil, let host = url.host?.lowercased(), host.contains("."),
+              host != "localhost", !host.hasSuffix(".localhost"), !host.hasSuffix(".local"), !host.hasSuffix(".internal"), !host.contains(":"),
+              host.range(of: #"^[0-9.]+$"#, options: .regularExpression) == nil else { return nil }
+        return url.absoluteString
+    }
+    static func origin(_ page: String?) -> String? {
+        guard let page, let parts = URLComponents(string: page), let scheme = parts.scheme, let host = parts.host, !host.isEmpty else { return nil }
+        return scheme + "://" + host + (parts.port.map { ":\($0)" } ?? "")
+    }
+    static func host(_ page: String?) -> String? { page.flatMap { URL(string: $0)?.host }.flatMap { $0.isEmpty ? nil : $0 } }
+    /// The one https page a task's own words name (its result, progress and question), for a step saved before steps named their page; nil
+    /// when they name none, or more than one.
+    static func namedPage(in texts: [String]) -> String? {
+        guard let pattern = try? NSRegularExpression(pattern: #"https://[^\s<>"'()\[\]{}]+"#, options: [.caseInsensitive]) else { return nil }
+        var found: [String] = []
+        for text in texts {
+            for m in pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                guard let r = Range(m.range, in: text) else { continue }
+                var candidate = String(text[r])
+                while let last = candidate.last, ".,;:!?…’”".contains(last) { candidate.removeLast() }
+                if let page = page(candidate), !found.contains(page) { found.append(page) }
+            }
+        }
+        return found.count == 1 ? found[0] : nil
+    }
+    /// The page a waiting step is on: the one it names; for a step saved before steps named their page and without a site of its own, the one
+    /// page its task's own words name. nil when Buddy doesn't know (a step that knows only its site opens at its task's own page, or the site).
+    static func page(of job: [String: Any]) -> String? {
+        let point = job["checkpoint"] as? [String: Any] ?? [:]
+        if let named = page(point["url"] as? String) { return named }
+        guard needs.contains(point["need"] as? String ?? ""), site(of: job) == nil else { return nil }
+        return namedPage(in: [job["result"], job["progress"], point["question"]].compactMap { $0 as? String })
+    }
+    /// The site a step was saved with (the page's origin, or for a sign-in the agent's page asked for, that website).
+    static func site(of job: [String: Any]) -> String? {
+        let point = job["checkpoint"] as? [String: Any] ?? [:]
+        return [point["origin"], job["signInOrigin"]].compactMap { $0 as? String }.first { !$0.isEmpty }
+    }
+    /// What is asked, in a few words: "Finish the CAPTCHA on iopscience.iop.org", "Sign in to mail.google.com as craviott@usc.edu", "Save the
+    /// PDF from iopscience.iop.org into Directed Research/stages/S01_protocol/sources".
+    static func title(need: String, page: String?, account: String?, target: String?) -> String {
+        guard let site = host(page) else { return "Buddy doesn’t know which page this step is on" }
+        switch need {
+        case "captcha": return "Finish the CAPTCHA on \(site)"
+        case "verification": return "Finish verifying on \(site)"
+        case "file": return "Save \(what(target)) from \(site)" + (folder(of: target).map { " into \($0)" } ?? "")
+        default: return "Sign in to \(site)" + (account.map { " as \($0)" } ?? "")
+        }
+    }
+    static func title(of job: [String: Any]) -> String {
+        let point = job["checkpoint"] as? [String: Any] ?? [:], need = point["need"] as? String ?? ""
+        return title(need: need, page: page(of: job) ?? site(of: job), account: need == "signin" ? point["account"] as? String : nil, target: point["target"] as? String)
+    }
+    static func what(_ target: String?) -> String { (target ?? "").lowercased().hasSuffix(".pdf") ? "the PDF" : "the file" }
+    /// The folder part of where a file goes ("Directed Research/stages/S01_protocol/sources" for ".../sources/sethna-2022.pdf").
+    static func folder(of target: String?) -> String? {
+        guard let target, let slash = target.lastIndex(of: "/") else { return target }
+        return String(target[..<slash])
+    }
+    /// The question a step is saved with, which is also the task's progress line.
+    static func question(_ point: [String: Any]) -> String {
+        let need = point["need"] as? String ?? ""
+        let head = title(need: need, page: point["url"] as? String, account: need == "signin" ? point["account"] as? String : nil, target: point["target"] as? String)
+        let what = (point["instruction"] as? String).map { " " + ($0.hasSuffix(".") ? $0 : $0 + ".") } ?? ""
+        return head + "." + what + (need == "file" ? " Open the page, save it there, then press Done." : " Open the page, then press Done.")
+    }
+    /// One line of plain text, up to 300 characters; nil when empty.
+    static func line(_ raw: String?) -> String? {
+        let text = (raw ?? "").components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        return text.isEmpty ? nil : String(text.prefix(300))
+    }
+    /// A relative, non-hidden path inside a connected folder, with the file name; nil for anything else.
+    static func path(_ raw: String?) -> String? {
+        guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty, text.count <= 1000, !text.hasPrefix("/"), !text.contains("\\"), !text.contains(":"), !text.contains("\0") else { return nil }
+        let parts = text.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count <= 12, parts.allSatisfy({ !$0.isEmpty && !$0.hasPrefix(".") && $0.count <= 255 && $0 == $0.trimmingCharacters(in: .whitespacesAndNewlines) }) else { return nil }
+        return text
+    }
+    /// What the chat says to do: the agent's one line, else the saved question, naming the site where an older one said "the website".
+    static func instruction(of job: [String: Any]) -> String {
+        let point = job["checkpoint"] as? [String: Any] ?? [:]
+        let text = (point["instruction"] as? String) ?? (point["question"] as? String) ?? ""
+        return text.replacingOccurrences(of: "the website", with: host(page(of: job) ?? site(of: job)) ?? "a website")
+    }
+
+    // MARK: what the agent is told
+
+    static func pageRefusal(_ need: String) -> String {
+        let doing = need == "captcha" ? "solve the CAPTCHA" : need == "verification" ? "verify" : need == "file" ? "get the file" : "sign in"
+        return "Give the exact page: url must be the https address of the public page where the user must \(doing) (for example https://publisher.example/article/123), not a site's name or a local address. Buddy opens exactly that page for them. Nothing was asked of the user yet."
+    }
+    static let codingRefusal = "A coding session can't use Buddy's Chrome or anything signed in there, so a sign-in, CAPTCHA or verification done in Chrome never lets your commands through. If a site blocks a download, call buddy_checkpoint with need file, url (the exact page), folderId (a connected folder from buddy_list_folders) and path (where in that folder the user saves it, with the file name); or ask for the one fact you need from the page with buddy_request_decision. Nothing was asked of the user yet."
+    static let folderRefusal = "Give folderId: a connected folder from buddy_list_folders where the user saves the file, not your own project copy (the user can't reach it). Nothing was asked of the user yet."
+    static let pathRefusal = "Give path: where in that folder the user saves the file, relative and with the file name (for example stages/S01/sources/article.pdf). Nothing was asked of the user yet."
+    /// The line every coding brief carries about a site that blocks a download.
+    static let codingGuidance = "A coding session can't use Buddy's Chrome or anything signed in there: a website that blocks a download (a CAPTCHA, a sign-in, a paywall) is never fixed by the user signing in, so never ask them to sign in or solve a CAPTCHA for your commands. Instead call buddy_checkpoint with need file, url (the exact page), folderId (a connected folder from buddy_list_folders, such as the project's) and path (where in that folder to save it, with the file name), then end the attempt; when you are resumed, check the file is there with buddy_list_files and bring it in with buddy_copy_into_project. If you need only one fact from that page, ask for exactly that fact with buddy_request_decision instead."
+    /// The note a task is resumed with after the person's Done on its step. `checked`: Buddy looked at the page again in the task's own
+    /// session and it no longer asks for anything; `present`: whether Buddy sees the saved file at its path.
+    static func doneNote(_ job: [String: Any], checked: Bool, present: Bool?) -> String {
+        let point = job["checkpoint"] as? [String: Any] ?? [:], need = point["need"] as? String ?? "", coding = job["kind"] as? String == "coding"
+        let where_ = page(of: job) ?? site(of: job)
+        let asked = String((point["question"] as? String ?? "").prefix(300))
+        if need == "file" {
+            let folder = point["folderId"] as? String ?? "", path = point["path"] as? String ?? "", target = point["target"] as? String ?? path
+            let seen = present == true ? "Buddy sees a file there. " : present == false ? "Buddy doesn't see a file at that exact path yet: look in that folder with buddy_list_files for one saved under another name. " : ""
+            return "[Buddy] The user says they saved the file from \(where_ ?? "the page") as \(target) (folderId \(folder), path \(path)). " + seen
+                + "Check it with buddy_list_files" + (coding ? " and bring it into the project with buddy_copy_into_project" : "") + " before using it, then continue. If it isn't there, ask again with buddy_checkpoint need file."
+        }
+        if coding {
+            return "[Buddy] The user says they finished the step on \(where_ ?? "the website they were asked about"): \(asked) Your coding session's commands can't use what is signed in to Buddy's Chrome, so don't retry the blocked download as it was. If you still need something from that page, ask the user to save it into a connected folder with buddy_checkpoint need file (url, folderId, path), or ask for the one fact you need with buddy_request_decision."
+        }
+        if checked {
+            return need == "signin" ? "[Buddy] The user finished the sign-in step in Buddy’s Chrome window, and Buddy checked that \(site(of: job) ?? where_ ?? "the website") is signed in. Reopen \(where_ ?? "the website") and continue."
+                : "[Buddy] The user finished the step on \(where_ ?? "the website") in Buddy’s Chrome window, and Buddy checked that the page no longer asks for anything. Reopen it and continue."
+        }
+        return "[Buddy] The user says they finished the step they were asked to do" + (where_.map { " on \($0)" } ?? "") + ": \(asked) Reopen " + (where_ ?? "the website") + " and check its actual state before continuing."
+    }
+}
+
 enum BuddyWorkerWire {
     static let maximumBytes = 8 * 1024 * 1024
     static func directory(_ support: URL) -> URL {
@@ -911,11 +1042,11 @@ struct BuddyAttempt {
                 let service = (point?["service"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "This service"
                 out.append(DecisionSpec(id: "credential:\(id):\(attempt):\(profile)", kind: "credential", title: "\(service) needs your sign-in", question: point?["question"] as? String ?? "Sign in to continue.",
                                         label: "Sign in", payload: ["taskId": id, "profile": profile]))
-            } else if let need = point?["need"] as? String, ["signin", "captcha", "verification"].contains(need) {
-                // A step only the person can do, outside the chat (in Buddy's Chrome window, or on their phone): its chat message has a Done button.
-                let site = ((point?["origin"] as? String) ?? (job["signInOrigin"] as? String)).flatMap { URL(string: $0)?.host }
-                out.append(DecisionSpec(id: "step:\(id):\(attempt):\(point?["id"] as? String ?? "")", kind: "step", title: site.map { "Finish signing in to \($0)" } ?? "Finish this step yourself",
-                                        question: point?["question"] as? String ?? (progress.isEmpty ? "Finish the step, then press Done." : progress), label: "Done", payload: ["taskId": id, "need": need]))
+            } else if let need = point?["need"] as? String, BuddyWebStep.needs.contains(need) {
+                // A step only the person can do, outside the chat (on a web page in Buddy's Chrome window, or a file saved from one): its chat
+                // message has Open the page and Done. Its title says the site, never "the website".
+                out.append(DecisionSpec(id: "step:\(id):\(attempt):\(point?["id"] as? String ?? "")", kind: "step", title: BuddyWebStep.title(of: job),
+                                        question: BuddyWebStep.instruction(of: job).isEmpty ? (progress.isEmpty ? "Finish the step, then press Done." : progress) : BuddyWebStep.instruction(of: job), label: "Done", payload: ["taskId": id, "need": need]))
             } else {
                 let routed = (job["checkpoint"] as? [String: Any])?["routedTo"] as? String == "supervisor" ? "supervisor" : "user"
                 out.append(DecisionSpec(id: "waiting:\(id):\(attempt)", kind: "waiting", title: title, question: progress.isEmpty ? "This task is waiting for you." : progress, label: "Open task", payload: ["taskId": id], audience: routed))
@@ -962,6 +1093,10 @@ struct BuddyAttempt {
         }
         // The same blocker whose audience has changed (a supervisor was named, a question was routed) moves in place.
         for (id, spec) in desired { if let current = open[id], current != spec.audience { try db.run("UPDATE decisions SET audience = ? WHERE id = ?", [.text(spec.audience), .text(id)]) } }
+        // A step's words follow what it says now (one saved before steps named their page says its site once Buddy finds the page).
+        for (id, spec) in desired where open[id] != nil && spec.kind == "step" {
+            try db.run("UPDATE decisions SET title = ?, question = ? WHERE id = ? AND (title != ? OR question != ?)", [.text(spec.title), .text(spec.question), .text(id), .text(spec.title), .text(spec.question)])
+        }
         for id in open.keys where desired[id] == nil {
             try db.run("UPDATE decisions SET status = 'resolved', resolution = 'state_changed', resolved_at = ? WHERE id = ?", [.text(stamp()), .text(id)])
             try appendEvent("decision.resolved", task: task, attempt: task["attempt"] as? Int, cause: "state_changed", payload: ["id": id], in: db)

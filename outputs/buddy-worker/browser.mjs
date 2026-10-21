@@ -206,17 +206,32 @@ export class SharedBrowser {
       await route.abort('blockedbyclient').catch(()=>{});
     }
   }
+  /** The exact page of a step the person does in their Chrome window: a public https page (or a test origin), and on Google's own sites
+   *  with the task's account named in the address (authuser), so Google doesn't open it as the default account. Google's sign-in and
+   *  account-choice pages are left as they are. */
+  async stepPage(raw,account){
+    const pin=pinnedAccount(account);
+    let u;try{u=new URL(raw);}catch{throw Error('Buddy opens only public https pages for a step. Nothing was opened.');}
+    if(u.protocol!=='https:'&&!this.isTestOrigin(u.origin))throw Error('Buddy opens only public https pages for a step. Nothing was opened.');
+    u=new URL(await publicURL(u.href,this.resolver,this.testOrigins));
+    if(pin&&this.isGoogle(u)&&!this.identityPage(u)){u.pathname=u.pathname.replace(NUMBERED,'')||'/';u.searchParams.set('authuser',pin);}
+    return u.href;
+  }
   /** The person's own Chrome window on the shared profile, for setting up accounts or finishing a step an agent cannot do. It has no agent
    *  connection, so the agents' Chrome closes first: never while another agent has a page open. `session` is the agent asking (it is
-   *  pausing for this), `url` where to open (otherwise its page). */
-  async manual(destination,{session:requester,url:target}={}){
+   *  pausing for this), `url` where to open (otherwise its page). `page` is a step's own exact page (with `account`, the one to use on it):
+   *  the window opens at that page and nothing else; a step with no page at all opens nothing, never a blank window. Asked again while the
+   *  window is open, the page is shown again in it, in a new window in front. */
+  async manual(destination,{session:requester,url:target,page:step,account}={}){
     const existing=this.manualOpen();
-    if(existing&&destination!=='google')return {opened:true,private:true};
+    const exact=step?await this.stepPage(step,account):null;
+    if(existing&&destination!=='google'){if(exact)await this.forward(exact);return {opened:true,private:true};}
     if(!existing&&[...this.sessions.values()].some(s=>s.id!==requester&&s.page&&!s.page.isClosed()))throw Error('Another agent is using Buddy’s browser right now. Try again when it has finished, or pause that task.');
     const owner=requester?this.sessions.get(requester):null;
     // An agent's step opens at its page (or, once that has closed, where it was told to); setup opens where the person last was.
     const own=owner?.page&&!owner.page.isClosed()?owner.page.url():owner?.lastURL;
-    let url=destination==='google'?'chrome://settings/people':(requester?own||target:target||this.lastURL)||'about:blank';
+    let url=destination==='google'?'chrome://settings/people':exact||(requester?own||target:target||this.lastURL)||'about:blank';
+    if(requester&&url==='about:blank')throw Error('Buddy doesn’t know which page this step is on, so nothing was opened.');
     if(!['about:blank','chrome://settings/people'].includes(url))url=await publicURL(url,this.resolver,this.testOrigins);
     // From here until the window is open no agent page may start: an agent connection must never join the person's window.
     const handing=!existing;if(handing)this.handingOff=true;
@@ -224,14 +239,24 @@ export class SharedBrowser {
       if(!existing)this.lastURL=url;await this.closeAutomation();await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);
       // The person's window must never open inside a Chrome an agent connection still drives (it would join that Chrome).
       const holder=await this.profileLock();if(holder&&await this.automated(holder))throw Error('Buddy’s browser is still closing. Try again in a moment.');
-      // No debugging connection, automation flags, page scripts, screenshots, or password reads during the handoff.
-      const child=spawn(this.manualExecutable,[`--user-data-dir=${this.profile}`,'--no-first-run','--no-default-browser-check','--disable-background-mode','--new-window',url],{stdio:'ignore'});
+      // No debugging connection, automation flags, page scripts, screenshots, or password reads during the handoff. The page opens as the
+      // only page Buddy asks for, in a new window; if Chrome restores the person's earlier tabs as it starts, it adds this page to the
+      // window it restores last and brings that window to the front with this page showing. Its "Restore pages?" bubble is not shown.
+      const child=spawn(this.manualExecutable,[`--user-data-dir=${this.profile}`,'--no-first-run','--no-default-browser-check','--disable-background-mode','--hide-crash-restore-bubble','--new-window',url],{stdio:'ignore'});
       await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('Could not open private Chrome. Install Google Chrome and try again.')));});
       await new Promise(resolve=>{const timer=setTimeout(resolve,350);child.once('exit',()=>{clearTimeout(timer);resolve();});});
       if((child.exitCode!==null||child.signalCode!==null)&&!await this.profileLock())throw Error('Chrome did not open. Your saved browser data was kept; try opening Chrome again.');
       if(!existing)this.manualProcess=child;
     }finally{if(handing)this.handingOff=false;}
     return {opened:true,private:true};
+  }
+  /** Shows `url` in the person's Chrome window that is already open: Chrome started again on the same profile hands the page to the running
+   *  one, which opens it in a new window in front, and exits. */
+  async forward(url){
+    const child=spawn(this.manualExecutable,[`--user-data-dir=${this.profile}`,'--no-first-run','--no-default-browser-check','--disable-background-mode','--new-window',url],{stdio:'ignore'});
+    await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('Could not open the page in Chrome. Try again.')));});
+    await new Promise(resolve=>{const timer=setTimeout(resolve,5000);timer.unref();child.once('exit',()=>{clearTimeout(timer);resolve();});});
+    child.unref();
   }
   async finishManual(){const p=this.manualProcess;if(p&&p.exitCode===null&&p.signalCode===null){p.kill('SIGTERM');await Promise.race([new Promise(resolve=>p.once('exit',resolve)),new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error('Close Buddy’s private Chrome window before finishing sign-in.')),8000);t.unref();})]);}this.manualProcess=null;await this.closeManualProfile();return {closed:true,url:this.lastURL?.startsWith('https:')?new URL(this.lastURL).origin:null};}
   /** Ends one task's use of the browser: its pages close, nobody else's. Chrome itself closes with the last session. */
@@ -637,13 +662,15 @@ class BrowserSession {
     if(next?.token)return {signedIn:false,next:{token:next.token,field:next.field,origin:next.origin,account:next.account},kind:privacy.kind};
     return {signedIn:false,next:null,waiting:true,kind:privacy.kind,...(reason?{needsChrome:true,reason}:{})};
   }
-  /** Done: look again. `reload` opens the page the agent wanted once more (after the person used Chrome's own window). */
+  /** Done: look again. `reload` opens the page the agent wanted once more (after the person used Chrome's own window): the step's own page
+   *  (`url`) when it named one, else the page this session was on. */
   recheck(options){return this.guard(()=>this.checkSignedIn(options));}
-  async checkSignedIn({reload=false}={}){
+  async checkSignedIn({reload=false,url=''}={}){
     await this.ready();
     if(reload){
-      const target=this.intendedURL||this.lastURL;if(!target)return {signedIn:false,unknown:true};
-      this.assertScope(target);await this.page.goto(await publicURL(target,this.browser.resolver,this.browser.testOrigins),{waitUntil:'domcontentloaded',timeout:30000}).catch(()=>{});await pause(300);
+      let target=url||this.intendedURL||this.lastURL;if(!target)return {signedIn:false,unknown:true};
+      this.assertScope(target);target=await publicURL(target,this.browser.resolver,this.browser.testOrigins);target=this.pinURL(target,true)||target;if(url)this.intendedURL=target;
+      await this.page.goto(target,{waitUntil:'domcontentloaded',timeout:30000}).catch(()=>{});await pause(300);
     }
     return this.outcome();
   }
@@ -672,10 +699,10 @@ export class PrivateBrowser extends SharedBrowser {
 if(process.argv[1]&&import.meta.url===pathToFileURL(realpathSync(process.argv[1])).href){
   const browser=new SharedBrowser(process.argv[2]);
   const lanes=new Map();
-  const pageCommands={open:(s,r)=>s.navigate(r.url),read:s=>s.read(),prepare:(s,r)=>s.prepare(r.arguments),commit:(s,r)=>s.commit(r.token,r.upload),prepareSignIn:(s,r)=>s.prepareSignIn(r.mode),useSaved:(s,r)=>s.useSaved(r.token),verificationPlan:s=>s.verificationPlan(),verifyEmail:(s,r)=>s.verifyEmail(r.token,r.code),secretPlan:s=>s.secretPlan(),fillSecret:(s,r)=>s.fillSecret(r.token,r.value),recheck:(s,r)=>s.recheck({reload:r.reload===true})};
+  const pageCommands={open:(s,r)=>s.navigate(r.url),read:s=>s.read(),prepare:(s,r)=>s.prepare(r.arguments),commit:(s,r)=>s.commit(r.token,r.upload),prepareSignIn:(s,r)=>s.prepareSignIn(r.mode),useSaved:(s,r)=>s.useSaved(r.token),verificationPlan:s=>s.verificationPlan(),verifyEmail:(s,r)=>s.verifyEmail(r.token,r.code),secretPlan:s=>s.secretPlan(),fillSecret:(s,r)=>s.fillSecret(r.token,r.value),recheck:(s,r)=>s.recheck({reload:r.reload===true,url:typeof r.url==='string'?r.url:''})};
   async function answer(request){
     if(Object.hasOwn(pageCommands,request.command))return pageCommands[request.command](browser.session(request.session,request.scope??'',request.account??''),request);
-    if(request.command==='manual')return browser.manual(undefined,{session:typeof request.session==='string'?request.session:undefined,url:typeof request.url==='string'?request.url:undefined});
+    if(request.command==='manual')return browser.manual(undefined,{session:typeof request.session==='string'?request.session:undefined,url:typeof request.url==='string'?request.url:undefined,page:typeof request.page==='string'&&request.page?request.page:undefined,account:typeof request.account==='string'?request.account:undefined});
     if(request.command==='manualGoogle')return browser.manual('google',{session:typeof request.session==='string'?request.session:undefined});
     if(request.command==='finishManual')return browser.finishManual();
     if(request.command==='closeSession')return browser.closeSession(request.session);

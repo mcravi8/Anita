@@ -128,7 +128,7 @@ test('a step done in Buddy’s Chrome window ends with Done: still unfinished sa
   const step={key:'step:t2:c1',kind:'step',taskId:'t2',agentId:'ada',need:'signin',origin:'https://mail.example',instruction:'Sign in to mail.example: choose your saved account, or unlock Chrome’s Password Manager in the Chrome window Buddy opened. When you’re finished, press Done.',chromeOpen:true,title:'Check my mail'};
   await snapshot(page,{tasks:[{id:'t2',agentId:'ada',title:'Check my mail',status:'waiting_user',updatedAt:'2026-10-20T09:00:00Z',checkpoint:{id:'c1',need:'signin'}}],signinRequests:[step],decisions:[{id:'step:t2:1:c1',kind:'step',audience:'user',agentId:'ada',taskId:'t2',title:'Finish signing in to mail.example',question:step.instruction,actionLabel:'Done',payload:{taskId:'t2',need:'signin'},createdAt:'2026-10-20T09:00:00Z'}]});
   const message=page.locator('[data-signin-key="step:t2:c1"]');await message.waitFor({timeout:8000});
-  await message.getByText('Finish signing in to mail.example').waitFor();
+  await message.getByText('Sign in to mail.example',{exact:true}).waitFor();
   assert.equal(await message.getByRole('button',{name:'Open Chrome'}).count(),0,'Chrome is already open');
   await page.evaluate(()=>{replies.done=[{done:false,reopened:true,note:'It still isn’t finished: mail.example still asks you to sign in. Chrome is open again. Finish there, then press Done.'},{done:true,checked:true}];});
   await message.getByRole('button',{name:'Done'}).click();

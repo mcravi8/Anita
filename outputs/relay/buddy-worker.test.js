@@ -42,7 +42,7 @@ test('task blockers stay brief and keep diagnostic logs or partial results out o
 test('a sign-in the person answers in the chat has its own request message there, so the task adds none; an older record still says to press Done; the result still arrives',()=>{
  const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}},t={id:'job',workspace:'w',agentId:'a',title:'Create inbox',attempt:1,status:'waiting_review',attentionKey:'auth',updatedAt:'2026-10-18T05:44:00Z',reviews:[{status:'pending',kind:'authentication',mode:'signin'}]};
  assert.equal(worker.deliverResult(s,t),false);assert.equal((s.messages.a||[]).length,0,'the chat’s sign-in request is the message');
- for(const need of ['signin','captcha','verification','credential'])assert.equal(worker.deliverResult(s,{...t,status:'waiting_user',attentionKey:need,checkpoint:{id:'c-'+need,need},updatedAt:'2026-10-18T05:44:30Z',progress:'Waiting for you'}),false,need);
+ for(const need of ['signin','captcha','verification','credential','file'])assert.equal(worker.deliverResult(s,{...t,status:'waiting_user',attentionKey:need,checkpoint:{id:'c-'+need,need},updatedAt:'2026-10-18T05:44:30Z',progress:'Waiting for you'}),false,need);
  assert.equal(worker.deliverResult(s,{...t,status:'waiting_user',stopCause:'review.parked',checkpoint:{id:'p',need:'signin'},attentionKey:'parked',progress:'Set aside so other work could run.'}),true,'a review set aside is still told');
  delete s.messages.a;
  worker.deliverResult(s,{...t,status:'waiting_user',attentionKey:'private',updatedAt:'2026-10-18T05:45:00Z',progress:'Private Chrome is open. Finish sign-in in Buddy when ready.'});assert.equal(s.messages.a.length,1);assert.match(s.messages.a[0].body,/press Done/);

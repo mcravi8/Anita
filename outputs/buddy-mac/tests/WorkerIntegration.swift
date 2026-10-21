@@ -381,9 +381,10 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
         let signinID = try await startAs(forge, "SIGNIN_CHECKPOINT_FIXTURE: open the fixture site", "signin-need")
         let signin = try await pollAs(forge, signinID, "a sign-in checkpoint ends the attempt") { settled($0) }
         let need = signin["checkpoint"] as? [String: Any] ?? [:]
-        require(signin["status"] as? String == "waiting_user" && need["need"] as? String == "signin" && need["routedTo"] as? String == "user", "a sign-in waits for the person, saying what kind of thing they must do: \(signin["status"] ?? "") \(need)")
+        // A coding session's commands can't use Chrome, so its sign-in is refused and it asks the person to save the file instead.
+        require(signin["status"] as? String == "waiting_user" && need["need"] as? String == "file" && need["url"] as? String == "https://fixture.example/article/1" && need["path"] as? String == "sources/article.pdf" && need["routedTo"] as? String == "user", "a blocked download waits for the person to save the file, saying from which page and where: \(signin["status"] ?? "") \(need)")
         let signinDecisions = try await decisionsFor(signinID)
-        require(signinDecisions.count == 1 && signinDecisions[0]["audience"] as? String == "user", "the sign-in is the person's: \(signinDecisions)")
+        require(signinDecisions.count == 1 && signinDecisions[0]["audience"] as? String == "user", "saving the file is the person's: \(signinDecisions)")
         // The same question from a research task on the ChatGPT protocol goes the same way.
         let generalID = ((try await raw(["operation": "create", "agentId": vera, "requestId": "ask-general", "title": "Research fixture", "goal": "REQUEST_DECISION_FIXTURE: research the topic", "kind": "research", "provider": "chatgpt", "budgetUSD": 0]))["task"] as! [String: Any])["id"] as! String
         var general: [String: Any] = [:]

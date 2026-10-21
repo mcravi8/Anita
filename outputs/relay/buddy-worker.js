@@ -16,7 +16,7 @@
   const systemPause=t=>t?.status==='paused'&&t.blockedBy!=='limit'&&!/^(user|routine|superseded)/.test(t.stopCause||'');
   // A sign-in the person answers in the chat (a password to type, a step to finish and confirm with Done, a service sign-in to save) has a
   // message of its own there (buddy-signin.js); the task's own message would only say it again.
-  const signinWait=t=>t?.status==='waiting_review'&&pending(t).length>0&&pending(t).every(r=>r.kind==='authentication')||t?.status==='waiting_user'&&t.stopCause!=='review.parked'&&['signin','captcha','verification','credential'].includes(t.checkpoint?.need);
+  const signinWait=t=>t?.status==='waiting_review'&&pending(t).length>0&&pending(t).every(r=>r.kind==='authentication')||t?.status==='waiting_user'&&t.stopCause!=='review.parked'&&['signin','captcha','verification','credential','file'].includes(t.checkpoint?.need);
   // A coding command waiting on the team supervisor's review is the supervisor's to answer, not the person's: it posts nothing in the chat.
   const supervisorWait=t=>t?.status==='waiting_review'&&pending(t).length>0&&pending(t).every(r=>r.route==='supervisor');
   const deliverable=t=>(['completed','failed','interrupted','waiting_review','waiting_user'].includes(t?.status)||systemPause(t))&&t?.quiet!==true&&!signinWait(t)&&!supervisorWait(t);

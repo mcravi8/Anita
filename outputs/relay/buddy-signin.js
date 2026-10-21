@@ -8,21 +8,36 @@
   // What the person types goes from the field to the app's sign-in bridge and nowhere else: never into a message, the saved workspace,
   // drafts, browser storage or a log. The field is cleared as soon as it is sent. Messages keep only what was asked and what came of it.
   const KINDS=new Set(['signin','step','credential','mfa']);
-  const KEPT=['key','kind','taskId','agentId','reviewId','mode','origin','account','field','step','note','attempts','choices','profile','service','instruction','need','chromeOpen','legacy','title'];
-  const host=origin=>{try{return new URL(origin).host||String(origin);}catch{return String(origin||'')||'the website';}};
+  const KEPT=['key','kind','taskId','agentId','reviewId','mode','origin','account','field','step','note','attempts','choices','profile','service','instruction','need','chromeOpen','legacy','title','url','target','coding','unknownPage'];
+  const host=origin=>{try{return new URL(origin).host||String(origin);}catch{return String(origin||'')||'this website';}};
+  // A step on a web page is on its exact page (`url`), else on its site; one with neither is a step Buddy doesn't know the page of.
+  const stepPage=r=>r.unknownPage?'':r.url||r.origin||'';
+  // Where a file goes ("Directed Research/stages/S01_protocol/sources/sethna-2022.pdf"): its folder, and its name.
+  const folderOf=target=>{const t=String(target||''),at=t.lastIndexOf('/');return at>0?t.slice(0,at):t;};
+  const fileName=target=>String(target||'').split('/').pop();
+  const nameOf=(state,id)=>(state?.agents||[]).find(a=>a.id===id)?.name;
   // The request as a message keeps it: what is asked and of whom. Never a token, never what was typed.
   function view(request){const out={};for(const key of KEPT)if(request[key]!==undefined&&request[key]!==null&&request[key]!=='')out[key]=request[key];return out;}
-  function title(r){
+  // `who`: the agent's name, for a step Buddy doesn't know the page of.
+  function title(r,who){
     const site=host(r.origin);
     if(r.kind==='credential')return `${r.service||'This service'} needs your sign-in`;
     if(r.kind==='mfa')return `Approve the ${r.service||'sign-in'} Duo push on your phone`;
-    if(r.kind==='step')return r.need==='captcha'?`Finish the check on ${site}`:r.need==='verification'?`Finish verifying on ${site}`:`Finish signing in to ${site}`;
+    if(r.kind==='step'){
+      // Always the site, never "the website": the step's own page, and the account to use there.
+      const page=stepPage(r);if(!page)return `Buddy doesn’t know which page — ask ${who||'the agent'}`;
+      const at=host(page);
+      if(r.need==='captcha')return `Finish the CAPTCHA on ${at}`;
+      if(r.need==='verification')return `Finish verifying on ${at}`;
+      if(r.need==='file'){const into=folderOf(r.target);return `Save ${/\.pdf$/i.test(String(r.target||''))?'the PDF':'the file'} from ${at}${into?` into ${into}`:''}`;}
+      return `Sign in to ${at}${r.account?` as ${r.account}`:''}`;
+    }
     if(r.mode==='signup')return `Create your account on ${site}`;
     if(r.field==='code')return `Code for ${site}`;
     return `Sign in to ${site}`;
   }
   // One plain line for the chat list and search; the message itself says the rest.
-  const summary=r=>title(r)+'.';
+  const summary=(r,who)=>title(r,who)+'.';
   // Which chats a request is posted in: its agent's, and the group chat of the team plan its task belongs to.
   function chatsFor(state,snapshot,request){
     const out=[];
@@ -48,12 +63,12 @@
       for(const chat of chatsFor(state,snapshot,request)){
         state.messages[chat]||=[];
         const m=state.messages[chat].find(x=>x?.kind==='signin-request'&&x.request?.key===request.key);
-        if(!m){state.messages[chat].push({id:`signin-${request.key}${chat===request.agentId?'':'@'+chat}`,kind:'signin-request',who:request.agentId,chat,request:next,status:'open',body:summary(next),time:stamp(),createdAt:new Date().toISOString()});changed=true;continue;}
+        if(!m){state.messages[chat].push({id:`signin-${request.key}${chat===request.agentId?'':'@'+chat}`,kind:'signin-request',who:request.agentId,chat,request:next,status:'open',body:summary(next,nameOf(state,request.agentId)),time:stamp(),createdAt:new Date().toISOString()});changed=true;continue;}
         if(m.status==='closed'||m.status==='done')continue;
         if(JSON.stringify(m.request)!==JSON.stringify(next)){
           // A new try of the same request (a fresh field after a wrong password, a code step): the last outcome stays until it is answered.
           if(m.request?.reviewId&&next.reviewId&&m.request.reviewId!==next.reviewId&&m.status==='sending')m.status='open';
-          m.request=next;m.body=summary(next);changed=true;
+          m.request=next;m.body=summary(next,nameOf(state,request.agentId));changed=true;
         }
       }
     }
@@ -76,7 +91,7 @@
       if(patch.request)for(const [k,v] of Object.entries(patch.request)){if(!KEPT.includes(k)||v===undefined)continue;if(v===null||v==='')delete m.request[k];else m.request[k]=v;}
       if(patch.choice)m.choice=patch.choice;
       if(patch.acknowledged)m.acknowledged=true;
-      m.body=summary(m.request||{});
+      m.body=summary(m.request||{},nameOf(state,m.request?.agentId));
     }
     return found.length>0;
   }
@@ -98,7 +113,7 @@
   function body(m){
     const r=m.request||{},site=host(r.origin),off=m.status!=='open'||busy.has(r.key),who=findAgent(r.agentId)?.name||'The agent';
     const done=m.status==='closed'||m.status==='done';
-    let html=`<strong class="signin-title">${esc(title(r))}</strong>`;
+    let html=`<strong class="signin-title">${esc(title(r,who))}</strong>`;
     const about=[r.account?`Account: ${r.account}`:'',r.kind==='credential'&&r.profile?'Kept in your Mac’s Keychain':'',r.title?`For “${r.title}”`:''].filter(Boolean).join(' · ');
     if(about)html+=`<small class="signin-about">${esc(about)}</small>`;
     if(m.result)html+=`<p class="signin-result ${/signed in|saved|done —|continuing/i.test(m.result)?'ok':''}" role="status">${esc(m.result)}</p>`;
@@ -118,7 +133,15 @@
       html+=`<div class="signin-holder signin-holder-pair" data-signin-holder="${esc(r.key)}" data-signin-task="${esc(r.taskId)}">${field(r,'username',`${r.service||'Service'} username`,'text')}${field(r,'password',`${r.service||'Service'} password`,'password')}${button('data-signin-send',r.key,busy.has(r.key)?'Saving…':'Save',true,off)}</div>`;
       html+=`<small class="signin-assurance">Buddy keeps this in your Mac’s Keychain, so you’re asked only once. ${esc(who)} never sees it; Buddy fills it in only for commands you approve.</small>`;
     }else if(r.kind==='step'){
-      html+=`<p class="signin-note">${esc(r.instruction||'Finish the step, then press Done.')}</p><div class="signin-actions" data-signin-task="${esc(r.taskId)}">${button('data-signin-done',r.key,busy.has(r.key)?'Checking…':'Done',true,off)}${!r.chromeOpen?button('data-signin-chrome',r.key,'Open Chrome',false,off):''}</div><small class="signin-assurance">Done tells Buddy to look again and carry on.</small>`;
+      // What to do on which page, Open the page (that exact page, in Buddy's Chrome) and Done. A step Buddy doesn't know the page of opens
+      // nothing: the person asks the agent in this chat.
+      const page=stepPage(r);
+      html+=`<p class="signin-note">${esc(r.instruction||'Finish the step, then press Done.')}</p>`;
+      if(!page)html+=`<p class="signin-note">${esc(who)} didn’t say which page this is on. Reply in this chat to ask ${esc(who)} which page it needs.</p>`;
+      html+=`<div class="signin-actions" data-signin-task="${esc(r.taskId)}">${button('data-signin-done',r.key,busy.has(r.key)?'Checking…':'Done',true,off)}${page?button('data-signin-chrome',r.key,'Open the page',false,off):button('data-signin-reply',r.key,'Reply in chat',false,false)}</div>`;
+      if(r.need==='file')html+=`<small class="signin-assurance">Name it ${esc(fileName(r.target))}. Save it from the page into that folder, then press Done: ${esc(who)} checks it’s there before using it.</small>`;
+      else if(r.coding)html+=`<small class="signin-assurance">${esc(who)}’s commands can’t use what you sign in to in Chrome. Press Done and ${esc(who)} will ask you for the file instead.</small>`;
+      else html+=`<small class="signin-assurance">Done tells Buddy to look again and carry on.</small>`;
     }else if(r.kind==='mfa'){
       html+=`<p class="signin-note">${esc(r.instruction||'Approve the push on your phone, then press Done.')}</p>`;
       html+=m.acknowledged?`<p class="signin-result" role="status">Thanks. This updates by itself when the command finishes.</p>`:`<div class="signin-actions" data-signin-task="${esc(r.taskId)}">${button('data-signin-mfa',r.key,'Done',true,off)}</div>`;
@@ -187,7 +210,9 @@
   async function chrome(key){
     const r=request(key);if(!r||busy.has(key))return;
     busy.add(key);redraw();
-    try{await window.BuddyDesktop.worker({operation:'browser',taskId:r.taskId});settle(state,key,{result:'Chrome is open. Finish there, then press Done.',request:{chromeOpen:true}});}
+    // The step's own page goes with the request; the app opens it only if it is still that step's page.
+    const page=stepPage(r);
+    try{await window.BuddyDesktop.worker({operation:'browser',taskId:r.taskId,...(page?{url:page}:{})});settle(state,key,{result:`Chrome is open at ${host(page)}. Finish there, then press Done.`,request:{chromeOpen:true}});}
     catch(error){settle(state,key,{result:String(error?.message||error)});}
     finally{busy.delete(key);}
     redraw();window.BuddyWorkerUI?.refresh?.(false);
@@ -202,7 +227,7 @@
     redraw();window.BuddyActivity?.paint?.();
   }
   document.addEventListener('click',e=>{
-    const target=e.target.closest?.('[data-signin-send],[data-signin-choice],[data-signin-check],[data-signin-done],[data-signin-chrome],[data-signin-mfa]');if(!target||target.disabled)return;
+    const target=e.target.closest?.('[data-signin-send],[data-signin-choice],[data-signin-check],[data-signin-done],[data-signin-chrome],[data-signin-mfa],[data-signin-reply]');if(!target||target.disabled)return;
     e.preventDefault();
     if(target.dataset.signinSend)send(target.dataset.signinSend);
     else if(target.dataset.signinChoice){const at=target.dataset.signinChoice.lastIndexOf('|');choose(target.dataset.signinChoice.slice(0,at),target.dataset.signinChoice.slice(at+1));}
@@ -210,6 +235,7 @@
     else if(target.dataset.signinDone)done(target.dataset.signinDone,'done');
     else if(target.dataset.signinChrome)chrome(target.dataset.signinChrome);
     else if(target.dataset.signinMfa)acknowledge(target.dataset.signinMfa);
+    else if(target.dataset.signinReply)document.getElementById('message-input')?.focus();
   });
   document.addEventListener('keydown',e=>{
     const input=e.target.closest?.('[data-signin-input]');if(!input||e.key!=='Enter'||e.isComposing)return;

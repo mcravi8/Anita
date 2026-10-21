@@ -313,6 +313,7 @@ import Darwin
             reply["signinRequests"] = signInRequests(current)
             reply["browserAgents"] = browserAgents(team)
             reply["legacyChrome"] = legacyChromeOpen().map(\.id)
+            reply["chromeAccounts"] = BuddyChromeAccounts.read(profile: sharedProfile)
             return reply
         }
         // Reading or dismissing an alert changes only the alert: it never approves, declines or resumes anything.

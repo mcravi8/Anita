@@ -21,6 +21,7 @@
 .worker-setup-once{display:flex;flex-direction:column;gap:12px;padding:20px;border:1px solid var(--line);border-radius:16px;background:var(--soft)}
 .worker-setup-once>strong{font-size:15px}
 .worker-setup-once p{margin:0;font-size:13px;line-height:1.65;color:var(--text2)}
+.worker-setup-once .worker-setup-account{color:var(--text)}
 .worker-setup-once .worker-toolbar{margin-top:4px}
 .worker-setup-once small{font-size:11.5px;line-height:1.6;color:var(--text3)}
 .worker-legacy{padding:14px 16px;border:1px solid var(--line);border-radius:12px;font-size:13px;line-height:1.6;color:var(--text2)}

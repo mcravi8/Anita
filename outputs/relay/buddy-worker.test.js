@@ -59,6 +59,14 @@ test('Browser sign-in is one “Set up once” section: one Open Chrome button, 
  assert.match(open,/data-worker-op="finish-signin">Done</);assert.doesNotMatch(open,/open-google/);assert.match(open,/Chrome is open\./);
  assert.match(open,/older private Chrome window \(Cy’s/);assert.match(open,/Buddy won’t close it/);
 });
+test('the Set up once card says which Google accounts the shared Chrome is signed in to, escaped, and nothing when the app did not say',()=>{
+ const button=(op,label)=>`<button data-worker-op="${op}">${label}</button>`,agents=[{id:'a',name:'Ada'}];
+ const both=worker.setupOnce({agents,using:['a'],legacy:[],button,accounts:{chrome:'me@gmail.com',accounts:['me@gmail.com','Me@usc.edu','x<b>@usc.edu']}});
+ assert.match(both,/Chrome is signed in as <strong>me@gmail\.com<\/strong>\. Also signed in to Google: Me@usc\.edu, x&lt;b&gt;@usc\.edu\./);assert.doesNotMatch(both,/<b>/);
+ assert.match(worker.setupOnce({agents,using:['a'],legacy:[],button,accounts:{chrome:null,accounts:['me@usc.edu']}}),/Signed in to Google as me@usc\.edu\. Chrome itself isn’t signed in, so Google Password Manager is off\./);
+ assert.match(worker.setupOnce({agents,using:['a'],legacy:[],button,accounts:{chrome:null,accounts:[]}}),/Chrome isn’t signed in to a Google account yet\./);
+ assert.doesNotMatch(worker.setupOnce({agents,using:['a'],legacy:[],button}),/worker-setup-account/,'an older app that sends no accounts shows no line');
+});
 
 test('no task waits for an allowance any more: runs have no limit of their own',()=>{
  const coding={id:'code',kind:'coding',provider:'claude',status:'interrupted',budgetUSD:2,remainingBudgetUSD:0,reservedBudgetUSD:2};

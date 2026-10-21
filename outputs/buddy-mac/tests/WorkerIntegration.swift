@@ -430,21 +430,22 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
                 "once it finished the team is idle since a time, and each agent says what it waits for: \(quiet["idleSince"] ?? "-") \(states)")
         print("PASS: the pulse shows who is working, and once nothing runs, since when the team is idle and what each agent waits for")
 
-        // A private sign-in holds only its own agent: another agent's routine can still be run now, the signing-in agent's cannot.
+        // Set up once: the person's Chrome window on the one shared profile holds no agent's work. Every routine can still be run now; only
+        // their pages wait for the window to close.
         func manageRoutine(_ owner: String, _ arguments: [String: Any]) async throws -> [String: Any] { try await raw(["operation": "routine", "agentId": owner, "requestId": UUID().uuidString, "arguments": arguments]) }
         try onProvider("chatgpt", [forge, vera])   // their routines are saved on ChatGPT, as before
         let forgeRoutine = ((try await manageRoutine(forge, ["action": "create", "title": "Forge research", "goal": "Research the explicitly requested topic", "kind": "research"]))["routine"] as? [String: Any])?["id"] as? String ?? ""
         let veraRoutine = ((try await manageRoutine(vera, ["action": "create", "title": "Vera research", "goal": "Research the explicitly requested topic", "kind": "research"]))["routine"] as? [String: Any])?["id"] as? String ?? ""
         require(!forgeRoutine.isEmpty && !veraRoutine.isEmpty, "both routines are saved")
-        let opened = try await raw(["operation": "openGoogle", "agentId": vera])
-        require(opened["private"] as? Bool == true, "Vera's private sign-in is open: \(opened)")
+        let opened = try await raw(["operation": "openGoogle"])
+        require(opened["private"] as? Bool == true, "the shared Chrome window is open for setup: \(opened)")
         let ranOther = try await manageRoutine(forge, ["action": "run", "routineID": forgeRoutine])
         let ranOwn = try await manageRoutine(vera, ["action": "run", "routineID": veraRoutine])
         _ = try await raw(["operation": "finishSignIn"])
         for (owner, id) in [(forge, forgeRoutine), (vera, veraRoutine)] { _ = try await manageRoutine(owner, ["action": "pause", "routineID": id]) }
-        require(ranOther["error"] == nil && (ranOther["task"] as? [String: Any])?["id"] is String, "another agent's routine runs now during a private sign-in: \(ranOther)")
-        require(ranOwn["error"] is String && ranOwn["task"] == nil, "the signing-in agent's own routine waits for the sign-in to finish: \(ranOwn)")
-        print("PASS: run now refuses only the routines of the agent whose private sign-in is open")
+        require(ranOther["error"] == nil && (ranOther["task"] as? [String: Any])?["id"] is String, "a routine runs now while the shared Chrome window is open: \(ranOther)")
+        require(ranOwn["error"] == nil && (ranOwn["task"] as? [String: Any])?["id"] is String, "so does every other agent's: \(ranOwn)")
+        print("PASS: with the shared Chrome window open for setup, every routine can still be run now")
 
         // 1, 2, 6 and 8. The team plan over the socket: who may propose and authorize, exactly-once dispatch inside the authorized stage only,
         // keeping the Mac awake while authorized work is live, and the person's stop.

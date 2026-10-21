@@ -39,7 +39,26 @@ test('task blockers stay brief and keep diagnostic logs or partial results out o
  const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}},t={id:'long-error',workspace:'w',agentId:'a',status:'interrupted',title:'Open my inbox',attempt:1,updatedAt:'2026-10-18T05:00:00Z',progress:'Technical detail '.repeat(100),result:'Verbose partial work '.repeat(100)};
  assert.equal(worker.deliverResult(s,t),true);assert.ok(s.messages.a[0].body.length<150);assert.match(s.messages.a[0].body,/Open the task for details/);assert.equal(s.messages.a[0].body.includes('Verbose partial'),false);
 });
-test('sign-in transitions keep one actionable message and preserve the final result',()=>{const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}},t={id:'job',workspace:'w',agentId:'a',title:'Create inbox',attempt:1,status:'waiting_review',attentionKey:'auth',updatedAt:'2026-10-18T05:44:00Z',reviews:[{status:'pending',kind:'authentication',mode:'signin'}]};worker.deliverResult(s,t);assert.equal(s.messages.a[0].body,'Please sign in to continue.');worker.deliverResult(s,{...t,status:'waiting_user',attentionKey:'private',updatedAt:'2026-10-18T05:45:00Z',progress:'Private Chrome is open. Finish sign-in in Buddy when ready.'});assert.equal(s.messages.a.length,1);assert.match(s.messages.a[0].body,/Finish private sign-in/);worker.deliverResult(s,{...t,status:'completed',result:'Created chief@example.test.',updatedAt:'2026-10-18T05:46:00Z'});assert.equal(worker.presentation(s,s.messages.a[0]).hidden,true);assert.equal(worker.presentation(s,s.messages.a[1]).body,'Created chief@example.test.');});
+test('a sign-in the person answers in the chat has its own request message there, so the task adds none; an older record still says to press Done; the result still arrives',()=>{
+ const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}},t={id:'job',workspace:'w',agentId:'a',title:'Create inbox',attempt:1,status:'waiting_review',attentionKey:'auth',updatedAt:'2026-10-18T05:44:00Z',reviews:[{status:'pending',kind:'authentication',mode:'signin'}]};
+ assert.equal(worker.deliverResult(s,t),false);assert.equal((s.messages.a||[]).length,0,'the chat’s sign-in request is the message');
+ for(const need of ['signin','captcha','verification','credential'])assert.equal(worker.deliverResult(s,{...t,status:'waiting_user',attentionKey:need,checkpoint:{id:'c-'+need,need},updatedAt:'2026-10-18T05:44:30Z',progress:'Waiting for you'}),false,need);
+ assert.equal(worker.deliverResult(s,{...t,status:'waiting_user',stopCause:'review.parked',checkpoint:{id:'p',need:'signin'},attentionKey:'parked',progress:'Set aside so other work could run.'}),true,'a review set aside is still told');
+ delete s.messages.a;
+ worker.deliverResult(s,{...t,status:'waiting_user',attentionKey:'private',updatedAt:'2026-10-18T05:45:00Z',progress:'Private Chrome is open. Finish sign-in in Buddy when ready.'});assert.equal(s.messages.a.length,1);assert.match(s.messages.a[0].body,/press Done/);
+ worker.deliverResult(s,{...t,status:'completed',result:'Created chief@example.test.',updatedAt:'2026-10-18T05:46:00Z'});assert.equal(worker.presentation(s,s.messages.a[0]).hidden,true);assert.equal(worker.presentation(s,s.messages.a[1]).body,'Created chief@example.test.');
+});
+test('Browser sign-in is one “Set up once” section: one Open Chrome button, every agent with internet access listed as using it, and an older window named but never closed',()=>{
+ const button=(op,label)=>`<button data-worker-op="${op}">${label}</button>`;
+ const agents=[{id:'a',name:'Ada'},{id:'b',name:'Bo<b>'},{id:'c',name:'Cy'}];
+ const html=worker.setupOnce({agents,using:['a','b'],legacy:[],button});
+ assert.equal((html.match(/data-worker-op="open-google"/g)||[]).length,1,'one Open Chrome button for everyone');
+ assert.match(html,/Set up once/);assert.match(html,/Every agent with internet access will use the accounts you sign in to here/);assert.match(html,/as many websites and accounts as you like, including more than one Google account/);
+ assert.match(html,/Used by Ada, Bo&lt;b&gt;\./);assert.match(html,/No browser for Cy \(internet access is off\)/);assert.doesNotMatch(html,/<b>/);
+ const open=worker.setupOnce({agents,using:['a'],open:{shared:true,taskId:null},legacy:['c'],button});
+ assert.match(open,/data-worker-op="finish-signin">Done</);assert.doesNotMatch(open,/open-google/);assert.match(open,/Chrome is open\./);
+ assert.match(open,/older private Chrome window \(Cy’s/);assert.match(open,/Buddy won’t close it/);
+});
 
 test('no task waits for an allowance any more: runs have no limit of their own',()=>{
  const coding={id:'code',kind:'coding',provider:'claude',status:'interrupted',budgetUSD:2,remainingBudgetUSD:0,reservedBudgetUSD:2};

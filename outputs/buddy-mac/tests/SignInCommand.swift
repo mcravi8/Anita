@@ -137,15 +137,17 @@ import Security
             let every = try everyDecision(signinID)
             try require(every.allSatisfy { $0.audience == "user" }, "no decision for this task ever went to the supervisor: \(every)")
         }
-        await section("the page's sign-in box saves into the store, its reply never carries the sign-in, and saving resumes the task with the plain update") {
-            var asked: [String] = []
-            let cancelled = try await BuddySignInBox.handle(["action": "provide", "profile": "wrds", "taskId": signinID], workspace: workspace, support: support, store: saved, ask: { asked.append($0.name); return nil })
-            try require(cancelled["saved"] as? Bool == false && cancelled["cancelled"] as? Bool == true && saved.items.isEmpty, "Cancel saves nothing: \(cancelled)")
+        await section("the chat's sign-in field saves into the store, its reply never carries the sign-in, and saving resumes the task with the plain update") {
+            // The person types the username and password into the request in the agent's chat; the page hands both to the app's sign-in
+            // bridge, which keeps them in the store. There is no other way in: without typed values nothing is saved and no box opens.
+            var refusedEmpty = false
+            do { _ = try await BuddySignInBox.handle(["action": "provide", "profile": "wrds", "taskId": signinID], workspace: workspace, support: support, store: saved) } catch { refusedEmpty = true }
+            try require(refusedEmpty && saved.items.isEmpty, "nothing typed, nothing saved")
             try require((try await detail(signinID))["status"] as? String == "waiting_user", "and the task keeps waiting")
-            let reply = try await BuddySignInBox.handle(["action": "provide", "profile": "wrds", "taskId": signinID], workspace: workspace, support: support, store: saved, ask: { asked.append($0.name); return (username, password) })
+            let reply = try await BuddySignInBox.handle(["action": "provide", "profile": "wrds", "taskId": signinID, "username": username, "password": password], workspace: workspace, support: support, store: saved)
             let said = json(reply)
             try require(!said.contains(username) && !said.contains(password), "the reply to the page carries no sign-in: \(said)")
-            try require(reply["saved"] as? Bool == true && reply["resumed"] as? Bool == true && asked == ["WRDS", "WRDS"], "saved, and the waiting task resumed: \(said) asked \(asked)")
+            try require(reply["saved"] as? Bool == true && reply["resumed"] as? Bool == true, "saved, and the waiting task resumed: \(said)")
             try require(saved.items[workspace + ":wrds"]?.username == username && saved.items[workspace + ":wrds"]?.password == password && saved.reads == 0, "the store has it, and nothing read it yet")
             let listed = try await BuddySignInBox.handle(["action": "status"], workspace: workspace, support: support, store: saved)
             try require(!json(listed).contains(username) && !json(listed).contains(password) && ((listed["profiles"] as? [[String: Any]])?.first?["saved"] as? Bool) == true, "the status reply says saved, nothing more: \(json(listed))")
@@ -154,6 +156,12 @@ import Security
             var refused = false
             do { _ = try await worker(["operation": "signin", "actorId": clara, "arguments": ["action": "saved", "profile": "wrds", "taskId": signinID]]) } catch { refused = true }
             try require(refused, "an agent cannot use the person's sign-in step to resume a task")
+            for action in ["secret", "check", "done"] {
+                var refusedAgent = false
+                do { _ = try await worker(["operation": "signin", "actorId": clara, "arguments": ["action": action, "taskId": signinID, "reviewId": "any", "value": password]]) } catch { refusedAgent = true }
+                try require(refusedAgent, "an agent cannot send a typed sign-in or press Done (\(action))")
+            }
+            try require(BuddySignInBox.workerRefuses(["operation": "signin", "arguments": ["action": "provide", "username": username, "password": password]]), "the page's general worker bridge never carries a typed sign-in")
         }
         await section("with a saved sign-in buddy_request_signin returns available at once, without the sign-in; the resumed brief labels the note as Buddy's") {
             try await waitFor("the resumed attempt asked again") { toolResult("ask2") != nil }

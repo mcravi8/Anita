@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 import Security
 
 /// An outside service a command signs in to with the person's own account (WRDS first). `env` says which environment variable of the command
@@ -96,32 +96,47 @@ struct BuddyCredentials: BuddySignInStore {
     }
 }
 
-/// The native box where the person types a sign-in, opened from the page's Needs card. Only Keychain ever gets what is typed: the page's reply
-/// says whether it was saved and whether the waiting task goes on, never the username or the password.
+/// What the person can type in a chat for a waiting sign-in: the browser's one-use token for one task's page and field, its site and
+/// account. Only the worker holds it, in memory; the page and the model never see the token, and it ends after `lifetime`.
+struct BuddyTypedSignIn {
+    let task: String, token: String, field: String, origin: String
+    let account: String?
+    var expires: Date
+    static var lifetime: TimeInterval = 600
+}
+
+/// The app's side of the sign-in requests the person answers in a chat (the page's `signin` bridge). What they type goes from the chat's
+/// field to here, and from here only to where it was asked for: a service sign-in (WRDS) into the Keychain (`provide`), or a website's
+/// password or code to the worker, which types it into the one page that asked (`secret`). Done on a step outside the chat is `check`
+/// (the website waits for something, such as a push on the phone) or `done` (Buddy's Chrome window, or anything else). Replies never
+/// carry what was typed. There is no other box: a sign-in without typed values saves nothing.
 @MainActor enum BuddySignInBox {
-    typealias Typed = (username: String, password: String)
     static let assurance = "Buddy keeps this in your Mac's Keychain. Agents never see it; Buddy fills it in only for commands you approve."
-    static func prompt(_ profile: BuddySignInProfile) -> Typed? {
-        let alert = NSAlert(); alert.messageText = "Sign in to \(profile.name)"; alert.informativeText = assurance
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 58))
-        let user = NSTextField(frame: NSRect(x: 0, y: 32, width: 300, height: 24)); user.placeholderString = "\(profile.name) username"
-        let pass = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24)); pass.placeholderString = "Password"
-        box.addSubview(user); box.addSubview(pass); alert.accessoryView = box
-        alert.addButton(withTitle: "Save"); alert.addButton(withTitle: "Cancel"); alert.window.initialFirstResponder = user
-        defer { user.stringValue = ""; pass.stringValue = "" }
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return (user.stringValue, pass.stringValue)
+    /// Whether the page's general worker bridge must refuse this payload: typed sign-ins travel only through the sign-in bridge.
+    nonisolated static func workerRefuses(_ payload: [String: Any]) -> Bool {
+        guard payload["operation"] as? String == "signin" else { return false }
+        let action = (payload["arguments"] as? [String: Any])?["action"] as? String ?? "status"
+        return !["status"].contains(action)
     }
-    /// The page's `signin` request. `status` says which sign-ins are saved; `provide` opens the box for one, saves it and, if a task waits for
-    /// it, has the worker resume that task with a plain note; `remove` forgets one.
-    static func handle(_ payload: [String: Any], workspace: String, support: URL, store: BuddySignInStore = BuddyCredentials(), ask asked: ((BuddySignInProfile) -> Typed?)? = nil) async throws -> [String: Any] {
-        let ask = asked ?? prompt
+    /// The page's `signin` request. `status` says which service sign-ins are saved; `provide` saves the username and password typed in the
+    /// chat and, if a task waits for it, has the worker resume that task with a plain note; `remove` forgets one; `secret`, `check` and
+    /// `done` go to the worker for the task that asked.
+    static func handle(_ payload: [String: Any], workspace: String, support: URL, store: BuddySignInStore = BuddyCredentials()) async throws -> [String: Any] {
         let action = payload["action"] as? String ?? "status"
         if action == "status" { return ["profiles": BuddyCredentials.profiles.map { ["id": $0.id, "name": $0.name, "saved": store.has(workspace: workspace, profile: $0.id)] as [String: Any] }] }
+        if ["secret", "check", "done"].contains(action) {
+            var arguments: [String: Any] = ["action": action, "taskId": payload["taskId"] as? String ?? ""]
+            if let review = payload["reviewId"] as? String { arguments["reviewId"] = review }
+            if action == "secret" { arguments["value"] = payload["value"] as? String ?? "" }
+            // Typing into a page, and Done (which may close Chrome and look at the page again), take longer than other requests.
+            return try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "signin", "arguments": arguments], timeout: 90)
+        }
         guard ["provide", "remove"].contains(action), let profile = BuddyCredentials.profile(payload["profile"] as? String ?? "") else { throw BuddyWorkerFailure(message: "Choose a sign-in Buddy supports.") }
         if action == "remove" { try store.remove(workspace: workspace, profile: profile.id); return ["profile": profile.id, "saved": false] }
-        guard let typed = ask(profile) else { return ["profile": profile.id, "saved": store.has(workspace: workspace, profile: profile.id), "cancelled": true] }
-        try store.save(workspace: workspace, profile: profile.id, username: typed.username, password: typed.password)
+        guard let username = payload["username"] as? String, let password = payload["password"] as? String, !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !password.isEmpty else {
+            throw BuddyWorkerFailure(message: "Type your \(profile.name) username and password in the sign-in field in the chat.")
+        }
+        try store.save(workspace: workspace, profile: profile.id, username: username, password: password)
         var reply: [String: Any] = ["profile": profile.id, "name": profile.name, "saved": true]
         if let task = payload["taskId"] as? String, !task.isEmpty {
             do {

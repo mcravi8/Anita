@@ -18,18 +18,19 @@ import AppKit
         _ = try await call(["operation":"review","taskId":id,"id":r["id"]!,"accept":true,"authAction":"private"])
         _ = try await wait(id,"waiting_user")
         require(FileManager.default.fileExists(atPath:root.appendingPathComponent("Worker/PrivateSignIn.json").path),"private handoff suspends desktop observations across Buddy")
-        // A private sign-in holds only its own agent's browser profile: the queue keeps running for everyone else.
-        let status=try await call(["operation":"status"]);require(status["paused"] as? Bool==false && status["privateBrowser"] is [String:Any],"the queue is not paused by a private sign-in, and the native private session is visible")
+        // The shared Chrome window is the person's while it is open: the queue keeps running, and agents' pages wait for the window.
+        let status=try await call(["operation":"status"]);require(status["paused"] as? Bool==false && (status["privateBrowser"] as? [String:Any])?["shared"] as? Bool==true,"the queue is not paused by a private sign-in, and the shared window is visible")
+        require((status["signinRequests"] as? [[String:Any]] ?? []).contains{$0["taskId"] as? String==id && $0["kind"] as? String=="step" && $0["chromeOpen"] as? Bool==true},"the chat asks the person to finish in Chrome and press Done")
         let elsewhere=try await create("other-agent",for:other)
         var started:[String:Any]=[:]
         for _ in 0..<120{let t=try await call(["operation":"detail","taskId":elsewhere])["task"] as! [String:Any];if ["running","waiting_review","completed"].contains(t["status"] as? String ?? ""){started=t;break};try await Task.sleep(nanoseconds:100_000_000)}
-        require(!started.isEmpty,"another agent's queued task starts while the private sign-in is open")
+        require(!started.isEmpty,"another agent's queued task starts while the shared Chrome window is open")
         if started["status"] as? String != "completed" {_ = try await call(["operation":"cancel","taskId":elsewhere])}
         var finished=false
         for _ in 0..<80{do{_ = try await call(["operation":"finishSignIn"]);finished=true;break}catch{try await Task.sleep(nanoseconds:100_000_000)}}
         require(finished,"human finish closes private handoff after the agent pauses")
         _ = try await wait(id,"completed")
         require(!FileManager.default.fileExists(atPath:root.appendingPathComponent("Worker/PrivateSignIn.json").path),"finish removes the private marker and resumes the saved task")
-        print("PASS: native signup approval/decline, private browser handoff that holds only its own agent (the queue keeps running for others), protected desktop marker, human finish and task resume without credentials")
+        print("PASS: native signup approval/decline, the shared Chrome window handed to the person (the queue keeps running for others), protected desktop marker, Done in the chat and task resume without credentials")
     }
 }

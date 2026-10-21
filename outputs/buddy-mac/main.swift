@@ -363,13 +363,17 @@ import AppKit
                 let context = try workspaceContext(); var payload = body["payload"] as? [String: Any] ?? [:]; payload["workspace"] = context.workspace
                 // The page is the person: it never acts as an agent, so it cannot lend an agent’s identity (or the words a quote is checked against) to a request.
                 payload.removeValue(forKey: "actorId"); payload.removeValue(forKey: "authorizedText")
+                // What the person types into a chat's sign-in field travels only through the sign-in bridge below, never this one.
+                if BuddySignInBox.workerRefuses(payload) { replyHandler(nil, "Use the sign-in field in the chat."); return }
                 if ["connectClaude", "disconnectClaude"].contains(payload["operation"] as? String ?? "") {
                     Task { do { let result = try await providerRequest(["operation": payload["operation"] as? String == "connectClaude" ? "connect" : "disconnect", "provider": "claude"], workspace: context.workspace); replyHandler(["connected": (result["claude"] as? [String: Any])?["connected"] ?? false], nil) } catch { replyHandler(nil, error.localizedDescription) } }; return
                 }
                 Task { do {
                     if payload["operation"] as? String == "start" { replyHandler(try await BuddyWorkerClient.start(support: supportURL, workspace: context.workspace), nil) }
                     else {
-                        let result = try await BuddyWorkerClient.call(support: supportURL, payload: payload)
+                        // Opening or closing the person's Chrome window (and looking at the page again afterwards) takes longer than other requests.
+                        let slow = ["openGoogle", "openChromeSettings", "finishSignIn", "browser"].contains(payload["operation"] as? String ?? "")
+                        let result = try await BuddyWorkerClient.call(support: supportURL, payload: payload, timeout: slow ? 90 : 8)
                         if ["settings", "rules"].contains(payload["operation"] as? String ?? "") { self.settingsChanged() }
                         replyHandler(result, nil)
                     }
@@ -385,11 +389,12 @@ import AppKit
         case "signIn":
             Task { do { let workspace = try workspaceContext().workspace; replyHandler(try await providerRequest(["operation": "connect", "provider": "chatgpt"], workspace: workspace), nil) } catch { replyHandler(nil, error.localizedDescription) } }
         case "signin":
-            // A service sign-in (WRDS) typed into Buddy's own box and kept in Keychain. The reply never carries the username or password.
+            // A sign-in the person typed into a chat's private field: a service sign-in (WRDS) for the Keychain, or a website's password or
+            // code for the one page that asked; or their Done on a step outside the chat. Only this page reaches it (agents have no way
+            // to), and the reply never carries what was typed.
             Task { do {
                 let workspace = try workspaceContext().workspace, payload = body["payload"] as? [String: Any] ?? [:]
                 if !(payload["taskId"] as? String ?? "").isEmpty { _ = try? await BuddyWorkerClient.start(support: supportURL, workspace: workspace) }
-                showWindow()
                 replyHandler(try await BuddySignInBox.handle(payload, workspace: workspace, support: supportURL), nil)
             } catch { replyHandler(nil, error.localizedDescription) } }
         case "sendMessage":

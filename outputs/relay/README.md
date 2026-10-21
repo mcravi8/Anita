@@ -58,6 +58,7 @@ The native Mac integration exposes only pending suggestion creation to model tur
 - `buddy-connections.test.js`: unavailable-service gating, independent grants, and revocation checks.
 - `buddy-proposals.js` / `.test.js`: live native suggestion discovery, reply cards, reviewed decisions, and verified agent registration.
 - `buddy-files.js` / `.css` / `.test.js`: native shared-file interface and receipt/conflict checks.
+- `buddy-signin.js` / `.css` / `.test.js`: sign-ins asked in the chats (the agent's, and the team's group chat for team-plan work): a private field for a website's password or code, or a service sign-in, sent only to the app's sign-in bridge and never kept on the page; Done for a step done elsewhere.
 - `buddy-onboarding.js` / `.css` / `.test.js`: empty initial workspace, migration, resumable setup, and atomic first-agent registration.
 - `buddy-agent-setup.js` / `.test.js`: immediate first question, native interview snapshots, retry/stop, profile updates and manual edits.
 - `buddy-figures.js` / `.test.js`: the halftone figure engine (shape distance fields, springs, blinking, eyes, progress rings) and the runtime that paints every `canvas[data-fig]` and the sidebar dot field.

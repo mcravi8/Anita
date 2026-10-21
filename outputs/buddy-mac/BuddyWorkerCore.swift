@@ -158,20 +158,21 @@ enum BuddyWorkerWire {
         }
         throw BuddyWorkerFailure(message: "The worker message exceeded its size limit.")
     }
-    static func timeouts(_ fd: Int32) {
-        var timeout = timeval(tv_sec: 8, tv_usec: 0), noSignal: Int32 = 1
+    static func timeouts(_ fd: Int32, seconds: Int = 8) {
+        var timeout = timeval(tv_sec: seconds, tv_usec: 0), noSignal: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout.size(ofValue: timeout)))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout.size(ofValue: timeout)))
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout.size(ofValue: noSignal)))
     }
-    static func call(support: URL, request: [String: Any]) throws -> [String: Any] {
+    /// `timeout`: how long to wait for the reply, for the few requests that take longer (typing a sign-in into a page, closing Chrome).
+    static func call(support: URL, request: [String: Any], timeout: Int = 8) throws -> [String: Any] {
         let url = socketURL(support), fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw BuddyWorkerFailure(message: "Couldn’t open the worker connection.") }; defer { Darwin.close(fd) }
         var parentMeta = stat()
         guard lstat(url.deletingLastPathComponent().path, &parentMeta) == 0, (parentMeta.st_mode & S_IFMT) == S_IFDIR, parentMeta.st_uid == getuid(), parentMeta.st_mode & 0o077 == 0 else { throw BuddyWorkerFailure(message: "The worker’s private connection is unavailable.") }
         var meta = stat()
         guard lstat(url.path, &meta) == 0, (meta.st_mode & S_IFMT) == S_IFSOCK, meta.st_uid == getuid(), meta.st_mode & 0o077 == 0 else { throw BuddyWorkerFailure(message: "Buddy’s background worker is offline. Start it from Background work.") }
-        var address = try self.address(url); timeouts(fd)
+        var address = try self.address(url); timeouts(fd, seconds: max(1, timeout))
         let code = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
         guard code == 0 else { throw BuddyWorkerFailure(message: "Buddy’s background worker is offline. Start it from Background work.") }
         var uid: uid_t = 0, gid: gid_t = 0
@@ -750,8 +751,12 @@ struct BuddyAttempt {
                     continue
                 }
                 let check = review["kind"] as? String == "checkpoint", ask = ((review["questions"] as? [[String: Any]])?.first?["question"] as? String) ?? ""
-                out.append(DecisionSpec(id: "review:" + reviewID, kind: auth ? "signin" : "review", title: auth ? "Sign-in needs your choice" : check ? "Check the work: \(title)" : "Review: \(tool)",
-                                        question: auth ? "Choose how to sign in to \(review["origin"] as? String ?? "this site")." : check ? (ask.isEmpty ? "Look at the work and say whether to continue." : ask) : "Allow this exact operation?", label: check ? "Check work" : "Review", payload: ["taskId": id, "reviewId": reviewID]))
+                // A sign-in is answered in the agent's chat (a private field for the password, or Buddy's Chrome window).
+                let site = (review["origin"] as? String).flatMap { URL(string: $0)?.host }
+                var payload: [String: Any] = ["taskId": id, "reviewId": reviewID]
+                if auth, let signin = review["signinId"] as? String { payload["signinId"] = signin }
+                out.append(DecisionSpec(id: "review:" + reviewID, kind: auth ? "signin" : "review", title: auth ? (site.map { "Sign in to \($0)" } ?? "Sign-in needs your choice") : check ? "Check the work: \(title)" : "Review: \(tool)",
+                                        question: auth ? "Choose how to sign in to \(review["origin"] as? String ?? "this site") in the chat: type your password there, or open Chrome." : check ? (ask.isEmpty ? "Look at the work and say whether to continue." : ask) : "Allow this exact operation?", label: auth ? "Open chat" : check ? "Check work" : "Review", payload: payload))
             case "uncertain":
                 out.append(DecisionSpec(id: "action:" + reviewID + ":unconfirmed", kind: "unconfirmed", title: "Check whether “\(tool)” went through",
                                         question: "Buddy stopped before it could confirm this. Look at the site or service, then say whether it went through.", label: "Check action", payload: ["taskId": id, "reviewId": reviewID]))
@@ -763,10 +768,15 @@ struct BuddyAttempt {
             if cause == "review.parked" {
                 out.append(DecisionSpec(id: "waiting:\(id):\(attempt)", kind: "waiting", title: title, question: "Buddy set this aside so other work could run. Resume it when you can review the step it was waiting for.", label: "Open task", payload: ["taskId": id]))
             } else if point?["need"] as? String == "credential", let profile = point?["profile"] as? String, !profile.isEmpty {
-                // A sign-in is always the person's. Its card opens Buddy's own sign-in box; nothing about it is ever asked in a chat.
+                // A sign-in is always the person's. Its card opens the agent's chat, where a private field takes it straight to the Keychain.
                 let service = (point?["service"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "This service"
                 out.append(DecisionSpec(id: "credential:\(id):\(attempt):\(profile)", kind: "credential", title: "\(service) needs your sign-in", question: point?["question"] as? String ?? "Sign in to continue.",
                                         label: "Sign in", payload: ["taskId": id, "profile": profile]))
+            } else if let need = point?["need"] as? String, ["signin", "captcha", "verification"].contains(need) {
+                // A step only the person can do, outside the chat (in Buddy's Chrome window, or on their phone): its chat message has a Done button.
+                let site = ((point?["origin"] as? String) ?? (job["signInOrigin"] as? String)).flatMap { URL(string: $0)?.host }
+                out.append(DecisionSpec(id: "step:\(id):\(attempt):\(point?["id"] as? String ?? "")", kind: "step", title: site.map { "Finish signing in to \($0)" } ?? "Finish this step yourself",
+                                        question: point?["question"] as? String ?? (progress.isEmpty ? "Finish the step, then press Done." : progress), label: "Done", payload: ["taskId": id, "need": need]))
             } else {
                 let routed = (job["checkpoint"] as? [String: Any])?["routedTo"] as? String == "supervisor" ? "supervisor" : "user"
                 out.append(DecisionSpec(id: "waiting:\(id):\(attempt)", kind: "waiting", title: title, question: progress.isEmpty ? "This task is waiting for you." : progress, label: "Open task", payload: ["taskId": id], audience: routed))
@@ -799,7 +809,7 @@ struct BuddyAttempt {
         return out
     }
     /// Kinds kept equal to a task's state. `allowance` is no longer opened, but stays here so rows left from before are still resolved.
-    private static let derivedKinds = "('review', 'signin', 'waiting', 'allowance', 'stopped', 'unconfirmed', 'limit', 'paused', 'result', 'credential', 'mfa', 'command_review')"
+    private static let derivedKinds = "('review', 'signin', 'waiting', 'allowance', 'stopped', 'unconfirmed', 'limit', 'paused', 'result', 'credential', 'mfa', 'command_review', 'step')"
     /// Keeps the open blockers of one task equal to what its state implies, in the transaction that saves it: new ones are opened, ones whose cause
     /// has ended are resolved, and each is an event, so a consumer can follow them.
     private static func syncDecisions(_ task: [String: Any], in db: BuddyOperationsDB) throws {

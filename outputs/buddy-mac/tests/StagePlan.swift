@@ -477,6 +477,49 @@ import Foundation
             print("PASS: a plan task whose run was cancelled outside the supervisor's own actions (the user's Cancel task) is an item for the supervisor, never a stage that silently waits; starting it again makes one worker task for the next dispatch, a second cancel is a new item, and a stopped plan waits for the user")
         }
 
+        // 13. A run the user paused (Pause on the task, Pause all, or stopping the plan) waits for the user to resume it. The supervisor has no
+        // item for it and may not resume it, so the plan never says it waits on the supervisor; it is not something to act on either (the user
+        // did it), so it does not count as needing the user. The plan reads "paused" when nothing else is going on. A pause Buddy made (a stall)
+        // is still the supervisor's.
+        do {
+            let (store13, plans13, _) = try fresh(root, "user-paused")
+            let plan13 = try plans13.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Reproduce the Omori results", stages: stages, tasks: tasks, members: members, by: chief)
+            let (planID13, _, keys13) = ids(plan13)
+            let p1 = keys13["t1"] ?? ""
+            _ = try plans13.authorize(planId: planID13, through: 1, quote: "get stage 1 done", messageId: "m13", viaButton: false, now: Date())
+            let run13 = try step(store13, plans13).first ?? ""
+            try store13.update(run13, ["status": "running", "attempt": 1, "executionRunID": "r13"])
+            func look() throws -> (row: [String: Any], run: [String: Any]) {
+                _ = try step(store13, plans13)
+                let summary = try plans13.summary(workspace: w, jobs: store13.jobs, names: names).first ?? [:]
+                return (row(in: summary, p1), summary["run"] as? [String: Any] ?? [:])
+            }
+            for cause in ["user.pause", "user.pauseAll"] {
+                try store13.update(run13, ["status": "paused", "stopCause": cause, "progress": "Paused. Saved progress is available."])
+                let (paused, run) = try look()
+                require(paused["status"] as? String == "blocked" && paused["blockedOn"] as? String == "paused" && run["state"] as? String == "paused" && run["needsYou"] as? Int == 0,
+                        "a run the user paused (\(cause)) waits for the user to resume it, without counting as needing them: \(paused["blockedOn"] ?? "") \(run)")
+                require(try plans13.workItems(workspace: w).isEmpty, "the supervisor has nothing for it")
+            }
+            // A pause Buddy made (the run stalled) is the supervisor's to resume.
+            try store13.update(run13, ["status": "paused", "stopCause": "stall", "progress": "Stalled."])
+            let (stalled, stalledRun) = try look()
+            require(stalled["blockedOn"] as? String == "supervisor" && stalledRun["state"] as? String == "waiting_on_supervisor", "a stall still waits on the supervisor: \(stalled["blockedOn"] ?? "") \(stalledRun)")
+            // Resumed by the user: working again.
+            try store13.update(run13, ["status": "paused", "stopCause": "user.pause"])
+            _ = try look()
+            _ = try store13.resume(run13)
+            let (resumed, resumedRun) = try look()
+            require(resumed["status"] as? String == "dispatched" && resumed["blockedOn"] as? String == "none" && resumedRun["state"] as? String == "working", "resumed, the task works again: \(resumedRun)")
+            // Stopping the plan pauses its runs: each reads as paused by the user, and the plan as stopped.
+            try store13.update(run13, ["status": "running"])
+            _ = try plans13.stop(planId: planID13)
+            try store13.update(run13, ["status": "paused", "stopCause": "user.plan_stop", "progress": "Paused: you stopped the team plan."])
+            let (stopped, stoppedRun) = try look()
+            require(stopped["blockedOn"] as? String == "paused" && stoppedRun["state"] as? String == "stopped", "a run paused by stopping the plan reads as paused by the user: \(stopped["blockedOn"] ?? "") \(stoppedRun)")
+            print("PASS: a plan task whose run the user paused (on the task, with Pause all, or by stopping the plan) waits for the user to resume it: never “waiting on the supervisor”, not counted as needing the user, and the plan reads paused when nothing else goes on; a stall stays the supervisor's")
+        }
+
         // 8. Graceful read.
         let empty = root.appendingPathComponent("empty")
         _ = try BuddyWorkerStore(directory: empty.appendingPathComponent("Worker"))

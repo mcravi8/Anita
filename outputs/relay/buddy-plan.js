@@ -62,7 +62,7 @@
       case 'done':return {label:'Done',tone:'done'};
       case 'waived':return {label:'Skipped',tone:'idle'};
       case 'review':return {label:'Being reviewed',tone:'review'};
-      case 'blocked':return task.blockedOn==='user'?{label:'Needs you',tone:'needs'}:task.blockedOn==='retry'?{label:'Retrying',tone:'retry'}:{label:`With ${supervisor}`,tone:'review'};
+      case 'blocked':return task.blockedOn==='user'?{label:'Needs you',tone:'needs'}:task.blockedOn==='retry'?{label:'Retrying',tone:'retry'}:task.blockedOn==='paused'?{label:'Paused by you',tone:'idle'}:{label:`With ${supervisor}`,tone:'review'};
       case 'dispatched':
         if(isRetrying(task,pulse))return {label:'Retrying',tone:'retry'};
         if(live==='needs_you'||task.blockedOn==='user')return {label:'Needs you',tone:'needs'};
@@ -108,6 +108,12 @@
       const head=`Working on Stage ${stage?.n??1} of ${total} — ${done} of ${inStage.length} tasks done`,t=live[0];
       if(!t)return head;
       return `${head} — ${nameOf(names,t.assignee)||'A teammate'} is working on ${quoted(t.title)}${duration(sinceOf(t,run),now)}${live.length>1?`, plus ${live.length-1} more`:''}`;
+    }
+    // Only runs the person paused hold the stage: it goes on once they resume them.
+    if(state==='paused'){
+      const held=tasks.filter(t=>t.status==='blocked'&&t.blockedOn==='paused'),t=held[0],who=t&&nameOf(names,t.assignee);
+      if(held.length>1)return `You paused ${held.length} tasks — resume them to finish Stage ${stage?.n??1}`;
+      return t?`You paused ${quoted(t.title)}${who?` (${who})`:''} — resume it to finish Stage ${stage?.n??1}`:'Paused by you';
     }
     if(state==='idle'){const at=clock(run.idleSince);return at?`Idle since ${at} — nothing queued`:'Idle — nothing queued';}
     return `Working on Stage ${stage?.n??1} of ${total}`;
@@ -176,7 +182,7 @@
   }
 
   const chevron='<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>';
-  const TONE={draft:'ready',working:'working',waiting_on_supervisor:'review',needs_you:'needs',stage_done:'done',stopped:'idle',idle:'idle'};
+  const TONE={draft:'ready',working:'working',waiting_on_supervisor:'review',needs_you:'needs',paused:'idle',stage_done:'done',stopped:'idle',idle:'idle'};
   const tone=plan=>plan?TONE[runState(plan)]||'idle':'';
   // The same strip, folded above the composer or, docked in the project panel beside the chat, always open: its first line is then the live status,
   // not a toggle. Every button in it is the same button, handled the same way, wherever it is shown.

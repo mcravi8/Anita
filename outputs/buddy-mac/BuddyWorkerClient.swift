@@ -309,6 +309,7 @@ enum BuddyPlanChat {
                 let tasks = stage["tasks"] as? [[String: Any]] ?? []
                 func state(_ task: [String: Any]) -> String {
                     let on = task["blockedOn"] as? String ?? "none", status = task["status"] as? String ?? ""
+                    if on == "paused" { return status + ", paused by the user until they resume it" }
                     return on == "none" || on.isEmpty ? status : status + ", waiting on " + (on == "user" ? "the user" : on == "retry" ? "an automatic retry" : "the supervisor")
                 }
                 let listed = supervises

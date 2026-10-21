@@ -121,7 +121,7 @@ struct BuddyAgentProposal: Codable {
         let current = try state(scope.workspace)
         let agents = (current["agents"] as? [[String: Any]] ?? []).map { ["id": $0["id"] ?? "", "name": $0["name"] ?? "", "role": $0["role"] ?? ""] }
         let suggestions = try list(scope.workspace).map { ["name": ($0["draft"] as? [String: Any])?["name"] ?? "", "status": $0["status"] ?? "pending"] }
-        let data = try JSONSerialization.data(withJSONObject: ["registeredAgents": agents, "suggestions": suggestions])
+        let data = try JSONSerialization.data(withJSONObject: ["registeredAgents": agents, "suggestions": suggestions], options: .sortedKeys)
         return "Actual Buddy team and suggestion decisions (context only): " + String(data: data, encoding: .utf8)!
     }
     func propose(_ scope: BuddyProposalScope, executionRunId: String, callId: String, arguments: [String: Any]) throws -> [String: Any] {

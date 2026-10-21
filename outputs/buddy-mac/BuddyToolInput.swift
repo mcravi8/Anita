@@ -40,7 +40,7 @@ struct BuddyToolInput {
         self.isConnectorApproval = isConnectorApproval
     }
     var record: [String: Any] {
-        ["id": id, "native": true, "runId": replyRunId, "executionRunId": executionRunId, "workspace": workspace,
+        ["id": id, "native": true, "createdAt": ISO8601DateFormatter().string(from: Date()), "runId": replyRunId, "executionRunId": executionRunId, "workspace": workspace,
          "chat": chat, "agentId": agentId, "agentName": agentName, "status": "pending", "questions": questions, "tool": tool,
          "reviewKind": isConnectorApproval ? "connector" : "question"]
     }

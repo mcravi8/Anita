@@ -2,10 +2,13 @@
 /*
 !/.gitignore
 !/README.md
+!/AGENTS.md
+!/docs/
 !/outputs/
 /outputs/*
 !/outputs/buddy-mac/
 !/outputs/relay/
+!/outputs/buddy-worker/
 
 # Generated binaries and temporary build files.
 **/*.app/
@@ -15,6 +18,8 @@
 **/__pycache__/
 **/*.pyc
 **/.build/
+**/.buddy-install.lock
+**/*.pending
 **/node_modules/
 **/*.log
 
@@ -34,3 +39,7 @@
 **/ProjectHistory/
 **/Projects/
 **/Archives/
+
+# Provider preferences and optional Claude runtime state.
+**/ai-providers.json
+**/Claude/

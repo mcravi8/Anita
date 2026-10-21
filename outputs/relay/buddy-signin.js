@@ -1,0 +1,280 @@
+(function(root){
+  'use strict';
+  // Sign-ins and other steps only the person can do, asked in the chats. The Mac app says what is waiting (`signinRequests` in the worker's
+  // status): a password or code to type for a website, a service sign-in to save (WRDS), a step to finish outside the chat (Buddy's Chrome
+  // window, a push on the phone) and confirm with Done. Each request is one message in the agent's chat, and one in the team's group chat
+  // when its task belongs to a team plan; both are the same request, so answering either answers both.
+  //
+  // What the person types goes from the field to the app's sign-in bridge and nowhere else: never into a message, the saved workspace,
+  // drafts, browser storage or a log. The field is cleared as soon as it is sent. Messages keep only what was asked and what came of it.
+  const KINDS=new Set(['signin','step','credential','mfa']);
+  const KEPT=['key','kind','taskId','agentId','reviewId','mode','origin','account','field','step','note','attempts','choices','profile','service','instruction','need','chromeOpen','legacy','title','url','target','coding','unknownPage'];
+  const host=origin=>{try{return new URL(origin).host||String(origin);}catch{return String(origin||'')||'this website';}};
+  // A step on a web page is on its exact page (`url`), else on its site; one with neither is a step Buddy doesn't know the page of.
+  const stepPage=r=>r.unknownPage?'':r.url||r.origin||'';
+  // Where a file goes ("Directed Research/stages/S01_protocol/sources/sethna-2022.pdf"): its folder, and its name.
+  const folderOf=target=>{const t=String(target||''),at=t.lastIndexOf('/');return at>0?t.slice(0,at):t;};
+  const fileName=target=>String(target||'').split('/').pop();
+  const nameOf=(state,id)=>(state?.agents||[]).find(a=>a.id===id)?.name;
+  // The request as a message keeps it: what is asked and of whom. Never a token, never what was typed.
+  function view(request){const out={};for(const key of KEPT)if(request[key]!==undefined&&request[key]!==null&&request[key]!=='')out[key]=request[key];return out;}
+  // `who`: the agent's name, for a step Buddy doesn't know the page of.
+  function title(r,who){
+    const site=host(r.origin);
+    if(r.kind==='credential')return `${r.service||'This service'} needs your sign-in`;
+    if(r.kind==='mfa')return `Approve the ${r.service||'sign-in'} Duo push on your phone`;
+    if(r.kind==='step'){
+      // Always the site, never "the website": the step's own page, and the account to use there.
+      const page=stepPage(r);if(!page)return `Buddy doesn’t know which page — ask ${who||'the agent'}`;
+      const at=host(page);
+      if(r.need==='captcha')return `Finish the CAPTCHA on ${at}`;
+      if(r.need==='verification')return `Finish verifying on ${at}`;
+      if(r.need==='file'){const into=folderOf(r.target);return `Save ${/\.pdf$/i.test(String(r.target||''))?'the PDF':'the file'} from ${at}${into?` into ${into}`:''}`;}
+      return `Sign in to ${at}${r.account?` as ${r.account}`:''}`;
+    }
+    if(r.mode==='signup')return `Create your account on ${site}`;
+    if(r.field==='code')return `Code for ${site}`;
+    return `Sign in to ${site}`;
+  }
+  // One plain line for the chat list and search; the message itself says the rest.
+  const summary=(r,who)=>title(r,who)+'.';
+  // Which chats a request is posted in: its agent's, and the group chat of the team plan its task belongs to.
+  function chatsFor(state,snapshot,request){
+    const out=[];
+    if((state.agents||[]).some(a=>a.id===request.agentId))out.push(request.agentId);
+    const plan=request.planId?(snapshot.plans||[]).find(p=>p?.id===request.planId):null;
+    if(plan?.groupId&&(state.groups||[]).some(g=>g.id===plan.groupId))out.push(plan.groupId);
+    return out;
+  }
+  const ended=m=>m.request?.kind==='mfa'?`The ${m.request.service||'sign-in'} step is over.`:m.request?.kind==='step'?'This step has ended.':'This sign-in request has ended.';
+  const stamp=()=>new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  function messages(state,key){const out=[];for(const list of Object.values(state.messages||{}))if(Array.isArray(list))for(const m of list)if(m?.kind==='signin-request'&&m.request?.key===key)out.push(m);return out;}
+  /** Brings the chats up to date with what the app says is waiting: a message for each new request, an updated one for a changed request,
+   *  and a closed one for a request that has ended. Returns whether anything changed. */
+  // `pins`: requests whose next try the page already knows from the app's answer (key → reviewId), so a status read just before that
+  // answer cannot send the person's next try to the one that ended.
+  function sync(state,snapshot,pins=new Map()){
+    if(!snapshot||snapshot.workspace!==state.conversationWorkspace||!Array.isArray(snapshot.signinRequests))return false;
+    let changed=false;const open=new Set();
+    for(const request of snapshot.signinRequests){
+      if(!KINDS.has(request?.kind)||typeof request.key!=='string'||!request.key)continue;
+      open.add(request.key);const next=view(request);
+      const pin=pins.get(request.key);if(pin){if(pin.reviewId===next.reviewId||Date.now()>pin.until)pins.delete(request.key);else continue;}
+      for(const chat of chatsFor(state,snapshot,request)){
+        state.messages[chat]||=[];
+        const m=state.messages[chat].find(x=>x?.kind==='signin-request'&&x.request?.key===request.key);
+        if(!m){state.messages[chat].push({id:`signin-${request.key}${chat===request.agentId?'':'@'+chat}`,kind:'signin-request',who:request.agentId,chat,request:next,status:'open',body:summary(next,nameOf(state,request.agentId)),time:stamp(),createdAt:new Date().toISOString()});changed=true;continue;}
+        if(m.status==='closed'||m.status==='done')continue;
+        if(JSON.stringify(m.request)!==JSON.stringify(next)){
+          // A new try of the same request (a fresh field after a wrong password, a code step): the last outcome stays until it is answered.
+          if(m.request?.reviewId&&next.reviewId&&m.request.reviewId!==next.reviewId&&m.status==='sending')m.status='open';
+          m.request=next;m.body=summary(next,nameOf(state,request.agentId));changed=true;
+        }
+      }
+    }
+    // A request no longer waiting has ended: its messages say how, in place.
+    for(const list of Object.values(state.messages||{}))if(Array.isArray(list))for(const m of list){
+      if(m?.kind!=='signin-request'||m.status==='closed'||open.has(m.request?.key))continue;
+      // An answer still on its way when the request ended says what it was.
+      if(m.status==='sending')m.result=m.choice==='saved'?'Used your saved login.':m.choice==='verify'?'Used the code from Gmail.':m.choice==='private'?'Continued in Buddy’s Chrome window.':m.result;
+      m.status='closed';m.result||=ended(m);changed=true;
+    }
+    return changed;
+  }
+  /** Records what came of the person's answer on every message of the request (its agent's chat and its group chat alike). */
+  function settle(state,key,patch){
+    const found=messages(state,key);
+    for(const m of found){
+      if(patch.status)m.status=patch.status;
+      if('result' in patch)m.result=patch.result;
+      // A request field the answer says is gone (no field to type into any more) is removed, not kept from before.
+      if(patch.request)for(const [k,v] of Object.entries(patch.request)){if(!KEPT.includes(k)||v===undefined)continue;if(v===null||v==='')delete m.request[k];else m.request[k]=v;}
+      if(patch.choice)m.choice=patch.choice;
+      if(patch.acknowledged)m.acknowledged=true;
+      m.body=summary(m.request||{},nameOf(state,m.request?.agentId));
+    }
+    return found.length>0;
+  }
+  const api={sync,settle,view,chatsFor,title,summary};root.BuddySignIn=api;if(typeof module!=='undefined')module.exports=api;
+  if(typeof document==='undefined')return;
+
+  // MARK: on the page
+
+  const busy=new Set(),pins=new Map();
+  const pinNext=(key,reply)=>{if(reply?.reviewId)pins.set(key,{reviewId:reply.reviewId,until:Date.now()+10000});};
+  // A typed value lives only in its field. The chat redraws often (a reply streams, a status arrives), and a redraw would empty the
+  // field mid-typing, so the field being typed in is moved into the redrawn message instead. It is let go the moment it is sent.
+  const typing=new Map();let lastField=null;
+  const fieldKey=(key,name)=>`${key}|${name}`;
+  function field(r,name,label,type){
+    return `<label class="signin-field"><span>${esc(label)}</span><input type="${type}" data-signin-input="${esc(fieldKey(r.key,name))}" data-signin-name="${esc(name)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="${name==='username'?200:1000}" aria-label="${esc(label)}"></label>`;
+  }
+  const button=(attr,key,label,primary=false,disabled=false)=>`<button type="button" class="${primary?'primary-button':'border-button'}" ${attr}="${esc(key)}" ${disabled?'disabled':''}>${esc(label)}</button>`;
+  function body(m){
+    const r=m.request||{},site=host(r.origin),off=m.status!=='open'||busy.has(r.key),who=findAgent(r.agentId)?.name||'The agent';
+    const done=m.status==='closed'||m.status==='done';
+    let html=`<strong class="signin-title">${esc(title(r,who))}</strong>`;
+    const about=[r.account?`Account: ${r.account}`:'',r.kind==='credential'&&r.profile?'Kept in your Mac’s Keychain':'',r.title?`For “${r.title}”`:''].filter(Boolean).join(' · ');
+    if(about)html+=`<small class="signin-about">${esc(about)}</small>`;
+    if(m.result)html+=`<p class="signin-result ${/signed in|saved|done —|continuing/i.test(m.result)?'ok':''}" role="status">${esc(m.result)}</p>`;
+    if(done)return html;
+    if(r.note&&r.note!==m.result)html+=`<p class="signin-note">${esc(r.note)}</p>`;
+    if(r.kind==='signin'){
+      if(r.field){
+        const label=r.field==='code'?`Code for ${site}`:`Password for ${site}`;
+        html+=`<div class="signin-holder" data-signin-holder="${esc(r.key)}" data-signin-task="${esc(r.taskId)}">${field(r,r.field,label,'password')}${button('data-signin-send',r.key,busy.has(r.key)?'Sending…':'Send',true,off)}</div>`;
+        html+=`<small class="signin-assurance">Buddy types this into ${esc(site)}’s sign-in page and nowhere else. ${esc(who)} never sees it, and it isn’t saved in this chat.</small>`;
+      }else if(r.step==='wait')html+=`<p class="signin-note">${esc(r.note||`${site} is waiting for a step you do elsewhere. Do it, then press Done.`)}</p>`;
+      else if(!r.note)html+=`<p class="signin-note">${esc(r.mode==='signup'?`${who} wants to create an account on ${site}. Create it in Buddy’s Chrome window, where Chrome can save the new password.`:`${who} needs you to sign in to ${site}.`)}</p>`;
+      const choices=r.choices||[];
+      html+=`<div class="signin-actions">${r.step==='wait'?button('data-signin-check',r.key,'Done',true,off):''}${choices.includes('saved')?button('data-signin-choice',r.key+'|saved','Use saved login',!r.field&&r.step!=='wait',off):''}${choices.includes('verify')?button('data-signin-choice',r.key+'|verify','Get the code from Gmail',!r.field,off):''}${choices.includes('private')?button('data-signin-choice',r.key+'|private',r.mode==='signup'?'Create in Chrome':r.field?'Open Chrome instead':'Open Chrome',!r.field&&!choices.includes('saved')&&r.step!=='wait',off):''}${button('data-signin-choice',r.key+'|decline','Not now',false,off)}</div>`;
+    }else if(r.kind==='credential'){
+      if(r.instruction)html+=`<p class="signin-note">${esc(r.instruction)}</p>`;
+      html+=`<div class="signin-holder signin-holder-pair" data-signin-holder="${esc(r.key)}" data-signin-task="${esc(r.taskId)}">${field(r,'username',`${r.service||'Service'} username`,'text')}${field(r,'password',`${r.service||'Service'} password`,'password')}${button('data-signin-send',r.key,busy.has(r.key)?'Saving…':'Save',true,off)}</div>`;
+      html+=`<small class="signin-assurance">Buddy keeps this in your Mac’s Keychain, so you’re asked only once. ${esc(who)} never sees it; Buddy fills it in only for commands you approve.</small>`;
+    }else if(r.kind==='step'){
+      // What to do on which page, Open the page (that exact page, in Buddy's Chrome) and Done. A step Buddy doesn't know the page of opens
+      // nothing: the person asks the agent in this chat.
+      const page=stepPage(r);
+      html+=`<p class="signin-note">${esc(r.instruction||'Finish the step, then press Done.')}</p>`;
+      if(!page)html+=`<p class="signin-note">${esc(who)} didn’t say which page this is on. Reply in this chat to ask ${esc(who)} which page it needs.</p>`;
+      html+=`<div class="signin-actions" data-signin-task="${esc(r.taskId)}">${button('data-signin-done',r.key,busy.has(r.key)?'Checking…':'Done',true,off)}${page?button('data-signin-chrome',r.key,'Open the page',false,off):button('data-signin-reply',r.key,'Reply in chat',false,false)}</div>`;
+      if(r.need==='file')html+=`<small class="signin-assurance">Name it ${esc(fileName(r.target))}. Save it from the page into that folder, then press Done: ${esc(who)} checks it’s there before using it.</small>`;
+      else if(r.coding)html+=`<small class="signin-assurance">${esc(who)}’s commands can’t use what you sign in to in Chrome. Press Done and ${esc(who)} will ask you for the file instead.</small>`;
+      else html+=`<small class="signin-assurance">Done tells Buddy to look again and carry on.</small>`;
+    }else if(r.kind==='mfa'){
+      html+=`<p class="signin-note">${esc(r.instruction||'Approve the push on your phone, then press Done.')}</p>`;
+      html+=m.acknowledged?`<p class="signin-result" role="status">Thanks. This updates by itself when the command finishes.</p>`:`<div class="signin-actions" data-signin-task="${esc(r.taskId)}">${button('data-signin-mfa',r.key,'Done',true,off)}</div>`;
+    }
+    return html;
+  }
+  function render(m){
+    const r=m.request||{},a=findAgent(r.agentId);if(!a)return '';
+    const group=!!findGroup(ui.view.target),done=m.status==='closed'||m.status==='done';
+    return `<div class="message bot-message signin-message ${done?'signin-ended':''}" data-signin-key="${esc(r.key||'')}">${group?avatar(a.id,true):''}<div class="bot-bubble signin-bubble">${group?`<button class="message-author" style="${authorColor(a)}" data-action="agent-info" data-id="${esc(a.id)}">${esc(a.name)}</button>`:''}${body(m)}<time>${esc(m.time||'')}</time></div></div>`;
+  }
+  api.render=render;
+  // The chat draws messages through `messageHTML`; a sign-in request is drawn here.
+  if(typeof window.messageHTML==='function'){const original=window.messageHTML;window.messageHTML=function(m){return m?.kind==='signin-request'?render(m):original.apply(this,arguments);};}
+  function redraw(){
+    save();
+    if(typeof ui!=='undefined'&&ui.view?.kind==='chat'&&typeof refreshLiveChat==='function')refreshLiveChat(ui.view.target);
+    if(typeof repaintChatList==='function')repaintChatList();
+  }
+  function request(key){return messages(state,key)[0]?.request||null;}
+  function bridge(){if(!window.BuddyDesktop?.signin)throw Error('Open Buddy on this Mac to sign in.');return window.BuddyDesktop.signin;}
+  async function send(key){
+    const r=request(key),holder=[...document.querySelectorAll('[data-signin-holder]')].find(h=>h.dataset.signinHolder===key);if(!r||!holder||busy.has(key))return;
+    const inputs=[...holder.querySelectorAll('[data-signin-input]')],values=Object.fromEntries(inputs.map(i=>[i.dataset.signinName,i.value]));
+    if(inputs.some(i=>!i.value)){(inputs.find(i=>!i.value)||inputs[0])?.focus();return;}
+    // The field is emptied and let go before anything else happens; the value exists only in this call until the app has it.
+    for(const i of inputs){i.value='';typing.delete(i.dataset.signinInput);}
+    busy.add(key);settle(state,key,{result:''});redraw();
+    let reply;
+    try{
+      const signin=bridge();
+      reply=r.kind==='credential'?await signin({action:'provide',profile:r.profile,taskId:r.taskId,username:values.username,password:values.password})
+        :await signin({action:'secret',taskId:r.taskId,reviewId:r.reviewId,value:values[r.field]});
+    }catch(error){reply={sent:false,error:String(error?.message||error)};}
+    finally{for(const k of Object.keys(values))values[k]='';busy.delete(key);}
+    pinNext(key,reply);
+    if(r.kind==='credential')settle(state,key,reply?.saved?{status:'done',result:reply.resumed?`Saved — ${agentName(r.agentId)} is continuing.`:'Saved in your Keychain.'}:{result:reply?.error||'That didn’t save. Try again.'});
+    else if(reply?.signedIn)settle(state,key,{status:'done',result:'Sent — signed in'});
+    else if(reply?.sent)settle(state,key,{result:reply.retry?'Sent — that didn’t work, try again':reply.chrome?'Sent — the website needs you in Buddy’s Chrome window.':'Sent — the website wants another step.',request:{reviewId:reply.reviewId,field:reply.field??null,note:reply.note,step:reply.step}});
+    else settle(state,key,{result:reply?.note||reply?.error||'That didn’t go through. Nothing was sent. Try again.',request:reply?.reviewId?{reviewId:reply.reviewId}:undefined});
+    redraw();window.BuddyWorkerUI?.refresh?.(false);
+  }
+  async function choose(key,choice){
+    const r=request(key);if(!r||busy.has(key))return;
+    busy.add(key);redraw();
+    try{
+      if(!window.BuddyDesktop?.worker)throw Error('Open Buddy on this Mac to sign in.');
+      await window.BuddyDesktop.worker({operation:'review',taskId:r.taskId,id:r.reviewId,accept:choice!=='decline',...(choice==='decline'?{}:{authAction:choice})});
+      settle(state,key,choice==='decline'?{status:'closed',result:`Not now. ${agentName(r.agentId)} won’t sign in.`}:{status:'sending',choice,result:choice==='saved'?'Trying your saved login…':choice==='verify'?'Getting the code from Gmail…':'Opening Buddy’s Chrome window…'});
+    }catch(error){settle(state,key,{result:String(error?.message||error)});}
+    finally{busy.delete(key);}
+    redraw();window.BuddyWorkerUI?.refresh?.(false);
+  }
+  async function done(key,kind){
+    const r=request(key);if(!r||busy.has(key))return;
+    busy.add(key);redraw();
+    let reply;
+    try{reply=await bridge()(kind==='check'?{action:'check',taskId:r.taskId,reviewId:r.reviewId}:{action:'done',taskId:r.taskId});}
+    catch(error){reply={done:false,note:String(error?.message||error)};}
+    finally{busy.delete(key);}
+    pinNext(key,reply);
+    if(reply?.done||reply?.signedIn)settle(state,key,{status:'done',result:`Done — ${agentName(r.agentId)} is continuing.`});
+    else settle(state,key,{result:reply?.note||'It isn’t finished yet. Finish the step, then press Done.',request:reply?.reviewId?{reviewId:reply.reviewId,field:reply.field??null,note:reply.note,step:reply.field?reply.field:'wait'}:{chromeOpen:reply?.reopened===true||r.chromeOpen}});
+    redraw();window.BuddyWorkerUI?.refresh?.(false);
+  }
+  async function chrome(key){
+    const r=request(key);if(!r||busy.has(key))return;
+    busy.add(key);redraw();
+    // The step's own page goes with the request; the app opens it only if it is still that step's page.
+    const page=stepPage(r);
+    try{await window.BuddyDesktop.worker({operation:'browser',taskId:r.taskId,...(page?{url:page}:{})});settle(state,key,{result:`Chrome is open at ${host(page)}. Finish there, then press Done.`,request:{chromeOpen:true}});}
+    catch(error){settle(state,key,{result:String(error?.message||error)});}
+    finally{busy.delete(key);}
+    redraw();window.BuddyWorkerUI?.refresh?.(false);
+  }
+  // Done on a Duo push only acknowledges it: the message changes by itself when the command finishes. Its Needs item is put away too.
+  function acknowledge(key){
+    const r=request(key);if(!r)return;
+    settle(state,key,{acknowledged:true});
+    const [,task,command]=String(r.key).split(':'),id=`decision:mfa:${task}:${command||''}`;
+    window.BuddyActivity?.markRead?.(state,[id]);window.BuddyActivity?.dismiss?.(state,[id]);
+    try{window.BuddyDesktop?.worker?.({operation:'notify',ids:[id],read:true,dismissed:true});}catch{}
+    redraw();window.BuddyActivity?.paint?.();
+  }
+  document.addEventListener('click',e=>{
+    const target=e.target.closest?.('[data-signin-send],[data-signin-choice],[data-signin-check],[data-signin-done],[data-signin-chrome],[data-signin-mfa],[data-signin-reply]');if(!target||target.disabled)return;
+    e.preventDefault();
+    if(target.dataset.signinSend)send(target.dataset.signinSend);
+    else if(target.dataset.signinChoice){const at=target.dataset.signinChoice.lastIndexOf('|');choose(target.dataset.signinChoice.slice(0,at),target.dataset.signinChoice.slice(at+1));}
+    else if(target.dataset.signinCheck)done(target.dataset.signinCheck,'check');
+    else if(target.dataset.signinDone)done(target.dataset.signinDone,'done');
+    else if(target.dataset.signinChrome)chrome(target.dataset.signinChrome);
+    else if(target.dataset.signinMfa)acknowledge(target.dataset.signinMfa);
+    else if(target.dataset.signinReply)document.getElementById('message-input')?.focus();
+  });
+  document.addEventListener('keydown',e=>{
+    const input=e.target.closest?.('[data-signin-input]');if(!input||e.key!=='Enter'||e.isComposing)return;
+    e.preventDefault();const holder=input.closest('[data-signin-holder]'),next=[...holder.querySelectorAll('[data-signin-input]')].find(i=>!i.value);
+    if(next&&next!==input)next.focus();else send(holder.dataset.signinHolder);
+  });
+  document.addEventListener('input',e=>{const input=e.target.closest?.('[data-signin-input]');if(!input)return;if(input.value)typing.set(input.dataset.signinInput,input);else typing.delete(input.dataset.signinInput);});
+  document.addEventListener('focusin',e=>{if(e.target.closest?.('[data-signin-input]'))lastField=e.target;});
+  new MutationObserver(records=>{
+    if(!typing.size)return;
+    for(const record of records)for(const node of record.addedNodes){
+      if(node.nodeType!==1)continue;
+      for(const fresh of node.matches('[data-signin-input]')?[node]:node.querySelectorAll('[data-signin-input]')){
+        const kept=typing.get(fresh.dataset.signinInput);if(!kept||kept===fresh||kept.isConnected)continue;
+        const focus=lastField===kept&&(document.activeElement===fresh||document.activeElement===document.body||!document.activeElement),start=kept.selectionStart,end=kept.selectionEnd;
+        kept.disabled=fresh.disabled;fresh.replaceWith(kept);
+        if(focus){kept.focus({preventScroll:true});try{kept.setSelectionRange(start,end);}catch{}}
+      }
+    }
+  }).observe(document.body,{childList:true,subtree:true});
+  // A Needs item for a sign-in opens the agent's chat at its request.
+  document.addEventListener('click',e=>{
+    const item=e.target.closest?.('[data-signin-open]');if(!item)return;
+    const task=item.dataset.signinOpen,until=Date.now()+2500;
+    // The drawer closes with a short animation, and the chat cannot take focus until it has gone.
+    const reach=()=>{
+      const app=document.getElementById('app');
+      if((app?.inert||document.querySelector('.modal-overlay'))&&Date.now()<until)return setTimeout(reach,50);
+      const at=[...document.querySelectorAll('[data-signin-task]')].filter(x=>x.dataset.signinTask===task).at(-1);if(!at)return;
+      at.scrollIntoView({block:'center'});at.querySelector('input,button:not([disabled])')?.focus({preventScroll:true});
+    };
+    setTimeout(reach,30);
+  });
+  window.addEventListener('buddy-worker-snapshot',()=>{
+    const snapshot=window.BuddyWorkerUI?.snapshot?.();if(!snapshot)return;
+    if(sync(state,snapshot,pins))redraw();
+    // A field being typed into for a request that has ended is let go, with what was typed in it.
+    if(Array.isArray(snapshot.signinRequests)){const open=new Set(snapshot.signinRequests.map(r=>r?.key));for(const [id,input] of typing)if(!open.has(id.slice(0,id.lastIndexOf('|')))){input.value='';typing.delete(id);}}
+  });
+  // The open chat was drawn before this file loaded: draw its sign-in requests now.
+  if(typeof ui!=='undefined'&&ui.view?.kind==='chat'&&typeof refreshLiveChat==='function')refreshLiveChat(ui.view.target);
+})(typeof globalThis!=='undefined'?globalThis:this);

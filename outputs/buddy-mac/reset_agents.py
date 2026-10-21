@@ -1,0 +1,82 @@
+"""Explicit, offline removal of the active team; preserve files and account access."""
+from pathlib import Path
+import argparse,datetime,fcntl,json,os,sqlite3,subprocess,tempfile,uuid,zipfile
+
+BOOTSTRAP='Learn the job the user wants help with through the setup conversation before beginning work.'
+def stop_worker():
+    if subprocess.run(['pgrep','-x','Buddy'],stdout=subprocess.DEVNULL).returncode==0:
+        raise RuntimeError('Quit Buddy before removing its saved agents.')
+    subprocess.run(['launchctl','bootout',f'gui/{os.getuid()}/app.buddy.worker'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    if subprocess.run(['pgrep','-x','BuddyWorker'],stdout=subprocess.DEVNULL).returncode==0:
+        raise RuntimeError('Buddy’s worker is still stopping. Retry when it has exited.')
+
+def worker_database(support):
+    """An open connection to the worker's task database once it holds the tasks and routines, else None (the old JSON files are then the truth)."""
+    path=support/'Worker/operations.sqlite'
+    if not path.exists():return None
+    connection=sqlite3.connect(f'file:{path}?mode=rw',uri=True,timeout=5)
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() and connection.execute("SELECT 1 FROM meta WHERE key='migration'").fetchone():return connection
+    connection.close();return None
+
+def reset(support,stop=stop_worker):
+    support=Path(support);stop()
+    with (support/'agent-reset.lock').open('a') as lock:
+        os.chmod(lock.name,0o600);fcntl.flock(lock,fcntl.LOCK_EX)
+        names=['workspace.json','agent-models.json','agent-interviews.json','agent-memory.json','team-monitor.json','team-plans.json','agent-proposals.json','conversation-providers.json','Worker/tasks.json','Worker/routines.json']
+        raw={name:(support/name).read_bytes() for name in names if (support/name).exists()}
+        saved={name:json.loads(data) for name,data in raw.items()};state=saved['workspace.json'];workspace=state['conversationWorkspace'];uuid.UUID(workspace)
+        if state.get('version')!=1 or not isinstance(state.get('agents'),list):raise RuntimeError('Could not verify the saved workspace.')
+        count=len(state['agents']);state.update(agents=[],groups=[],tasks=[],messages={},drafts={},attachments={},proposals=[],runs={},agentSetup={},messagingRevision=2,lastView={'kind':'chat','target':None})
+        state['onboarding']={'version':1,'status':'pending','registrationId':str(uuid.uuid4()),'draft':{'name':'Buddy','role':'Getting started','description':BOOTSTRAP,'avatarShape':'diamond','avatarColor':'lilac','tools':{'web':True,'projectFiles':True,'desktop':True},'groupIds':[]}}
+        if 'agent-models.json' in saved:saved['agent-models.json']['workspaces'].pop(workspace,None)
+        if 'agent-interviews.json' in saved:saved['agent-interviews.json']['records']={k:r for k,r in saved['agent-interviews.json']['records'].items() if r['workspace']!=workspace}
+        if 'agent-memory.json' in saved:saved['agent-memory.json']['records']={k:r for k,r in saved['agent-memory.json']['records'].items() if r['workspace']!=workspace}
+        if 'team-monitor.json' in saved:
+            journal=saved['team-monitor.json'];journal.get('settings',{}).pop(workspace,None)
+            for field in ['checks','updates']:journal[field]=[r for r in journal.get(field,[]) if r['workspace']!=workspace]
+            journal['observed']={k:r for k,r in journal.get('observed',{}).items() if r['workspace']!=workspace};journal['journalRevision']=journal.get('journalRevision',0)+1
+        if 'agent-proposals.json' in saved:saved['agent-proposals.json']=[r for r in saved['agent-proposals.json'] if r['workspace']!=workspace]
+        if 'team-plans.json' in saved:saved['team-plans.json']=[r for r in saved['team-plans.json'] if r['workspace']!=workspace]
+        state.pop('teamPlans',None);state.pop('appliedTeamPlans',None)
+        if 'conversation-providers.json' in saved:saved['conversation-providers.json']={k:v for k,v in saved['conversation-providers.json'].items() if not k.startswith(workspace+':')}
+        for name,field in [('Worker/tasks.json','tasks'),('Worker/routines.json','routines')]:
+            if name in saved:saved[name][field]=[r for r in saved[name][field] if r['workspace']!=workspace]
+        database=worker_database(support);export=None
+        if database:
+            try:
+                paused=database.execute("SELECT value FROM meta WHERE key='paused'").fetchone()
+                export=json.dumps({'paused':bool(paused and paused[0]=='1'),
+                    'tasks':[{'archived':bool(row[0]),'task':json.loads(row[1])} for row in database.execute('SELECT archived, body FROM tasks ORDER BY seq')],
+                    'routines':[json.loads(row[0]) for row in database.execute('SELECT body FROM routines ORDER BY seq')]},ensure_ascii=False).encode()
+            finally:database.close()
+        directory=support/'AgentArchives.noindex';directory.mkdir(mode=0o700,exist_ok=True)
+        archive=directory/('agents-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:6]+'.zip')
+        with zipfile.ZipFile(archive,'w',compression=zipfile.ZIP_DEFLATED) as z:
+            for name,data in raw.items():z.writestr(name,data)
+            if export is not None:z.writestr('Worker/operations-export.json',export)
+        archive.chmod(0o600)
+        with zipfile.ZipFile(archive) as z:
+            if z.testzip():raise RuntimeError('Could not verify the recovery archive. Nothing was removed.')
+        with tempfile.TemporaryDirectory(prefix='agent-reset-',suffix='.noindex',dir=support) as temp:
+            staged=[]
+            for i,(name,value) in enumerate(saved.items()):
+                path=Path(temp)/str(i);path.write_text(json.dumps(value,ensure_ascii=False));path.chmod(0o600);staged.append((path,support/name))
+            for source,target in staged:os.replace(source,target)
+        database=worker_database(support)
+        if database:
+            try:
+                with database:
+                    database.execute('DELETE FROM tasks WHERE workspace = ?',(workspace,));database.execute('DELETE FROM routines WHERE workspace = ?',(workspace,))
+                    # What belonged to the removed agents: their open questions, rules (and the approvals counted for them), changes made from chat and
+                    # agent limits. Money already spent stays: it is a record, not a setting. Databases from before these existed simply lack the tables.
+                    for statement in ('DELETE FROM decisions WHERE workspace = ?','DELETE FROM notification_state WHERE workspace = ?','DELETE FROM rule_approvals WHERE rule_id IN (SELECT id FROM rules WHERE workspace = ?)','DELETE FROM rules WHERE workspace = ?','DELETE FROM setting_changes WHERE workspace = ?',"DELETE FROM limits WHERE workspace = ? AND scope = 'agent'"):
+                        try:database.execute(statement,(workspace,))
+                        except sqlite3.OperationalError as error:
+                            if 'no such table' not in str(error):raise
+                database.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            finally:database.close()
+        return count,archive
+
+if __name__=='__main__':
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--confirm-remove-all-agents',action='store_true',required=True)
+    parser.parse_args();count,archive=reset(Path.home()/'Library/Application Support/Buddy');print(f'Removed {count} saved agents. Files, connections, browser profiles and Keychain were preserved. Recovery archive: {archive}')

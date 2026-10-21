@@ -1,0 +1,110 @@
+/* Turns real workspace state into figure modes: a reply starting is "planning", streaming is "working", an action
+   waiting on the user is "needs", a finished reply is "done" (then "ready"), a failed one is "stuck". Group runs add
+   gaze toward the lead or the working member. (No stream of dots joins members or the group row.) */
+(function(root){
+  'use strict';
+  const busy=status=>['starting','answering','stopping'].includes(status);
+  const RANK={planning:1,working:2,needs:3};
+
+  // What every agent should look like right now. Pure: reads state, changes nothing.
+  // Background work (the worker's pulse, from its last status) counts too: a task running is "working", one waiting its turn, retrying or
+  // with the supervisor is "planning", and one waiting for the person is "needs".
+  const workerPulse=()=>root.BuddyWorkerUI?.pulse?.();
+  // The agents the bell counts something unread for (buddy-activity's own items, keys and read/dismissed state), or undefined without it.
+  const unreadNeeds=()=>{try{return root.BuddyActivity?.needingAgents?.();}catch{return undefined;}};
+  function snapshot(state,{pending=()=>[],setup=()=>null,checking=()=>false,pulse=workerPulse,needing=unreadNeeds}={}){
+    const modes={},focus={},work={},agents=new Set((state.agents||[]).map(a=>a.id));
+    const set=(id,mode)=>{if(agents.has(id)&&(RANK[mode]||0)>(RANK[modes[id]]||0))modes[id]=mode;};
+    const look=(ids,to,group)=>{for(const id of ids)if(agents.has(id)&&!focus[id])focus[id]={to,group};};
+    for(const a of state.agents||[]){
+      if(setup(state,a.id)||checking(a.id))set(a.id,'working');
+    }
+    // Waiting for the person pulses only while the bell still counts something unread for that agent: once the person has read or dismissed
+    // it, the figure rests. Without the notification list, the worker's pulse alone decides.
+    const unread=needing();
+    const waits=id=>!(unread instanceof Set)||unread.has(id);
+    for(const [id,p] of Object.entries(pulse()?.agents||{}))set(id,p?.state==='needs_you'?(waits(id)?'needs':null):['working','quiet'].includes(p?.state)?'working':['queued','retrying','with_supervisor'].includes(p?.state)?'planning':null);
+    for(const run of Object.values(state.runs||{})){
+      if(!busy(run.status))continue;
+      const group=(state.groups||[]).find(g=>g.id===run.target);
+      for(const review of pending(state,run.runId)||[]){
+        if(agents.has(review.agentId)){set(review.agentId,'needs');focus[review.agentId]={to:'user'};}
+      }
+      if(!group){
+        set(run.target,run.status==='starting'?'planning':'working');
+        continue;
+      }
+      const members=(run.memberIds||group.members).filter(id=>agents.has(id)),team=run.team||{};
+      const lead=members.includes(team.leadId)?team.leadId:members[0];
+      if(!lead)continue;
+      if(!team.phase||team.phase==='planning'){
+        set(lead,'planning');look(members.filter(id=>id!==lead),lead,group.id);
+      }else if(team.phase==='replying'){
+        set(lead,'working');look(members.filter(id=>id!==lead),lead,group.id);
+      }else{
+        const entries=Array.isArray(team.entries)?team.entries:[];
+        const working=entries.find(e=>e.status==='working'&&members.includes(e.agentId));
+        for(const e of entries){
+          if(!members.includes(e.agentId))continue;
+          if(e.status==='working')set(e.agentId,'working');
+          else if(e.status==='review'){set(e.agentId,'needs');focus[e.agentId]={to:'user'};}
+        }
+        if(working){work[group.id]=working.agentId;look(members.filter(id=>id!==working.agentId),working.agentId,group.id);}
+      }
+    }
+    return {modes,focus,work};
+  }
+
+  // Remembers the previous snapshot so it can see a run finishing (done / stuck) and the work moving (hand-off).
+  function tracker(sink,{later=(ms,fn)=>setTimeout(fn,ms)}={}){
+    let prevRuns=null,prevModes={};
+    function update(state,helpers){
+      const snap=snapshot(state,helpers),runs={},outcome={};
+      for(const run of Object.values(state.runs||{}))runs[run.runId]=run;
+      if(prevRuns){
+        for(const run of Object.values(runs)){
+          const was=prevRuns[run.runId];
+          if(!was||!busy(was.status)||busy(run.status))continue;
+          const group=(state.groups||[]).find(g=>g.id===run.target);
+          const members=group?(run.memberIds||group.members):[run.target];
+          const lead=group&&members.includes(run.team?.leadId)?run.team.leadId:members[0];
+          if(run.status==='completed')[lead,...members.filter(id=>id!==lead)].forEach((id,k)=>{outcome[id]={mode:'done',delay:k*160};});
+          else if(run.status==='failed')outcome[lead]={mode:'stuck',delay:0};
+        }
+      }
+      for(const id of new Set([...Object.keys(snap.modes),...Object.keys(prevModes),...Object.keys(outcome)])){
+        const want=snap.modes[id],end=outcome[id];
+        if(want){if(sink.getMode(id)!==want)sink.setMode(id,want);}
+        else if(end){
+          const apply=()=>{sink.setFocus(id,null);sink.setMode(id,end.mode);};
+          if(end.delay)later(end.delay,apply);else apply();
+        }else if(prevModes[id]&&sink.getMode(id)===prevModes[id])sink.setMode(id,'ready');
+      }
+      for(const a of state.agents||[]){
+        const f=snap.focus[a.id];
+        sink.setFocus(a.id,f?.to||null,f?.group);
+      }
+      // No animation joins agents to each other or to the group row (the streams of dots that followed the working member): an agent that is
+      // working is simply shown working. (`snapshot().work` still says who is working in each group, for anything that wants it.)
+      prevRuns=Object.fromEntries(Object.entries(runs).map(([id,r])=>[id,{status:r.status}]));
+      prevModes=snap.modes;
+    }
+    return {update};
+  }
+
+  let shared=null;
+  function sync(state){
+    if(!root.BuddyFigures||!state)return;
+    shared||=tracker(root.BuddyFigures);
+    shared.update(state,{
+      pending:(s,runId)=>root.BuddyActions?.pending?.(s,runId)||[],
+      setup:(s,id)=>root.BuddyAgentSetup?.active?.(s,id)||null,
+      checking:id=>!!root.BuddyTeamMonitorUI?.isChecking?.(id)
+    });
+  }
+  const api={snapshot,tracker,sync};
+  if(typeof module!=='undefined'&&module.exports)module.exports=api;
+  root.BuddyFigureModes=api;
+  // Each status poll can change who is working in the background, with nothing else on the page changing.
+  if(typeof root.addEventListener==='function')root.addEventListener('buddy-worker-snapshot',()=>{if(typeof state!=='undefined')sync(state);});
+})(typeof globalThis!=='undefined'?globalThis:this);

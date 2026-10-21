@@ -1,0 +1,71 @@
+import {createLedger} from './token-ledger.mjs';
+// A run has no limit of its own: error_max_budget_usd means the agent's daily limit ran out, which is a pause that continues by itself.
+const stopReasons={error_max_budget_usd:'Today’s spending limit for this agent was reached. It continues tomorrow or after the user raises the daily limit.',error_max_turns:'It reached its limit on steps before it could finish. Continue it to keep going.',error_during_execution:'Claude hit an error while working.'};
+const stopText=message=>message.errors?.length?message.errors.join('\n'):(message.subtype&&message.subtype!=='success'?(stopReasons[message.subtype]||message.subtype):(message.result||'Claude stopped before finishing.'));
+// A ready SDK process is single use: every turn keeps its own budget and context.
+// Preparing the next process performs the SDK handshake, never a model query.
+function canonical(value){
+  if(Array.isArray(value))return value.map(canonical);
+  if(value&&typeof value==='object')return Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])]));
+  return value;
+}
+export class ClaudeSession {
+  constructor({startup,tool,createSdkMcpServer,fromJSONSchema,write,ledgerPath}) {
+    Object.assign(this,{startup,tool,createSdkMcpServer,fromJSONSchema,write,ledgerPath});
+    this.pending=new Map();this.next=0;this.warm=null;this.signature=null;this.busy=false;this.closed=false;
+  }
+  options(config) {
+    const tools=config.tools.map(def=>this.tool(def.name,def.description,this.fromJSONSchema(def.inputSchema).shape,args=>new Promise(resolve=>{
+      const id=String(++this.next);this.pending.set(id,resolve);this.emit({type:'call',id,tool:def.name,arguments:args});
+    })));
+    const names=config.tools.map(t=>'mcp__buddy__'+t.name);
+    return {cwd:config.cwd,env:{PATH:process.env.PATH,HOME:config.home,TMPDIR:process.env.TMPDIR,ANTHROPIC_API_KEY:config.apiKey,CLAUDE_CONFIG_DIR:config.home,CLAUDE_AGENT_SDK_CLIENT_APP:'Buddy/0.16.0',DISABLE_AUTOUPDATER:'1',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1'},settingSources:[],strictMcpConfig:true,plugins:[],tools:[],allowedTools:names,permissionMode:'dontAsk',persistSession:false,includePartialMessages:true,maxTurns:60,...(config.budget!=null?{maxBudgetUsd:config.budget}:{}),...(config.outputSchema?{outputFormat:{type:'json_schema',schema:config.outputSchema}}:{}),model:config.model||'claude-sonnet-4-6',systemPrompt:config.instructions,mcpServers:{buddy:this.createSdkMcpServer({name:'buddy',version:'1.0.0',tools})},canUseTool:async name=>!this.closed&&this.busy&&names.includes(name)?{behavior:'allow'}:{behavior:'deny',message:'Only current Buddy tools are available.'}};
+  }
+  emit(event){this.write({...event,runId:this.runId});}
+  async prepare(config) {
+    const {prompt,command,runId,...stable}=config;
+    const signature=JSON.stringify(canonical(stable));
+    if(this.signature===signature&&this.warm)return;
+    this.discardWarm();this.signature=signature;
+    const prepared=this.startup({options:this.options(config),initializeTimeoutMs:30000});
+    this.warm=prepared;
+    try {const handle=await prepared;if(this.closed||this.warm!==prepared)handle.close();}
+    catch(error){if(this.warm===prepared){this.warm=null;this.signature=null;}throw error;}
+  }
+  discardWarm(){const old=this.warm;this.warm=null;this.signature=null;old?.then(h=>h.close(),()=>{});}
+  async start(config) {
+    if(this.closed||this.busy)throw Error('The Claude connection is already in use or closed.');
+    if(typeof config.runId!=='string'||!config.runId.trim())throw Error('This Claude task is missing its run ID. No work was started.');
+    // A run has no ceiling of its own (budget is null); a number here is only what a daily limit leaves room for.
+    if(!config.apiKey||(config.budget!=null&&(!Number.isFinite(config.budget)||config.budget<=0)))throw Error('Connect Claude API credits first.');
+    // lastText is the last thing the model said: a run that stops without a final result (a limit, an error) still reports what it had done.
+    this.busy=true;this.runId=config.runId;let result,lastActivity=0,lastText='';
+    // Off unless a ledger path is set (BUDDY_TOKEN_LEDGER): then each model call's usage and input sizes are appended to that file.
+    const ledger=createLedger(this.ledgerPath,{runId:config.runId,bridge:'claude-session'});ledger?.begin(config);
+    try {
+      await this.prepare(config);
+      const warm=await this.warm;this.warm=null;this.signature=null;
+      this.session=warm.query(config.prompt);
+      for await(const message of this.session){
+        ledger?.observe(message);
+        if(message.type==='stream_event'&&Date.now()-lastActivity>2000){lastActivity=Date.now();this.emit({type:'activity'});}
+        if(message.type==='assistant'){
+          const text=message.message.content.filter(x=>x.type==='text').map(x=>x.text).join('\n');if(text){lastText=text;this.emit({type:'progress',text});}
+        }
+        if(message.type==='result')result={type:'result',text:message.structured_output?JSON.stringify(message.structured_output):message.result||lastText,subtype:message.subtype||'',error:message.is_error?stopText(message):null,cost:message.total_cost_usd||0,sessionId:message.session_id};
+      }
+    } catch(error){
+      // A run that ended in a failed result (turn or budget limit) has already been charged. The error that follows ends the task, so
+      // deliver the result first or its cost is never recorded and the unused budget is never released.
+      if(!this.closed){if(result?.error){this.emit(result);result=null;}this.emit({type:'error',error:error.message});}
+    }
+    finally {
+      ledger?.end();
+      this.session?.close();this.session=null;this.busy=false;
+      for(const resolve of this.pending.values())resolve({content:[{type:'text',text:'This turn ended.'}],isError:true});this.pending.clear();
+      if(!this.closed){this.prepare(config).catch(()=>{});if(result)this.emit(result);}
+    }
+  }
+  result(value){if(value.runId!==this.runId)return;const resolve=this.pending.get(value.id);if(resolve){this.pending.delete(value.id);resolve({content:[{type:'text',text:JSON.stringify(value.result)}],isError:!!value.result?.error});}}
+  close(){this.closed=true;this.discardWarm();this.session?.close();}
+}

@@ -1,0 +1,48 @@
+/* The project panel, docked to the right of the chat when the window has room: the plan and the files, as two tabs when there are both. The chat
+   column gives up the space; nothing covers it. The panel reads the theme's tokens (the drawer's card colour and hairlines), so light and dark
+   need nothing of their own. */
+.project-dock{flex:0 0 340px;width:340px;min-width:0;min-height:0;display:flex;justify-content:flex-start;overflow:hidden;background:var(--card);border-left:1px solid var(--line)}
+.project-dock-panel{flex:none;width:340px;min-height:0;display:flex;flex-direction:column}
+.project-dock-header{flex-shrink:0;display:flex;align-items:center;gap:10px;min-height:69px;padding:18px 14px 12px 20px;border-bottom:1px solid var(--line)}
+.project-dock-header h2{flex:1;min-width:0;margin:0;font-size:15px;font-weight:600;letter-spacing:-.2px;color:var(--text)}
+.project-dock-close{flex:none;width:32px;height:32px;margin-left:auto;border-radius:50%;color:var(--text3)}
+.project-dock-close:hover{color:var(--text);background:var(--soft)}
+.project-dock-body,.project-dock-section{flex:1;min-height:0;overflow-y:auto;padding:18px 20px 25px}
+.project-dock-section[hidden]{display:none}
+.project-dock:focus{outline:none}
+.project-dock:focus-visible{outline:2px solid var(--text3);outline-offset:-2px}
+
+/* Plan | Files: a segmented pair, like the theme picker. The Plan tab carries the plan's live dot. */
+.project-dock-tabs{flex:1;min-width:0;display:flex;gap:2px;padding:3px;border-radius:999px;background:var(--soft)}
+.project-dock-tab{flex:1;min-width:0;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:30px;margin:0;padding:5px 12px;border:0;border-radius:999px;background:transparent;color:var(--text2);font-size:13px;font-weight:500;white-space:nowrap}
+.project-dock-tab:hover{color:var(--text)}
+.project-dock-tab[aria-selected="true"]{background:var(--card);color:var(--text);box-shadow:0 1px 2px rgb(20 20 20 / .1),0 0 0 1px var(--line)}
+.project-dock-tab:focus-visible{outline:2px solid var(--text3);outline-offset:1px}
+.project-dock-tab .plan-dot{width:7px;height:7px}
+.project-dock-tab.tone-working .plan-dot,.project-dock-tab.tone-done .plan-dot{background:var(--ok)}
+.project-dock-tab.tone-needs .plan-dot{background:var(--warn)}
+.project-dock-tab.tone-review .plan-dot{background:var(--info)}
+.project-dock-tab.tone-ready .plan-dot{background:var(--ink)}
+
+/* Closed: a round button at the right of the chat's header, the island's look, opens it again. */
+.center.conversation>.conversation-header>.project-dock-open{position:absolute;right:24px;top:14px;width:44px;height:44px;display:grid;place-items:center;padding:0;border:1px solid var(--line);border-radius:50%;background:var(--card);color:var(--text2);pointer-events:auto;box-shadow:0 6px 22px rgb(20 20 20 / .08),0 1px 2px rgb(20 20 20 / .05)}
+.center.conversation>.conversation-header>.project-dock-open:hover{color:var(--text);background:var(--soft)}
+.center.conversation>.conversation-header>.project-dock-open .icon{width:19px;height:19px}
+:root[data-theme=dark] .center.conversation>.conversation-header>.project-dock-open{box-shadow:0 6px 22px rgb(0 0 0 / .4),0 1px 2px rgb(0 0 0 / .3)}
+
+/* Arriving, it slides in from the right like the side panels do, while the chat column gives up the room; closing, it slides back out with
+   the side panels' closing motion and the chat takes the room back. */
+@keyframes project-dock-open{from{flex-basis:0;width:0}}
+@keyframes project-dock-slide{from{transform:translateX(48px);opacity:0}}
+@keyframes project-dock-close{to{flex-basis:0;width:0}}
+@keyframes project-dock-slide-out{to{transform:translateX(48px);opacity:0}}
+.project-dock.dock-enter{animation:project-dock-open .42s cubic-bezier(.2,.8,.2,1) both}
+.project-dock.dock-enter>.project-dock-panel{animation:project-dock-slide .42s cubic-bezier(.2,.8,.2,1) both}
+.project-dock.dock-leave{pointer-events:none;animation:project-dock-close .32s cubic-bezier(.4,0,.2,1) both}
+.project-dock.dock-leave>.project-dock-panel{animation:project-dock-slide-out .32s cubic-bezier(.4,0,.2,1) both}
+/* Asked for with the folder button: its heading lights up briefly. */
+@keyframes project-dock-attention{from{background:var(--hover)}}
+.project-dock-header.dock-attention{animation:project-dock-attention .9s ease-out}
+@media(prefers-reduced-motion:reduce){
+  .project-dock.dock-enter,.project-dock.dock-enter>.project-dock-panel,.project-dock.dock-leave,.project-dock.dock-leave>.project-dock-panel,.project-dock-header.dock-attention{animation:none}
+}

@@ -3,14 +3,14 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const Team=require('./agent-team.js');
 
-const settings={name:'Sage',role:'Writing partner',description:'Draft clear copy and bring it back for review.',avatarShape:'star',avatarColor:'red',tools:{web:false,projectFiles:true},groupIds:['launch']};
+const settings={name:'Sage',role:'Writing partner',description:'Draft clear copy and bring it back for review.',avatarShape:'diamond',avatarColor:'red',tools:{web:false,projectFiles:true},groupIds:['launch']};
 function workspace(){return Team.migrate({agents:[{id:'morgan',name:'Morgan',role:'Coordinator',description:'Coordinate the team.',color:'morgan'}],groups:[{id:'launch',members:['morgan']}],messages:{morgan:[]},tasks:[]});}
 function propose(state){return Team.proposeAgent(state,{proposedBy:'morgan',chat:'morgan',suggestion:settings,reason:'The project needs writing support.'});}
 
 test('migration preserves the existing agent and separates appearance from identity',()=>{
   const state=workspace();
   assert.equal(state.agents[0].name,'Morgan');
-  assert.equal(state.agents[0].avatarShape,'star');
+  assert.equal(state.agents[0].avatarShape,'diamond');
   assert.equal(state.agents[0].avatarColor,'lilac');
   assert.deepEqual(state.proposals,[]);
 });
@@ -128,31 +128,29 @@ test('removed grey migrates to the new blue while existing light blue and green 
   assert.equal(Team.colorOptions.find(c=>c.id==='mint').name,'Green');
 });
 
-test('all shapes share palette midtones while retaining shadows, highlights and transparent edges',()=>{
-  const medians={star:.7109,pebble:.4313,cube:.5960,clover:.7597};
-  const sample=(table,x)=>{const index=x*256,lower=Math.floor(index),fraction=index-lower;return table[lower]+fraction*(table[Math.min(256,lower+1)]-table[lower]);};
+test('the four figure shapes replace the 3D shapes, and saved or suggested old names migrate',()=>{
+  assert.deepEqual(Team.shapeOptions.map(s=>s.id),['diamond','sphere','hex','pill']);
+  assert.deepEqual(Team.shapeOptions.map(s=>s.name),['Diamond','Sphere','Hex','Pill']);
+  assert.deepEqual(Team.legacyShape,{star:'diamond',pebble:'sphere',cube:'hex',clover:'pill'});
+  for(const [old,now] of Object.entries(Team.legacyShape))assert.equal(Team.appearance({avatarShape:old,avatarColor:'mint'}).avatarShape,now);
+  assert.equal(Team.appearance({avatarShape:'hexagon'}).avatarShape,'diamond','an unknown shape falls back instead of breaking the avatar');
+  assert.equal(Team.appearance({color:'scout'}).avatarShape,'pill');
+  const state=Team.migrate({agents:[{id:'a',name:'A',avatarShape:'cube',avatarColor:'rose'}],groups:[],proposals:[{suggested:{avatarShape:'clover'},draft:{avatarShape:'pebble'},approved:{avatarShape:'star'}}]});
+  assert.equal(state.agents[0].avatarShape,'hex');assert.equal(state.agents[0].avatarColor,'red');
+  assert.deepEqual(['suggested','draft','approved'].map(k=>state.proposals[0][k].avatarShape),['pill','sphere','diamond']);
+  assert.deepEqual(Team.migrate(Team.copy(state)),state,'migrating twice changes nothing');
+});
+
+test('seven colours carry a light ink, a dark ink and an author-name colour, and the figures draw the same inks',()=>{
+  const Figures=require('./buddy-figures.js'),hex=/^#[0-9a-f]{6}$/;
   assert.equal(Team.colorOptions.length,7);
-  assert.ok(!Team.colorOptions.some(c=>c.id==='rose'));
-  assert.ok(!Team.colorOptions.some(c=>c.id==='stone'));
-  assert.ok(Team.colorOptions.some(c=>c.id==='red'));
+  assert.ok(!Team.colorOptions.some(c=>c.id==='rose'||c.id==='stone'));
   for(const color of Team.colorOptions){
-    const base=[1,3,5].map(i=>parseInt(color.swatch.slice(i,i+2),16)/255);
-    for(const shape of Team.shapeOptions){
-      const tables=Team.avatarColorTables(shape.id,color.id);
-      assert.equal(tables.length,3);
-      tables.forEach((table,channel)=>{
-        assert.equal(table.length,257);
-        assert.ok(table.every(v=>v>=0&&v<=1));
-        assert.ok(Math.abs(sample(table,medians[shape.id])-base[channel])<.008,`${shape.id}/${color.id} midtone`);
-        assert.ok(table[0]<base[channel]);
-        assert.ok(table[256]>base[channel]||base[channel]===1);
-      });
-      assert.equal(Team.avatarFilter(shape.id,color.id),`url(#buddy-avatar-${shape.id}-${color.id})`);
-    }
+    for(const key of ['ink','inkDark','text'])assert.match(color[key],hex,`${color.id}.${key}`);
+    assert.deepEqual([color.ink,color.inkDark],Figures.INK[color.id],`${color.id} matches the figure engine`);
   }
-  const markup=Team.avatarFilterMarkup();
-  assert.equal((markup.match(/<filter id=/g)||[]).length,28);
-  assert.equal((markup.match(/<feFuncA type="identity"/g)||[]).length,28);
+  assert.deepEqual(Object.keys(Figures.INK),Team.colorOptions.map(c=>c.id));
+  assert.equal(Team.avatarFilter,undefined,'the SVG recolouring filters are gone');
 });
 
 test('Mac app access defaults on, can be removed, and survives agent configuration and migration',()=>{

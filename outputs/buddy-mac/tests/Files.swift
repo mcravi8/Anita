@@ -42,6 +42,12 @@ import Darwin
         try Data([0, 255, 1]).write(to: root.appendingPathComponent("binary.bin")); require(try files.read(scope, path: "binary.bin")["format"] as? String == "binary", "binary files return metadata")
         require((try files.list(scope)["files"] as! [[String: Any]]).allSatisfy { !["link.txt", "hard.txt", "pipe.txt"].contains($0["path"] as! String) }, "unsafe entries excluded from listing")
         print("PASS: folder boundaries, symlinks, hard links, devices, hidden paths, file limits, and permission preservation")
+        let vault=support.appendingPathComponent("Worker/Browsers/fixture/Default")
+        try fm.createDirectory(at:vault,withIntermediateDirectories:true);try "synthetic private data".write(to:vault.appendingPathComponent("Login Data"),atomically:true,encoding:.utf8)
+        let broad=try files.addFolder(workspace,to:support),broadScope=BuddyFileScope(workspace:workspace,folderId:broad["folderId"] as! String)
+        rejects("private_credentials"){_ = try files.read(broadScope,path:"Worker/Browsers/fixture/Default/Login Data")}
+        require(!(try files.list(broadScope)["files"] as! [[String:Any]]).contains{$0["path"] as? String=="Worker/Browsers/fixture/Default/Login Data"},"private browser/password databases are excluded even under a broad connected parent")
+        try files.removeFolder(workspace,folderId:broadScope.folderId)
         let desktop = support.appendingPathComponent("Local desktop")
         try fm.createDirectory(at: desktop, withIntermediateDirectories: true)
         let connected = try files.addFolder(workspace, to: desktop), connectedID = connected["folderId"] as! String
@@ -72,5 +78,72 @@ import Darwin
         rejects("folder_changed") { _ = try files.read(scope, path: "private.txt") }; rejects("folder_changed") { _ = try files.versions(scope, path: "private.txt") }
         try Data("broken".utf8).write(to: support.appendingPathComponent("project-folders.json")); rejects("folder_settings") { _ = try files.scope(workspace) }
         print("PASS: changing folders invalidates old requests; malformed folder settings fail closed")
+        // A coding project gets a connected folder's files natively. 3 MB is more than the model can read (1 MB), and sending it through the conversation costs more than a coding budget.
+        do {
+            let base = fm.temporaryDirectory.appendingPathComponent("buddy-copy-test-" + UUID().uuidString), sourceRoot = base.appendingPathComponent("Source"), projectRoot = base.appendingPathComponent("Project"), outside = base.appendingPathComponent("Outside"), copySupport = base.appendingPathComponent("Support")
+            for directory in [sourceRoot.appendingPathComponent("data"), projectRoot, outside, copySupport] { try fm.createDirectory(at: directory, withIntermediateDirectories: true) }
+            defer { try? fm.removeItem(at: base) }
+            let big = Data((0..<3_000_000).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ ($0 >> 8)) })
+            try big.write(to: sourceRoot.appendingPathComponent("data/prices.csv")); try Data("print('run')\n".utf8).write(to: sourceRoot.appendingPathComponent("run.py"))
+            try Data("secret".utf8).write(to: sourceRoot.appendingPathComponent(".env")); try fm.createSymbolicLink(at: sourceRoot.appendingPathComponent("link.csv"), withDestinationURL: sourceRoot.appendingPathComponent("run.py"))
+            let copyWorkspace = UUID().uuidString, connectedFolder = try BuddyProjectFiles(support: copySupport).addFolder(copyWorkspace, to: sourceRoot)
+            try JSONSerialization.data(withJSONObject: ["conversationWorkspace": copyWorkspace]).write(to: copySupport.appendingPathComponent("workspace.json"))
+            let project = BuddyProjectFiles(support: copySupport, privateRoot: projectRoot, privateFolderID: "task-1"), projectScope = try project.scope(copyWorkspace), sourceScope = BuddyFileScope(workspace: copyWorkspace, folderId: connectedFolder["folderId"] as! String)
+            let result = try project.copy(from: sourceScope, to: projectScope, paths: ["data/prices.csv", "run.py", "absent.csv", "../escape.txt", ".env", "link.csv"], actor: "coder", actorName: "Coder")
+            let copiedPaths = (result["copied"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }, failedPaths = (result["failed"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }
+            require(copiedPaths == ["data/prices.csv", "run.py"] && Set(failedPaths) == ["absent.csv", "../escape.txt", ".env", "link.csv"], "the copy brings in regular visible files and reports the rest as failed without stopping")
+            require(try Data(contentsOf: projectRoot.appendingPathComponent("data/prices.csv")) == big && result["totalBytes"] as? Int == big.count + 13, "a file larger than the model can read arrives byte for byte")
+            require(try Data(contentsOf: sourceRoot.appendingPathComponent("data/prices.csv")) == big && !fm.fileExists(atPath: sourceRoot.appendingPathComponent("escape.txt").path), "the originals are only read")
+            let again = try project.copy(from: sourceScope, to: projectScope, paths: ["data/prices.csv", "run.py"], actor: "coder", actorName: "Coder")
+            require((again["failed"] as? [Any])?.isEmpty == true && (again["copied"] as? [[String: Any]])?.allSatisfy { $0["replaced"] as? Bool == true } == true, "copying again replaces the earlier copy instead of conflicting")
+            try Data("print('changed')\n".utf8).write(to: sourceRoot.appendingPathComponent("run.py"))
+            _ = try project.copy(from: sourceScope, to: projectScope, paths: ["run.py"], actor: "coder", actorName: "Coder")
+            require(try String(contentsOf: projectRoot.appendingPathComponent("run.py"), encoding: .utf8) == "print('changed')\n", "a changed original is copied again")
+            rejects("invalid_arguments") { _ = try project.copy(from: sourceScope, to: projectScope, paths: [], actor: "coder", actorName: "Coder") }
+            rejects("invalid_arguments") { _ = try project.copy(from: sourceScope, to: projectScope, paths: ["run.py", "run.py"], actor: "coder", actorName: "Coder") }
+            rejects("invalid_arguments") { _ = try project.copy(from: sourceScope, to: projectScope, paths: (0..<201).map { "f\($0).csv" }, actor: "coder", actorName: "Coder") }
+            rejects("invalid_arguments") { _ = try project.copy(from: projectScope, to: projectScope, paths: ["run.py"], actor: "coder", actorName: "Coder") }
+            // A folder path brings everything under it, hidden files, links and unlisted dependency folders excluded.
+            try fm.createDirectory(at: sourceRoot.appendingPathComponent("lib/node_modules/dep"), withIntermediateDirectories: true); try Data("dep".utf8).write(to: sourceRoot.appendingPathComponent("lib/node_modules/dep/index.js"))
+            try Data("a".utf8).write(to: sourceRoot.appendingPathComponent("lib/a.py")); try Data("b".utf8).write(to: sourceRoot.appendingPathComponent("lib/b.py")); try Data("h".utf8).write(to: sourceRoot.appendingPathComponent("lib/.hidden"))
+            let folderCopy = try project.copy(from: sourceScope, to: projectScope, paths: ["lib/", "nothing/"], actor: "coder", actorName: "Coder")
+            require((folderCopy["copied"] as? [[String: Any]])?.compactMap { $0["path"] as? String } == ["lib/a.py", "lib/b.py"] && (folderCopy["failed"] as? [[String: Any]])?.compactMap { $0["path"] as? String } == ["nothing/"], "a folder path copies the files under it and skips hidden files and dependency folders")
+            let everything = try project.copy(from: sourceScope, to: projectScope, paths: ["/"], actor: "coder", actorName: "Coder")
+            require(Set((everything["copied"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }) == ["data/prices.csv", "run.py", "lib/a.py", "lib/b.py"], "a lone / copies the whole connected folder")
+            // A folder plus named files can add up to more than one call copies; the extras are reported, not dropped silently.
+            try fm.createDirectory(at: sourceRoot.appendingPathComponent("many"), withIntermediateDirectories: true); try fm.createDirectory(at: sourceRoot.appendingPathComponent("venv"), withIntermediateDirectories: true)
+            for n in 0..<100 { try Data("x".utf8).write(to: sourceRoot.appendingPathComponent("many/f\(n).txt")) }
+            for n in 0..<101 { try Data("y".utf8).write(to: sourceRoot.appendingPathComponent("venv/g\(n).txt")) }
+            let crowded = try project.copy(from: sourceScope, to: projectScope, paths: ["many/"] + (0..<101).map { "venv/g\($0).txt" }, actor: "coder", actorName: "Coder")
+            require((crowded["copied"] as? [Any])?.count == 200 && (crowded["failed"] as? [[String: Any]])?.count == 1 && ((crowded["failed"] as? [[String: Any]])?.first?["error"] as? String)?.contains("up to 200 files") == true, "files beyond one call's limit are reported as not copied")
+            // A folder bigger than one listing is explored a subfolder at a time, and a folder deep inside it is still reachable.
+            try fm.createDirectory(at: sourceRoot.appendingPathComponent("lots"), withIntermediateDirectories: true); try fm.createDirectory(at: sourceRoot.appendingPathComponent("deep/inner"), withIntermediateDirectories: true)
+            for n in 0..<210 { try Data("z".utf8).write(to: sourceRoot.appendingPathComponent("lots/n\(n).txt")) }
+            try Data("target".utf8).write(to: sourceRoot.appendingPathComponent("deep/inner/target.txt"))
+            let inner = try project.list(sourceScope, under: "deep/inner")
+            require((inner["files"] as? [[String: Any]])?.compactMap { $0["path"] as? String } == ["deep/inner/target.txt"], "a subfolder can be listed by itself")
+            let deepCopy = try project.copy(from: sourceScope, to: projectScope, paths: ["deep/inner/"], actor: "coder", actorName: "Coder")
+            require((deepCopy["copied"] as? [[String: Any]])?.compactMap { $0["path"] as? String } == ["deep/inner/target.txt"], "a folder path reaches a subfolder however crowded the rest of the folder is")
+            let lotsCopy = try project.copy(from: sourceScope, to: projectScope, paths: ["lots/"], actor: "coder", actorName: "Coder")
+            require((lotsCopy["copied"] as? [Any])?.count == 200 && (lotsCopy["note"] as? String)?.contains("more files") == true, "a folder with more files than one listing says so instead of pretending it copied everything")
+            rejects("invalid_path") { _ = try project.list(sourceScope, under: "nowhere") }
+            rejects("invalid_path") { _ = try project.list(sourceScope, under: "../Outside") }
+            // Results go back out as new files only: never over one of the person's, and never outside the folder.
+            try fm.createDirectory(at: projectRoot.appendingPathComponent("out"), withIntermediateDirectories: true); try big.write(to: projectRoot.appendingPathComponent("out/result.csv")); try Data("note".utf8).write(to: projectRoot.appendingPathComponent("report.md"))
+            let saved = try project.copy(from: projectScope, to: sourceScope, paths: ["out/", "report.md"], into: "results-1", replacing: false, actor: "coder", actorName: "Coder")
+            require((saved["failed"] as? [Any])?.isEmpty == true && (saved["copied"] as? [[String: Any]])?.compactMap { $0["to"] as? String } == ["results-1/out/result.csv", "results-1/report.md"], "results are saved under a new subfolder")
+            require(try Data(contentsOf: sourceRoot.appendingPathComponent("results-1/out/result.csv")) == big, "a large result reaches the person's folder byte for byte")
+            let again2 = try project.copy(from: projectScope, to: sourceScope, paths: ["report.md"], into: "results-1", replacing: false, actor: "coder", actorName: "Coder")
+            let kept = try String(contentsOf: sourceRoot.appendingPathComponent("results-1/report.md"), encoding: .utf8)
+            require((again2["copied"] as? [Any])?.isEmpty == true && ((again2["failed"] as? [[String: Any]])?.first?["error"] as? String)?.contains("never overwrites") == true && kept == "note", "saving results never overwrites a file in the person's folder")
+            let outside2 = try project.copy(from: projectScope, to: sourceScope, paths: ["report.md"], into: "../elsewhere", replacing: false, actor: "coder", actorName: "Coder")
+            require((outside2["copied"] as? [Any])?.isEmpty == true && !fm.fileExists(atPath: base.appendingPathComponent("elsewhere").path), "a subfolder cannot climb out of the connected folder")
+            // A command in the project could have made a link that points outside it; a copy must not follow it.
+            try fm.removeItem(at: projectRoot.appendingPathComponent("data")); try fm.createSymbolicLink(at: projectRoot.appendingPathComponent("data"), withDestinationURL: outside)
+            let escaped = try project.copy(from: sourceScope, to: projectScope, paths: ["data/prices.csv"], actor: "coder", actorName: "Coder")
+            let leaked = try fm.contentsOfDirectory(atPath: outside.path)
+            require((escaped["copied"] as? [Any])?.isEmpty == true && (escaped["failed"] as? [Any])?.count == 1 && leaked.isEmpty, "a copy never follows a link out of the project")
+        }
+        print("PASS: native copy of connected-folder files into a project: large files, partial failure, repeat, originals untouched, and no link escape")
     }
 }

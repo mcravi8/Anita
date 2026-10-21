@@ -6,6 +6,7 @@ struct BuddyConnection {
     let enabled: Bool
     let callable: Bool
     let tools: [[String: Any]]
+    var iconURL: String? = nil
     var readableTools: [String] { tools.compactMap { tool in
         guard tool["isReadOnly"] as? Bool == true, tool["isEnabled"] as? Bool != false else { return nil }
         return tool["name"] as? String
@@ -15,7 +16,11 @@ struct BuddyConnection {
         return name
     } }
     var available: Bool { enabled && callable && !usableTools.isEmpty }
-    var summary: [String: Any] { ["id": id, "name": name, "available": available, "readToolCount": readableTools.count, "actionToolCount": usableTools.count - readableTools.count] }
+    var summary: [String: Any] {
+        var result: [String: Any] = ["id": id, "name": name, "available": available, "readToolCount": readableTools.count, "actionToolCount": usableTools.count - readableTools.count]
+        if let iconURL, iconURL.count <= 4096, let url = URLComponents(string: iconURL), url.scheme == "https", url.host?.isEmpty == false, url.user == nil, url.password == nil { result["iconUrl"] = iconURL }
+        return result
+    }
 }
 
 enum BuddyConnectionPolicy {
@@ -66,7 +71,16 @@ enum BuddyConnectionPolicy {
             } else { invalidSavedAccess = true }
         } catch { invalidSavedAccess = true }
     }
+    private func refresh() {
+        guard FileManager.default.fileExists(atPath: url.path) else { blocked = [:]; invalidSavedAccess = false; return }
+        do {
+            let saved = try JSONDecoder().decode(SavedAccess.self, from: Data(contentsOf: url))
+            guard saved.version == 2 else { throw InvalidSavedAccess() }
+            blocked = saved.blocked; invalidSavedAccess = false
+        } catch { invalidSavedAccess = true }
+    }
     func allowed(for key: String, catalog: [BuddyConnection]) throws -> Set<String> {
+        refresh()
         guard !invalidSavedAccess else { throw InvalidSavedAccess() }
         return Set(catalog.filter(\.available).map(\.id)).subtracting(blocked[key] ?? [])
     }
@@ -79,6 +93,7 @@ enum BuddyConnectionPolicy {
         return shared
     }
     func set(key: String, connection: String, allowed: Bool) throws {
+        refresh()
         guard !invalidSavedAccess else { throw InvalidSavedAccess() }
         var next = blocked
         var values = Set(next[key] ?? [])

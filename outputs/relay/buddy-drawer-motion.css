@@ -1,0 +1,12 @@
+/* A side panel slides in from the right and slides back out; its dimming fades with it. */
+@keyframes drawer-slide-in{from{transform:translateX(100%)}}
+@keyframes drawer-slide-out{to{transform:translateX(100%)}}
+@keyframes drawer-dim-in{from{opacity:0}}
+@keyframes drawer-dim-out{to{opacity:0}}
+.drawer-overlay.drawer-enter{animation:drawer-dim-in .3s ease both}
+.drawer-overlay.drawer-enter>.modal.drawer{animation:drawer-slide-in .42s cubic-bezier(.2,.8,.2,1) both}
+.drawer-overlay.drawer-leaving{pointer-events:none;animation:drawer-dim-out .32s ease both}
+.drawer-overlay.drawer-leaving>.modal.drawer{animation:drawer-slide-out .32s cubic-bezier(.4,0,.2,1) both}
+@media(prefers-reduced-motion:reduce){
+  .drawer-overlay.drawer-enter,.drawer-overlay.drawer-enter>.modal.drawer,.drawer-overlay.drawer-leaving,.drawer-overlay.drawer-leaving>.modal.drawer{animation:none}
+}

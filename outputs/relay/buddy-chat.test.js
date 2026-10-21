@@ -18,3 +18,70 @@ test('actual save receipts survive partial replies, stop, and restart recovery',
 test('completed service and file tools cannot finish a reply before its answer',()=>{const s=seed(),r=Chat.begin(s,'a');for(const tool of ['gmail.search_emails','gmail.read_email','buddy_write_file','buddy_propose_agent']){assert.equal(Chat.apply(s,{type:'tool',runId:r.run.runId,status:'completed',tool}),false);assert.equal(r.run.status,'starting');}Chat.apply(s,{type:'run',runId:r.run.runId,status:'answering',text:'The verified answer'});Chat.apply(s,{type:'run',runId:r.run.runId,status:'completed',text:'The verified answer'});assert.equal(s.messages.a[1].body,'The verified answer');assert.equal(r.run.status,'completed');});
 test('an empty final reply shows a retryable error and keeps the original request',()=>{const s=seed(),r=Chat.begin(s,'a');Chat.apply(s,{type:'run',runId:r.run.runId,status:'completed',text:'  '});assert.equal(r.run.status,'failed');assert.match(s.messages.a[1].error,/No answer/);const retry=Chat.begin(s,'a',{retryOf:r.run.runId});assert.equal(retry.run.userId,r.run.userId);assert.equal(s.messages.a.filter(m=>m.who==='you').length,1);});
 test('reopening repairs old empty completions while retaining actual proposal and file cards',()=>{const s=seed(),r=Chat.begin(s,'a');r.run.status=s.messages.a[1].status='completed';Chat.recover(s);assert.equal(r.run.status,'failed');for(const card of ['files','proposalIds']){const other=seed(),n=Chat.begin(other,'a');n.run.status=other.messages.a[1].status='completed';other.messages.a[1][card]=card==='files'?[{path:'brief.md'}]:['proposal'];Chat.recover(other);assert.equal(n.run.status,'completed');}});
+
+test('actual email coverage survives partial runs and reconnect; invented shapes are ignored',()=>{const s=seed(),r=Chat.begin(s,'a'),c={id:'receipt',query:'newer_than:90d assessment',read:2,unread:1,partial:true};Chat.apply(s,{type:'run',runId:r.run.runId,status:'answering',coverage:[c,{query:'invented'}]});c.read=99;assert.equal(s.messages.a[1].coverage.length,1);assert.equal(s.messages.a[1].coverage[0].read,2);Chat.apply(s,{type:'run',runId:r.run.runId,status:'failed',error:'offline'});assert.equal(s.messages.a[1].coverage[0].partial,true);});
+test('routine receipts attach only to their actual workspace and agent and never finish a reply',()=>{const s=seed(),r=Chat.begin(s,'a'),routine={id:'saved',workspace:s.conversationWorkspace,agentId:'a',title:'Morning review',nextRun:'2026-10-17T16:00:00Z',status:'active'};assert.equal(Chat.apply(s,{type:'routine',runId:r.run.runId,routine:{...routine,workspace:'wrong'}}),false);assert.equal(Chat.apply(s,{type:'routine',runId:r.run.runId,routine}),true);assert.equal(s.messages.a[1].routines[0].id,'saved');assert.equal(r.run.status,'starting');Chat.apply(s,{type:'routine',runId:r.run.runId,routine:{...routine,status:'paused'}});assert.equal(s.messages.a[1].routines.length,1);assert.equal(s.messages.a[1].routines[0].status,'paused');});
+
+test('operational replies show a brief result and preserve expandable detail without changing history',()=>{
+ const s=seed(),r=Chat.begin(s,'a'),body='Inbox is created. Seven checks are saved.\n\n'+('Technical scheduling detail. '.repeat(40)),m={runId:r.run.runId,body,routines:[{id:'r'}]};
+ const shown=Chat.presentation(s,m);assert.equal(shown.body,'Inbox is created. Seven checks are saved.');assert.equal(shown.details,body);assert.equal(m.body,body);
+ assert.equal(Chat.presentation(s,{...m,routines:[]}).body,body);
+ r.run.text='Explain the full details';assert.deepEqual(Chat.presentation(s,m),{body});
+});
+test('worker result details collapse even without a conversation run; errors remain independent',()=>{
+ const body='Please reconnect Gmail.\n\n'+('Observed diagnostic detail. '.repeat(40)),m={body,workerTaskID:'task',error:'Gmail disconnected'};
+ assert.equal(Chat.presentation(seed(),m).body,'Please reconnect Gmail.');assert.equal(Chat.presentation(seed(),m).details,body);assert.equal(m.error,'Gmail disconnected');
+});
+test('brief previews retain email addresses and Markdown links intact',()=>{
+ const body='I created **matteo-chief@agentmail.to** on the free plan. Seven checks are saved.\n\n'+('Details. '.repeat(80));
+ const shown=Chat.presentation(seed(),{body,workerTaskID:'task'});assert.equal(shown.body,'I created **matteo-chief@agentmail.to** on the free plan. Seven checks are saved.');assert.equal(shown.details,body);
+});
+test('delegated routine receipts require the registered owner and a participating creator',()=>{
+ const s=seed(),r=Chat.begin(s,'a'),routine={id:'r',workspace:s.conversationWorkspace,agentId:'b',nextRun:'2026-10-19T15:00:00Z'};
+ assert.equal(Chat.apply(s,{type:'routine',runId:r.run.runId,routine}),false);
+ assert.equal(Chat.apply(s,{type:'routine',runId:r.run.runId,routine,delegatedBy:'a'}),true);
+ assert.equal(Chat.apply(s,{type:'routine',runId:r.run.runId,routine:{...routine,agentId:'missing'},delegatedBy:'a'}),false);
+ const g=grouped(),gr=Chat.begin(g,'team');assert.equal(Chat.apply(g,{type:'routine',runId:gr.run.runId,routine:{...routine,workspace:g.conversationWorkspace},delegatedBy:'a'}),true);
+ assert.equal(Chat.apply(g,{type:'routine',runId:gr.run.runId,routine:{...routine,workspace:g.conversationWorkspace},delegatedBy:'outsider'}),false);
+});
+
+test('a group request the agents answered for themselves shows no combined reply of its own',()=>{
+ const entries=[{agentId:'lyra',status:'completed',notes:'Lyra says this.'},{agentId:'forge',status:'completed',notes:'Forge says that.'}];
+ const s={runs:{r:{runId:'r',team:{direct:false,partial:false,entries}}}},m={runId:'r',status:'completed',body:'**Lyra**\nLyra says this.\n\n**Forge**\nForge says that.',team:{direct:false,entries}};
+ assert.deepEqual(Chat.presentation(s,m),{hidden:true},'their messages are the reply');
+ assert.deepEqual(Chat.presentation(s,{...m,files:[{path:'a.md'}]}),{body:'Saved from this request:'},'but saved files still show');
+ s.runs.r.team.partial=true;assert.match(Chat.presentation(s,m).body,/couldn’t finish/,'a partial failure keeps a bubble to retry from');assert.equal(Chat.presentation(s,m).hidden,undefined);
+ s.runs.r.team.partial=false;assert.equal(Chat.presentation(s,{...m,status:'answering'}).hidden,undefined,'while it is running the progress shows');
+ assert.equal(Chat.presentation(s,{...m,status:'failed'}).hidden,undefined,'a failure is shown');
+ s.runs.r.team.direct=true;assert.equal(Chat.presentation(s,m).hidden,undefined,'when no one else was needed the one agent’s answer is shown as it is');
+ s.runs.r.team={direct:false,entries:[{agentId:'lyra',status:'failed',error:'x'}]};assert.equal(Chat.presentation(s,m).hidden,undefined,'with nothing from anyone, nothing is hidden');
+ assert.equal(Chat.presentation({runs:{}},{runId:'zz',body:'Plain reply'}).body,'Plain reply');
+});
+
+test('a group reply keeps up to six members’ work, so nobody named in the request drops out',()=>{
+ const people=['a','b','c','d','e','f','g'],s={...seed(),agents:people.map(id=>({id,name:id.toUpperCase(),role:'R',description:'D'})),groups:[{id:'team',name:'Team',members:people}],drafts:{team:'@everyone go'}};
+ const r=Chat.begin(s,'team');Chat.apply(s,{runId:r.run.runId,status:'answering',team:{phase:'working',leadId:'a',entries:people.map(agentId=>({agentId,status:'working'}))}});
+ assert.deepEqual(s.messages.team[1].team.entries.map(e=>e.agentId),['a','b','c','d','e','f']);
+});
+test('a reply that saved a routine but ended with no text is a finished reply, not "No answer came back"',()=>{
+ const s=seed(),r=Chat.begin(s,'a'),routine={id:'saved',workspace:s.conversationWorkspace,agentId:'a',title:'Morning review',nextRun:'2026-10-17T16:00:00Z',status:'active'};
+ Chat.apply(s,{type:'routine',runId:r.run.runId,routine});
+ Chat.apply(s,{runId:r.run.runId,status:'completed',text:''});
+ const m=s.messages.a[1];
+ assert.notEqual(m.status,'failed','a retry would save the routine twice');assert.ok(!m.error,'no error is shown');assert.equal(m.routines.length,1);
+});
+test('a task the reply started says which account it uses: only a real address, for an agent in this chat, and it never finishes the reply',()=>{
+ const s=seed(),r=Chat.begin(s,'a'),task={id:'task-1',title:'Check my calendar',account:'craviott@usc.edu',agentId:'a'};
+ assert.equal(Chat.apply(s,{type:'task',runId:r.run.runId,task:{...task,account:'not an address'}}),false);
+ assert.equal(Chat.apply(s,{type:'task',runId:r.run.runId,task:{...task,agentId:'b'}}),false,'another agent’s task is not this reply’s');
+ assert.equal(Chat.apply(s,{type:'task',runId:'unknown',task}),false);
+ assert.equal(Chat.apply(s,{type:'task',runId:r.run.runId,task}),true);
+ assert.deepEqual(s.messages.a[1].tasks,[{id:'task-1',title:'Check my calendar',account:'craviott@usc.edu'}]);assert.equal(r.run.status,'starting');
+ Chat.apply(s,{type:'task',runId:r.run.runId,task:{...task,account:'me@gmail.com'}});
+ assert.equal(s.messages.a[1].tasks.length,1);assert.equal(s.messages.a[1].tasks[0].account,'me@gmail.com','the same task is updated in place');
+ Chat.apply(s,{runId:r.run.runId,status:'completed',text:''});
+ assert.equal(s.messages.a[1].status,'completed','a reply whose only content is the started task is not an empty answer');
+ const g=grouped(),gr=Chat.begin(g,'team');
+ assert.equal(Chat.apply(g,{type:'task',runId:gr.run.runId,task:{...task,agentId:'b'},delegatedBy:'b'}),true,'a member’s task in a group reply');
+ assert.equal(Chat.apply(g,{type:'task',runId:gr.run.runId,task:{...task,agentId:'outsider'}}),false);
+});

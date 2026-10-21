@@ -1,0 +1,11 @@
+const {test}=require('node:test'),assert=require('node:assert/strict'),T=require('./buddy-team-chat'),M=require('./buddy-agent-messages');
+test('team chat shows only actual contributions for that team and current members',()=>{
+ const group={id:'team',members:['chief','lyra','forge']},s={agents:group.members.map(id=>({id})),groups:[group],runs:{r:{runId:'r',target:'team',createdAt:'2026-10-18T18:00:00Z',updatedAt:'2026-10-18T18:04:00Z',team:{entries:[{agentId:'lyra',task:'Find evidence',startedAt:'2026-10-18T18:00:10Z',finishedAt:'2026-10-18T18:01:00Z',status:'completed',notes:'The verified evidence.',dependsOn:[]},{agentId:'forge',task:'Check the evidence',startedAt:'2026-10-18T18:01:10Z',finishedAt:'2026-10-18T18:02:00Z',status:'failed',error:'Source unavailable.',dependsOn:['lyra']},{agentId:'removed',status:'completed',notes:'REMOVED'}]}},private:{runId:'private',target:'other-team',team:{entries:[{agentId:'chief',status:'completed',notes:'PRIVATE'}]}}},messages:{chief:[{body:'PRIVATE DM'}]}};
+ const items=T.items(s,group);assert.equal(items.length,4);assert.deepEqual(items.find(i=>i.variant==='contribution').recipients,['forge']);assert.equal(items.find(i=>i.variant==='error').body,'Source unavailable.');assert.equal(JSON.stringify(items).includes('PRIVATE'),false);assert.equal(JSON.stringify(items).includes('REMOVED'),false);
+ const events=items.map(item=>({id:item.id,exchangeId:item.id,fromAgentId:item.agentId,toAgentId:item.agentId,at:item.createdAt,item}));const timeline=M.mergeTimeline(s,'team',[{id:'request',createdAt:'2026-10-18T18:00:00Z'},{id:'answer',createdAt:'2026-10-18T18:04:00Z'}],events);assert.equal(timeline[0].id,'request');assert.equal(timeline.at(-1).id,'answer');assert.deepEqual(timeline.slice(1,-1),items);
+ group.members=['chief'];assert.deepEqual(T.items(s,group),[]);
+});
+test('plans and empty work do not masquerade as messages, and legacy timestamps are marked',()=>{
+ const group={id:'g',members:['a']},s={agents:[{id:'a'}],runs:{r:{runId:'r',target:'g',updatedAt:'2026-10-18T18:01:00Z',team:{entries:[{agentId:'a',task:'Not started',status:'queued',notes:'UNFINISHED'},{agentId:'a',status:'completed',notes:'Saved contribution'}]}}}};
+ const items=T.items(s,group);assert.equal(items.length,1);assert.equal(items[0].body,'Saved contribution');assert.equal(items[0].approximate,true);
+});

@@ -49,6 +49,8 @@ node --test outputs/buddy-worker/test/*.test.mjs
 python3 outputs/buddy-mac/run-tests.py
 ```
 
+Token ledger (off by default): when Buddy is started with `BUDDY_TOKEN_LEDGER` set to a file path (for example `launchctl setenv BUDDY_TOKEN_LEDGER "$HOME/Library/Application Support/Buddy/token-ledger.jsonl"`, then quit and reopen Buddy), the Claude bridges (`claude.mjs`, `coding.mjs`) append one JSON line per model call: the SDK's usage (input, cache read, cache write, output) and the size in characters of each part of that call's input — instructions, tool schemas, briefing, live-work context, chat history, file contents, other tool output and the model's own earlier output — plus one summary line per run. Sizes only, never content; a write failure never affects a run. ChatGPT runs already leave per-call usage in Codex's own session files. `launchctl unsetenv BUDDY_TOKEN_LEDGER` turns it off.
+
 Browser tests use an inert local form with a test-origin allowance provided directly by the test harness; production callers cannot enable that allowance. Native worker tests use an inert app-server and temporary files. No real emails or job applications are sent by automated tests. Live Claude execution requires the user to connect their API key; fixture tests do not use credentials or credits.
 
 Official integrations: [OpenAI app-server](https://learn.chatgpt.com/docs/app-server), [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), [Claude subscriber API credits](https://platform.claude.com/docs/en/about-claude/api-credits-for-subscribers), [Playwright persistent contexts](https://playwright.dev/docs/api/class-browsertype#browser-type-launch-persistent-context).

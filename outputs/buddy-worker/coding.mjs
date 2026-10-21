@@ -3,7 +3,7 @@ import {query,tool,createSdkMcpServer} from '@anthropic-ai/claude-agent-sdk';
 import {z} from 'zod';
 import {CodingSession} from './coding-session.mjs';
 const write=x=>process.stdout.write(JSON.stringify(x,(key,item)=>typeof item==='string'?item.toWellFormed():item)+'\n');
-const host=new CodingSession({query,tool,createSdkMcpServer,fromJSONSchema:z.fromJSONSchema,write});
+const host=new CodingSession({query,tool,createSdkMcpServer,fromJSONSchema:z.fromJSONSchema,write,ledgerPath:process.env.BUDDY_TOKEN_LEDGER});
 process.on('SIGTERM',()=>{host.close();process.exit(0);});
 for await(const line of createInterface({input:process.stdin})){
   try{const value=JSON.parse(line);if(value.command==='start')host.start(value).catch(error=>write({type:'error',runId:value.runId,error:error.message}));else if(value.command==='result')host.result(value);else if(value.command==='stop'){host.close();process.exit(0);}}

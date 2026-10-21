@@ -669,5 +669,100 @@ import Foundation
         let stillOpen = try commands.store.openDecisions(workspace: w)
         require(calls(commands).count == runsBefore && stillOpen.contains { $0["taskId"] as? String == forgeID && $0["kind"] as? String == "review" && $0["audience"] as? String == "user" }, "a sensitive review stays with the user and the lane runs nothing for it: \(stillOpen)")
         print("PASS: a routine coding command review is a supervisor work item with the exact command, host, writes and reason; approve_command answers it through the worker as the supervisor, and a review left with the user never reaches the lane")
+
+        // 15. The user's S01 case, replayed: "Get stage 1 done"; Chief's own plan task had been saved as a general task (before Buddy checked kinds),
+        // ran without a coding tool and asked the user "How should S01 proceed when its required Chief-owned coding-session tool is unavailable in
+        // this run?". That question is not the user's: such questions now go to Chief's background supervision, and the one already waiting is moved
+        // there when the lane starts. The lane gives the task back as a coding session, and Buddy starts it again as one, with the user's request as
+        // the go-ahead its "Do not execute now" wording waited for. Nothing reaches the user; a sign-in stays theirs.
+        let asked15 = "How should S01 proceed when its required Chief-owned coding-session tool is unavailable in this run?", context15 = "Tool discovery found no coding_session tool. Current task also says 'Do not execute now'."
+        require(BuddySupervisorLane.asksSupervisor(asker: chief, supervisor: chief, planWork: true, category: "resources", text: asked15 + "\n" + context15), "the supervisor's own question about a missing tool on plan work goes to its background supervision")
+        require(BuddySupervisorLane.asksSupervisor(asker: chief, supervisor: chief, planWork: true, category: "objective", text: asked15), "a missing tool is never the user's to supply, whatever category it was given")
+        require(BuddySupervisorLane.asksSupervisor(asker: chief, supervisor: chief, planWork: true, category: "approach", text: "Which table is the baseline?"), "the supervisor's own choice on plan work is decided by its supervision")
+        require(!BuddySupervisorLane.asksSupervisor(asker: chief, supervisor: chief, planWork: true, category: "credential", text: "The WRDS portal wants a sign-in; no tool can sign in."), "a sign-in is the user's, even when a tool is mentioned")
+        require(!BuddySupervisorLane.asksSupervisor(asker: chief, supervisor: chief, planWork: true, category: "money_out", text: "The dataset costs $40."), "money is the user's")
+        require(!BuddySupervisorLane.asksSupervisor(asker: chief, supervisor: chief, planWork: false, category: "resources", text: asked15), "outside plan work the supervisor's own question still goes to the user")
+        require(BuddySupervisorLane.asksSupervisor(asker: forge, supervisor: chief, planWork: false, category: "credential", text: "Can you sign in?"), "a teammate's question always goes to its supervisor, who forwards what only the user can answer")
+        let s01World = try world(base, "s01")
+        try mode(s01World, "auto")
+        let s01Brief = "Do not execute now. On user Run S01 only, execute stages/S01_protocol.md in one Chief-owned coding session. No teammate dependency or next-stage launch."
+        let s01Stage: [String: Any] = ["title": "S01 Protocol and literature freeze", "goal": "Read new inputs and verify literature; freeze the protocols.", "acceptance": ["stages/S01_protocol/spec_v1.sha256 saved"]]
+        let s01Plan = try s01World.plans.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Freeze the S01 protocol, then extend", stages: [s01Stage, stages[1]],
+                                                 tasks: [["stage": 1, "key": "s01", "title": "S01 protocol intake ONLY AFTER explicit user trigger", "assignee": chief, "kind": "general", "brief": "Freeze the S01 protocol.", "deliverable": "stages/S01_protocol/acceptance.md"]],
+                                                 members: [chief, forge, vera], by: chief)
+        s01World.planID = s01Plan["id"] as? String ?? ""; s01World.keys = s01Plan["keys"] as? [String: String] ?? [:]
+        _ = try s01World.plans.authorize(planId: s01World.planID, through: 1, quote: "Get stage 1 done", messageId: "m-s01", viaButton: false, now: Date())
+        _ = try step(s01World)
+        let generalRun = jobs(s01World, "s01").first ?? [:], generalID = generalRun["id"] as? String ?? ""
+        require(generalRun["kind"] as? String == "general" && generalRun["agentId"] as? String == chief && generalRun["supervisorId"] as? String == chief, "Chief's own task ran as a general task, as in the user's plan: \(generalRun["kind"] ?? "")")
+        // The brief as Chief wrote it in the user's plan.
+        try BuddyOperationsDB(directory: s01World.worker, existing: true).run("UPDATE plan_tasks SET brief = ? WHERE id = ?", [.text(s01Brief), .text(s01World.keys["s01"] ?? "")])
+        // Chief's general run asks, as the worker saved it before such questions went to the supervisor: routed to the user.
+        try s01World.store.update(generalID, ["status": "running", "attempt": 1, "executionRunID": UUID().uuidString])
+        try s01World.store.update(generalID, ["status": "waiting_user", "stopCause": "checkpoint.user", "progress": "Waiting for you: " + asked15,
+                                              "checkpoint": ["id": UUID().uuidString, "category": "resources", "question": asked15, "options": [String](), "context": context15, "routedTo": "user", "at": "2026-10-21T02:35:12Z",
+                                                             "recommendation": "Restore the native coding-session capability and resume only under the explicit S01 execution trigger."]])
+        let waiting15 = try s01World.store.openDecisions(workspace: w).filter { $0["taskId"] as? String == generalID }
+        require(waiting15.count == 1 && waiting15.first?["audience"] as? String == "user", "before this fix the question waited for the user: \(waiting15)")
+        // A sign-in Chief's plan work waits for stays the user's.
+        let signinID = try s01World.store.create(workspace: w, agent: chief, requestId: "s01-signin", title: "Fetch the WRDS extract", goal: "Fetch it.", kind: "coding", provider: "claude", budget: BuddyRunLimit.none)["id"] as? String ?? ""
+        try s01World.store.update(signinID, ["planId": s01World.planID, "planTaskId": "elsewhere", "supervisorId": chief, "status": "running", "attempt": 1, "executionRunID": UUID().uuidString])
+        try s01World.store.update(signinID, ["status": "waiting_user", "stopCause": "checkpoint.user", "checkpoint": ["id": UUID().uuidString, "question": "Sign in to WRDS so the agent can continue.", "need": "credential", "profile": "wrds", "service": "WRDS", "routedTo": "user"]])
+        _ = try step(s01World)
+        // An answer cannot give the task a coding tool: Buddy refuses it, says why, and the question stays.
+        try mode(s01World, "plainanswer")
+        await tick(s01World)
+        let answered15 = try itemState(s01World, waiting15.first?["id"] as? String ?? "")
+        let stillAsking = try s01World.store.job(generalID)["status"] as? String
+        require(answered15.refusal.contains("an answer cannot give") && answered15.refusal.contains("reassign it with kind coding") && stillAsking == "waiting_user",
+                "an answer to a missing coding tool is refused with the way out: \(answered15)")
+        try mode(s01World, "auto")
+        await tick(s01World)
+        let call15 = calls(s01World).last ?? [:]
+        require((call15["kinds"] as? [String]) == ["question"] && (call15["taskKinds"] as? [String]) == ["general"] && (call15["expected"] as? [String]) == ["reassign with kind coding"] && call15["kindRule"] as? Bool == true,
+                "the lane is shown the question, the task's kind and what it needs, and told how kinds work: \(call15)")
+        let retooled = try planTask(s01World, "s01")
+        require(retooled["kind"] as? String == "coding" && retooled["status"] as? String == "pending" && retooled["assignee"] as? String == chief, "the lane gives the task back to Chief as a coding task: \(retooled)")
+        require(try s01World.store.job(generalID)["status"] as? String == "cancelled", "the general run is retired")
+        require(try count(s01World, "SELECT COUNT(*) FROM plan_decisions WHERE kind = 'reassign' AND decided_by = ? AND task_id = ?", [.text(chief), .text(s01World.keys["s01"] ?? "")]) == 1, "the reassign is Chief's recorded decision")
+        _ = try step(s01World)
+        let codingRun = jobs(s01World, "s01").first { $0["requestId"] as? String == "plan:\(s01World.keys["s01"] ?? ""):2" } ?? [:]
+        require(codingRun["kind"] as? String == "coding" && codingRun["agentId"] as? String == chief && (codingRun["goal"] as? String ?? "").contains("\nGo-ahead: the user's request above is the trigger this task was waiting for. Wording in it such as “ONLY AFTER explicit user trigger”, “Do not execute now”, “On user Run S01 only”"),
+                "Buddy starts it again as a coding session, with the go-ahead: \(codingRun["kind"] ?? "not started") \(codingRun["goal"] ?? "")")
+        let forUser15 = try s01World.store.openDecisions(workspace: w).filter { $0["audience"] as? String == "user" && $0["taskId"] as? String != signinID }, escalations15 = try notices(s01World, "escalation"), stuck15 = try notices(s01World, "stuck")
+        require(forUser15.isEmpty && escalations15.isEmpty && stuck15.isEmpty, "nothing reached the user: \(forUser15) \(escalations15) \(stuck15)")
+        let signin15 = try s01World.store.job(signinID), signinOpen = try s01World.store.openDecisions(workspace: w).filter { $0["taskId"] as? String == signinID }
+        require((signin15["checkpoint"] as? [String: Any])?["routedTo"] as? String == "user" && signinOpen.count == 1 && signinOpen.first?["audience"] as? String == "user", "the sign-in stays with the user: \(signinOpen)")
+        print("PASS: the supervisor's own question about a missing tool on plan work goes to its background supervision, not the user (one already waiting is moved there when the lane starts; a sign-in stays the user's); an answer cannot add the tool and is refused; the lane reassigns the task with kind coding and Buddy starts it again as a coding session whose brief says the user's request is its go-ahead")
+
+        // 16. The same loop through a rework (the user's next S01 run): Chief's general run finished PARTIAL, without spec_v1.sha256, and Chief sent
+        // it back with "Continue only authorized S01 in the Chief-owned coding session. Generate and independently verify spec_v1.sha256. Do not
+        // delegate to Forge." It went back to a general session and asked the user again. A rework that runs code makes the task a coding task for
+        // the same assignee, so "do not delegate" holds and the work can be done; a resume cannot add the tool.
+        let reworked = try world(base, "s01-rework")
+        try mode(reworked, "auto")
+        let reworkPlan = try reworked.plans.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Freeze the S01 protocol, then extend", stages: [s01Stage, stages[1]],
+                                                    tasks: [["stage": 1, "key": "s01", "title": "S01 protocol intake", "assignee": chief, "kind": "general", "brief": "Freeze the S01 protocol and save acceptance.md.", "deliverable": "stages/S01_protocol/acceptance.md"]],
+                                                    members: [chief, forge, vera], by: chief)
+        reworked.planID = reworkPlan["id"] as? String ?? ""; reworked.keys = reworkPlan["keys"] as? [String: String] ?? [:]
+        _ = try reworked.plans.authorize(planId: reworked.planID, through: 1, quote: "Get stage 1 done", messageId: "m-rework", viaButton: false, now: Date())
+        _ = try step(reworked)
+        let partial = jobs(reworked, "s01").first?["id"] as? String ?? ""
+        require(jobs(reworked, "s01").first?["kind"] as? String == "general", "the S01 task runs as a general task")
+        try finish(reworked.store, partial, result: "S01 PARTIAL: acceptance.md saved; spec_v1.sha256, hash verification and code checks not done (no coding session in this run).")
+        _ = try step(reworked)
+        try mode(reworked, "reworkcode")
+        await tick(reworked)
+        let back = try planTask(reworked, "s01")
+        require(back["status"] as? String == "pending" && back["kind"] as? String == "coding" && back["assignee"] as? String == chief && back["reworks"] as? Int == 1, "the rework sends it back to Chief as a coding task: \(back)")
+        let reworkWhy = try rows(reworked, "SELECT rationale FROM plan_decisions WHERE kind = 'rework' AND task_id = ?", [.text(reworked.keys["s01"] ?? "")]).first?[0].string ?? ""
+        require(reworkWhy == "Buddy made “S01 protocol intake” a coding task: the rework says “coding session”, and only a coding session runs code.", "the rework decision says why: \(reworkWhy)")
+        _ = try step(reworked)
+        let rerun = jobs(reworked, "s01").first { $0["requestId"] as? String == "plan:\(reworked.keys["s01"] ?? ""):2" } ?? [:]
+        require(rerun["kind"] as? String == "coding" && rerun["agentId"] as? String == chief && (rerun["goal"] as? String ?? "").hasSuffix("Rework requested by Chief: Continue only authorized S01 in the Chief-owned coding session. Generate and independently verify spec_v1.sha256. Do not delegate to Forge."),
+                "Buddy starts the rework as Chief's coding session, with the instruction: \(rerun["kind"] ?? "not started")")
+        let forUser16 = try reworked.store.openDecisions(workspace: w).filter { $0["audience"] as? String == "user" }, escalations16 = try notices(reworked, "escalation")
+        require(forUser16.isEmpty && escalations16.isEmpty, "nothing reaches the user: \(forUser16) \(escalations16)")
+        print("PASS: a rework whose instruction runs code makes the plan task a coding task for the same assignee, so Buddy restarts it as a coding session with the instruction, and nothing reaches the user")
     }
 }

@@ -233,19 +233,27 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         guard (1...maxCriteria).contains(items.count) else { throw invalid("Give each stage 1 to 5 checkable acceptance criteria.") }
         return items
     }
-    private struct TaskSpec { let key, title, assignee, kind, brief, deliverable: String; let dependsOn: [String] }
+    /// `note` says why Buddy changed the kind it was given (empty when it did not).
+    private struct TaskSpec { let key, title, assignee, kind, brief, deliverable: String; let dependsOn: [String]; var note = "" }
     private static func taskSpec(_ value: [String: Any], key fallback: String, members: [String]) throws -> TaskSpec {
         let key = (value["key"] as? String)?.trimmingCharacters(in: .whitespaces).nilIfEmpty ?? fallback
         guard key.count <= 40 else { throw invalid("Keep each task key to 40 characters.") }
         let title = try text(value["title"], "each task a title", max: 150)
         let assignee = (value["assignee"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         guard members.contains(assignee) else { throw invalid("Assign “\(title)” to a member of this group.") }
-        let kind = (value["kind"] as? String)?.lowercased().nilIfEmpty ?? "general"
-        guard ["research", "general", "coding"].contains(kind) else { throw invalid("Choose research, general or coding as the kind of “\(title)”.") }
+        var kind = (value["kind"] as? String)?.lowercased().nilIfEmpty ?? "general"
+        guard kinds.contains(kind) else { throw invalid("Choose research, general or coding as the kind of “\(title)”.") }
         let brief = try text(value["brief"], "“\(title)” a brief", max: briefLimit)
         let deliverable = try text(value["deliverable"], "“\(title)” a deliverable", max: 300)
         let dependsOn = (value["dependsOn"] as? [Any] ?? []).compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces).nilIfEmpty }
-        return TaskSpec(key: key, title: title, assignee: assignee, kind: kind, brief: brief, deliverable: deliverable, dependsOn: dependsOn)
+        let note = kind == "coding" ? nil : codingNote(title: title, brief: brief, deliverable: deliverable)
+        if note != nil { kind = "coding" }
+        return TaskSpec(key: key, title: title, assignee: assignee, kind: kind, brief: brief, deliverable: deliverable, dependsOn: dependsOn, note: note ?? "")
+    }
+    static let kinds = ["research", "general", "coding"]
+    /// Why a task given another kind is a coding task: its own words say it runs code, and only a coding session can. Nil when they do not.
+    static func codingNote(title: String, brief: String, deliverable: String) -> String? {
+        BuddyTaskNeeds.code([title, brief, deliverable].joined(separator: "\n")).map { "Buddy made “\(title)” a coding task: it says “\($0)”, and only a coding session runs code." }
     }
     /// Whether the tasks can run in some order: no task waits, through other tasks, on itself.
     private static func acyclic(_ edges: [String: [String]]) -> Bool {
@@ -422,6 +430,7 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         var out = try render(planID, jobs: [:], detail: true)
         out["menu"] = try menu(planId: planID)
         out["keys"] = keys
+        out["corrections"] = specs.map(\.spec.note).filter { !$0.isEmpty }
         return out
     }
 
@@ -432,13 +441,14 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         if let expectedRevision, expectedRevision != plan.revision { throw Self.conflict("The plan changed since you read it (it is at revision \(plan.revision)). Read it again, then repeat the change.") }
         guard (1...12).contains(ops.count) else { throw Self.invalid("Give 1 to 12 changes.") }
         let now = Self.stamp()
+        var corrections: [String] = []
         try guarded {
             try db.transaction {
                 for op in ops {
                     switch op["op"] as? String ?? "" {
                     case "add_task":
                         let stage = try ownStage(op, in: planId)
-                        _ = try insertAdded(stage: stage, tasks: [(op["task"] as? [String: Any]) ?? op], by: by, members: members)
+                        corrections += try insertAdded(stage: stage, tasks: [(op["task"] as? [String: Any]) ?? op], by: by, members: members).notes
                     case "edit_task":
                         let task = try ownTask(op["taskId"], in: planId)
                         guard !["done", "waived"].contains(task.status) else { throw Self.conflict("“\(task.title)” is finished; add a new task instead.") }
@@ -448,8 +458,9 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
                         let title = fields["title"] == nil ? task.title : try Self.text(fields["title"], "the task a title", max: 150)
                         let brief = fields["brief"] == nil ? task.brief : try Self.text(fields["brief"], "the task a brief", max: Self.briefLimit)
                         let deliverable = fields["deliverable"] == nil ? task.deliverable : try Self.text(fields["deliverable"], "the task a deliverable", max: 300)
-                        let kind = fields["kind"] == nil ? task.kind : (fields["kind"] as? String ?? "").lowercased()
-                        guard ["research", "general", "coding"].contains(kind) else { throw Self.invalid("Choose research, general or coding as the kind of “\(title)”.") }
+                        var kind = fields["kind"] == nil ? task.kind : (fields["kind"] as? String ?? "").lowercased()
+                        guard Self.kinds.contains(kind) else { throw Self.invalid("Choose research, general or coding as the kind of “\(title)”.") }
+                        if kind != "coding", let note = Self.codingNote(title: title, brief: brief, deliverable: deliverable) { kind = "coding"; corrections.append(note) }
                         try db.run("UPDATE plan_tasks SET title = ?, brief = ?, deliverable = ?, kind = ?, updated_at = ? WHERE id = ?", [.text(title), .text(brief), .text(deliverable), .text(kind), .text(now), .text(task.id)])
                     case "reassign":
                         _ = try ownTask(op["taskId"], in: planId)
@@ -482,7 +493,9 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
                 try db.run("UPDATE plans SET revision = revision + 1, updated_at = ? WHERE id = ?", [.text(now), .text(planId)])
             }
         }
-        return try render(planId, jobs: [:], detail: true)
+        var out = try render(planId, jobs: [:], detail: true)
+        out["corrections"] = corrections
+        return out
     }
     private func ownTask(_ id: Any?, in planId: String) throws -> TaskRow {
         guard let id = id as? String, let found = try? owner(id), found.plan.id == planId else { throw Self.missing("That task is not in this plan.") }
@@ -618,6 +631,16 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         }
         return out
     }
+    /// The task as it starts. One whose words say it runs code starts as a coding session whatever kind was saved (a plan from before Buddy
+    /// checked kinds has such tasks, like the user's S01 task); the change is kept and recorded for the supervisor.
+    func settleKind(_ ref: BuddyPlanTaskRef) throws -> BuddyPlanTaskRef {
+        guard ref.kind != "coding", let task = try taskRow(ref.taskId), let note = Self.codingNote(title: task.title, brief: task.brief, deliverable: task.deliverable) else { return ref }
+        try db.transaction {
+            try db.run("UPDATE plan_tasks SET kind = 'coding', updated_at = ? WHERE id = ? AND kind <> 'coding'", [.text(Self.stamp()), .text(task.id)])
+            _ = try recordDecision(planId: ref.planId, kind: "reassign", by: "buddy", question: "", choice: task.assignee, rationale: note, stageId: ref.stageId, taskId: task.id, workerTaskId: task.workerTaskId)
+        }
+        return BuddyPlanTaskRef(planId: ref.planId, stageId: ref.stageId, taskId: ref.taskId, assignee: ref.assignee, kind: "coding", title: ref.title, stage: ref.stage)
+    }
     /// Counts one more dispatch and returns its number, which makes the worker request ID. A task is started at most 6 times.
     func markDispatching(taskId: String) throws -> Int {
         guard let task = try taskRow(taskId) else { throw Self.missing("This plan task is no longer available.") }
@@ -666,7 +689,8 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
     }
 
     /// The brief a dispatched task is started with: the user's authorization, the stage and its acceptance, the task, the accepted results it
-    /// builds on (as data), the stage boundary, and who answers questions.
+    /// builds on (as data), the stage boundary, and who answers questions. A task written to wait for the user's trigger ("Do not execute now. On
+    /// user Run S01 only") is told the authorization is that trigger: it stopped the user's S01 task after they had said "Get stage 1 done".
     func composeBrief(taskId: String, jobs: [[String: Any]], names: [String: String]) throws -> String {
         let (task, stage, plan) = try owner(taskId)
         guard let scope = try activeScope(plan.id), stage.n <= scope.through else { throw BuddyPlanFailure(message: "This task's stage is not authorized.", code: "outside_approved_scope") }
@@ -677,9 +701,13 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         }
         var rework: String?
         if task.reworks > 0 { rework = try db.rows("SELECT choice FROM plan_decisions WHERE task_id = ? AND kind = 'rework' ORDER BY rowid DESC LIMIT 1", [.text(task.id)]).first.map { Self.s($0, 0) } }
+        let held = BuddyTaskNeeds.trigger(task.title + "\n" + task.brief).prefix(4).map { "“\(String($0.prefix(80)))”" }
         func compose(brief: String, inputLimit: Int) -> String {
-            var lines = [
-                "Authorization: the user asked \"\(scope.quote)\" (\(scope.at)) for stage \(stage.n), \"\(stage.title)\".",
+            var lines = ["Authorization: the user asked \"\(scope.quote)\" (\(scope.at)) for stage \(stage.n), \"\(stage.title)\"."]
+            if !held.isEmpty {
+                lines.append("Go-ahead: the user's request above is the trigger this task was waiting for. Wording in it such as \(held.joined(separator: ", ")) dates from before they authorized this stage and no longer holds: do the task now. The go-ahead approves nothing on the user list (a sign-in, money, anything sent in the user's name); those still go to the user.")
+            }
+            lines += [
                 "Stage goal: \(Self.clause(stage.goal)). Done when: \(Self.criteria(stage.acceptance)).",
                 "Your task (\(task.title)): \(brief)",
                 "Deliverable: \(Self.clause(task.deliverable)). Save files with Buddy file tools in the connected project folder named in the brief, never in the Buddy files root.",
@@ -713,18 +741,24 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
             }
         }
     }
-    /// Sends a result back with an instruction; the stage loop starts the task again. At most 3 times per task.
-    func rework(taskId: String, instruction: String, by: String) throws {
+    /// Sends a result back with an instruction; the stage loop starts the task again. At most 3 times per task. An instruction that runs code
+    /// makes the task a coding task, for the same assignee: the user's S01 task was sent back to a general session to "generate and independently
+    /// verify spec_v1.sha256" and asked them again for a coding tool. The reason is returned and recorded.
+    @discardableResult
+    func rework(taskId: String, instruction: String, by: String) throws -> String? {
         let (task, stage, plan) = try liveOwner(taskId)
         guard task.status == "review" else { throw Self.conflict("Only a result waiting for review can be sent back.") }
         guard task.reworks < Self.maxReworks else { throw Self.conflict("“\(task.title)” was already sent back \(Self.maxReworks) times. Accept it, waive it or give it to someone else.") }
         let instruction = try Self.text(instruction, "the rework a precise instruction", max: 4000)
+        let note = task.kind == "coding" ? nil : BuddyTaskNeeds.code(instruction).map { "Buddy made “\(task.title)” a coding task: the rework says “\($0)”, and only a coding session runs code." }
+            ?? Self.codingNote(title: task.title, brief: task.brief, deliverable: task.deliverable)
         try guarded {
             try db.transaction {
-                try db.run("UPDATE plan_tasks SET status = 'pending', reworks = reworks + 1, blocked_reason = '', updated_at = ? WHERE id = ? AND status = 'review'", [.text(Self.stamp()), .text(taskId)])
-                _ = try recordDecision(planId: plan.id, kind: "rework", by: by, question: "", choice: instruction, rationale: "", stageId: stage.id, taskId: taskId, workerTaskId: task.workerTaskId)
+                try db.run("UPDATE plan_tasks SET status = 'pending', kind = ?, reworks = reworks + 1, blocked_reason = '', updated_at = ? WHERE id = ? AND status = 'review'", [.text(note == nil ? task.kind : "coding"), .text(Self.stamp()), .text(taskId)])
+                _ = try recordDecision(planId: plan.id, kind: "rework", by: by, question: "", choice: instruction, rationale: note ?? "", stageId: stage.id, taskId: taskId, workerTaskId: task.workerTaskId)
             }
         }
+        return note
     }
     /// Marks a task as no longer needed. Its dependents may start, and its stage can finish without it.
     func waive(taskId: String, reason: String, by: String) throws {
@@ -738,25 +772,33 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
             }
         }
     }
-    /// Gives a task that is not running to another member (or to the same one, to try a refused start again).
-    func reassign(taskId: String, assignee: String, by: String, members: [String]) throws {
+    /// Gives a task that is not running to another member (or to the same one, to try a refused start again), as the kind of task it needs when
+    /// `kind` is given (a teammate whose general task had no coding tool gets it back as a coding task). A task whose words say it runs code stays
+    /// a coding task whatever kind is asked for; the reason is returned and recorded.
+    @discardableResult
+    func reassign(taskId: String, assignee: String, kind: String? = nil, by: String, members: [String]) throws -> String? {
         let (task, stage, plan) = try liveOwner(taskId)
         guard members.contains(assignee) else { throw Self.invalid("Give the task to a member of this group.") }
         guard ["pending", "blocked", "review"].contains(task.status) else { throw Self.conflict("“\(task.title)” is \(task.status == "dispatched" ? "running; stop it first" : "finished").") }
+        let asked = kind?.trimmingCharacters(in: .whitespaces).lowercased().nilIfEmpty ?? task.kind
+        guard Self.kinds.contains(asked) else { throw Self.invalid("Choose research, general or coding as the kind of “\(task.title)”.") }
+        let note = asked == "coding" ? nil : Self.codingNote(title: task.title, brief: task.brief, deliverable: task.deliverable), settled = note == nil ? asked : "coding"
         try guarded {
             try db.transaction {
-                try db.run("UPDATE plan_tasks SET assignee = ?, status = 'pending', blocked_reason = '', updated_at = ? WHERE id = ?", [.text(assignee), .text(Self.stamp()), .text(taskId)])
-                _ = try recordDecision(planId: plan.id, kind: "reassign", by: by, question: "", choice: assignee, rationale: "", stageId: stage.id, taskId: taskId, workerTaskId: task.workerTaskId)
+                try db.run("UPDATE plan_tasks SET assignee = ?, kind = ?, status = 'pending', blocked_reason = '', updated_at = ? WHERE id = ?", [.text(assignee), .text(settled), .text(Self.stamp()), .text(taskId)])
+                _ = try recordDecision(planId: plan.id, kind: "reassign", by: by, question: "", choice: assignee, rationale: note ?? (settled == task.kind ? "" : "As a \(settled) task."), stageId: stage.id, taskId: taskId, workerTaskId: task.workerTaskId)
             }
         }
+        return note
     }
     /// Adds tasks to a stage that is not finished. Dependencies name tasks of this batch (by key or title) or existing tasks of this or an
     /// earlier stage (by id or title). At most 12 tasks are added to one stage.
     func addTasks(stageId: String, tasks: [[String: Any]], by: String, members: [String]) throws -> [String] {
         guard let stage = try stageRow(stageId), let plan = try planRow(stage.planId), Self.live.contains(plan.status) else { throw Self.missing("That stage is not in an open plan.") }
-        return try guarded { try db.transaction { try insertAdded(stage: stage, tasks: tasks, by: by, members: members) } }
+        return try guarded { try db.transaction { try insertAdded(stage: stage, tasks: tasks, by: by, members: members).ids } }
     }
-    private func insertAdded(stage: StageRow, tasks: [[String: Any]], by: String, members: [String]) throws -> [String] {
+    /// The new tasks' ids, and why Buddy made any of them a coding task.
+    private func insertAdded(stage: StageRow, tasks: [[String: Any]], by: String, members: [String]) throws -> (ids: [String], notes: [String]) {
         guard !["done", "superseded"].contains(stage.status) else { throw Self.conflict("Stage \(stage.n) is finished; add the work to a later stage.") }
         guard !tasks.isEmpty else { throw Self.invalid("Give the tasks to add.") }
         guard stage.added + tasks.count <= Self.maxAddedPerStage else { throw Self.conflict("At most \(Self.maxAddedPerStage) tasks can be added to one stage; stage \(stage.n) has \(stage.added).") }
@@ -774,8 +816,9 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         for spec in specs { for dep in deps[spec.key] ?? [] { try db.run("INSERT OR IGNORE INTO plan_task_deps(task_id, depends_on) VALUES(?, ?)", [.text(ids[spec.key] ?? ""), .text(ids[dep] ?? dep)]) } }
         // New work reopens a stage that was waiting for its check.
         try db.run("UPDATE plan_stages SET added_tasks = added_tasks + ?, status = CASE WHEN status = 'review' THEN 'working' ELSE status END, updated_at = ? WHERE id = ?", [.int(Int64(specs.count)), .text(now), .text(stage.id)])
-        _ = try recordDecision(planId: stage.planId, kind: "add_tasks", by: by, question: "", choice: specs.map(\.title).joined(separator: "; "), rationale: "", stageId: stage.id, taskId: "", workerTaskId: "")
-        return out
+        let notes = specs.map(\.note).filter { !$0.isEmpty }
+        _ = try recordDecision(planId: stage.planId, kind: "add_tasks", by: by, question: "", choice: specs.map(\.title).joined(separator: "; "), rationale: notes.joined(separator: " "), stageId: stage.id, taskId: "", workerTaskId: "")
+        return (out, notes)
     }
 
     /// The supervisor's check of a stage. Each piece of evidence is a finished task of this stage (`task:<id>`) or a completed worker attempt
@@ -1014,6 +1057,82 @@ enum BuddyPlanIntent {
     }
 }
 
+/// What a plan task's own words say it needs, read natively. Chief once gave "execute stages/S01_protocol.md in one Chief-owned coding session"
+/// the kind general, so the task ran with no coding tool; and its "Do not execute now. On user Run S01 only" still stopped it after the user said
+/// "Get stage 1 done". A task whose words say it runs code is a coding task, and once its stage is authorized such wording no longer holds it.
+enum BuddyTaskNeeds {
+    private static func regex(_ pattern: String) -> NSRegularExpression { try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) }
+    private static let determiner = #"(?:(?:the|a|an|this|that|these|those|each|every|all|our|its|their|your)\s+)?"#
+    private static let runnable = #"(?:scripts?|code|notebooks?|programs?|pipelines?|tests?|regressions?|simulations?|estimations?|backtests?|models?|fits|queries|python|matlab|stata|sql)"#
+    /// Running code, in the words briefs use: a coding session, running a script or the pipeline, executing a file or a protocol, a hash to compute,
+    /// code to write.
+    private static let codePatterns = [
+        regex(#"\bcoding[\s_-]+sessions?\b"#),
+        regex(#"\b(?:code|script)\s+execution\b"#),
+        regex(#"\b(?:run|runs|running|rerun|re-run|execute|executes|executing)\s+"# + determiner + #"(?:[\w./-]+\s+){0,3}?"# + runnable + #"\b"#),
+        regex(#"\b(?:run|rerun|re-run|execute)\s+(?:the\s+)?[\w./-]+\.(?:py|r|ipynb|sh|jl|m|do|js|mjs|ts|sql|md)\b"#),
+        regex(#"\bexecut(?:e|es|ing)\s+"# + determiner + #"(?:[\w./-]+\s+){0,3}?protocols?\b"#),
+        regex(#"\b(?:sha-?(?:1|224|256|384|512)(?:sum)?|md5(?:sum)?|checksums?)\b|\.sha256\b"#),
+        regex(#"\b(?:compute|calculate|generate|record|write)\s+"# + determiner + #"(?:[\w./-]+\s+){0,2}?hash(?:es)?\b"#),
+        regex(#"\b(?:write|implement|build|develop|debug|refactor)\s+(?:(?:a|an|the|some|new)\s+)?(?:[\w-]+\s+){0,2}?(?:scripts?|code|programs?|functions?|modules?|notebooks?|parsers?|scrapers?)\b"#),
+        regex(#"\bpython3?\s+[\w./-]+\.py\b|\brscript\s+\S|\bpytest\b|\bpip3?\s+install\b"#),
+    ]
+    /// Wording that holds a task until the user's own trigger.
+    private static let triggerPatterns = [
+        regex(#"\b(?:do\s+not|don'?t|never)\s+(?:execute|run|start|begin|launch|proceed|act)(?:\s+(?:it|this|anything|the\s+[\w-]+|[\w-]+))?\s+(?:now|yet|until|before)\b"#),
+        regex(#"\b(?:wait|waits|waiting|await|awaits|awaiting|hold|holding)\s+(?:for\s+)?(?:(?:the|an?|my|your)\s+)?(?:explicit\s+)?(?:user'?s?|your|my|explicit)\s+(?:explicit\s+)?(?:trigger|go-?ahead|signal|approval|ok|okay|confirmation|command|instruction|request|run)\b"#),
+        regex(#"\b(?:only\s+)?(?:after|upon|on|once|when)\s+(?:(?:an?|the)\s+)?(?:explicit\s+)?(?:user'?s?|your|my)\s+(?:explicit\s+)?["“']?(?:trigger|go-?ahead|signal|approval|ok|okay|confirmation|command|instruction|request|run)\b"#),
+        regex(#"\bon\s+(?:the\s+)?user(?:'s)?\s+["“']?run\s+[\w-]+(?:\s+only)?\b"#),
+        regex(#"\b(?:until|(?:only\s+)?(?:when|once|after))\s+(?:the\s+user|i)\s+(?:says?|triggers?|asks?|runs?|approves?|gives?|confirms?|tells?)\b"#),
+        regex(#"\buser[\s-]+triggered\b|\bexplicit\s+(?:user\s+)?trigger\b"#),
+    ]
+    private static let toolWords = #"(?:tools?|capabilit(?:y|ies)|coding[\s_-]+sessions?|coding_session|sandbox|shell|terminal|interpreter|code\s+execution)"#
+    /// A question saying a tool the work needs is not there.
+    private static let missingPatterns = [
+        regex(#"\b"# + toolWords + #"\b[^.?!\n]{0,60}?\b(?:unavailable|not\s+available|missing|absent|disabled|not\s+(?:found|present|provided|exposed|enabled|offered|listed)|(?:isn'?t|aren'?t)\s+available|cannot\s+be\s+found)\b"#),
+        regex(#"\b(?:no|without|lacks?|lacking|missing)\s+(?:(?:a|an|the|any)\s+)?(?:[\w-]+\s+){0,3}?"# + toolWords + #"\b"#),
+        regex(#"\b(?:cannot|can'?t|unable\s+to)\s+(?:run|execute)\s+(?:any\s+)?(?:code|scripts?|commands?|python)\b"#),
+    ]
+    /// Only the start is bounded, so "coding_session" counts.
+    private static let codingTool = regex(#"\b(?:coding|code|shell|terminal|interpreter|sandbox|script|python)"#)
+    private static let negation = regex(#"\b(?:not|don'?t|never|no|without|nor|avoid)\b"#)
+    private static let sentence = regex(#"[.!?;](?:\s|$)|\n"#)
+
+    private static func matches(_ regex: NSRegularExpression, _ text: String) -> [NSRange] {
+        regex.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length)).map(\.range)
+    }
+    /// Whether the sentence leading up to `range` says not to (so "Do not run any code" asks for no code).
+    private static func negated(_ range: NSRange, in text: String) -> Bool {
+        let lead = (text as NSString).substring(to: range.location)
+        let start = matches(sentence, lead).last.map(NSMaxRange) ?? 0
+        return !matches(negation, (lead as NSString).substring(from: start)).isEmpty
+    }
+
+    /// The words that show a task runs code, as written, or nil.
+    static func code(_ text: String) -> String? {
+        for pattern in codePatterns {
+            if let range = matches(pattern, text).first(where: { !negated($0, in: text) }) { return (text as NSString).substring(with: range) }
+        }
+        return nil
+    }
+    /// The wording that holds a task until the user's trigger, as written and in order (overlapping finds are one phrase).
+    static func trigger(_ text: String) -> [String] {
+        var ranges = triggerPatterns.flatMap { matches($0, text) }.sorted { $0.location < $1.location }, merged: [NSRange] = []
+        while let next = ranges.first {
+            ranges.removeFirst()
+            if let last = merged.last, next.location <= NSMaxRange(last) { merged[merged.count - 1] = NSUnionRange(last, next) } else { merged.append(next) }
+        }
+        return merged.map { (text as NSString).substring(with: $0).trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+    /// The words in a question that say a tool the work needs is missing, or nil.
+    static func missingTool(_ text: String) -> String? {
+        for pattern in missingPatterns { if let range = matches(pattern, text).first { return (text as NSString).substring(with: range) } }
+        return nil
+    }
+    /// Whether the missing tool is one only a coding session has.
+    static func missingCoding(_ text: String) -> Bool { missingTool(text).map { !matches(codingTool, $0).isEmpty } ?? false }
+}
+
 /// One pass of the stage loop, run by the worker every couple of seconds. It follows the worker tasks, starts each authorized stage, starts
 /// every ready task exactly once (the request ID `plan:<task>:<n>` makes creating it idempotent), and hands a finished stage to its check.
 /// It never starts anything in a stage past the user's authorization; the database refuses that too.
@@ -1024,7 +1143,9 @@ enum BuddyPlanIntent {
         var jobs = jobs, started: [String] = []
         _ = try plans.reconcile(jobs: jobs)
         try plans.beginStages(workspace: workspace)
-        for ref in try plans.ready(workspace: workspace) {
+        for found in try plans.ready(workspace: workspace) {
+            // A task that runs code starts as a coding session; if that cannot be saved, it starts as it was.
+            let ref = (try? plans.settleKind(found)) ?? found
             let n: Int
             do { n = try plans.markDispatching(taskId: ref.taskId) } catch { try plans.blockDispatch(taskId: ref.taskId, reason: error.localizedDescription); continue }
             let job: [String: Any]

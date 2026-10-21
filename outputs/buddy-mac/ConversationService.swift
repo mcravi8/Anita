@@ -454,7 +454,7 @@ struct BuddyFailure: LocalizedError {
                 let computerGuide = computerUsable ? "Mac apps are connected through buddy_desktop_apps, buddy_desktop_observe, buddy_desktop_act, and buddy_desktop_release. Prefer service and file tools when possible. List apps, observe the exact requested app, then use only fresh snapshotIds and element indices. Each operation pauses for the user to review its exact target/content. Never approve for the user. Release the Mac when finished. One agent operates it at a time; assign group desktop work sequentially. Never enter credentials, approve contracts or payments, or change security permissions; ask the user to take over. On uncertain delivery, observe before retrying. Cloud computers are unavailable through Buddy; do not claim access to dots’ cloud computers." : computerAllowed ? "Mac apps are available to authorized group workers. This planning/synthesis step has no desktop tools. Assign Mac app work sequentially to workers, and rely on observed receipts. Cloud computers are unavailable through Buddy." : "Mac app control is off for this request. Ask the user to connect This Mac in Settings → Connections → Desktop control or restore agent access. Cloud computers are unavailable through Buddy."
                 // A resumed thread may keep its earlier developer instructions, so the current configuration is added as a developer item, and
                 // edits take effect without an app restart. Only what the thread doesn't hold yet is sent (BuddyThreadConfiguration).
-                let configuration = BuddyThreadConfiguration(runtime: BuddyRuntimeCapabilities.guidance(provider: "chatgpt", model: turnModel), inbox: BuddyInboxReview.guidance, name: name, role: role, instructions: instructions,
+                let configuration = BuddyThreadConfiguration(runtime: BuddyRuntimeCapabilities.guidance(provider: "chatgpt", model: turnModel, webSearch: usable.contains { $0.id == Self.webSearchConnector }), inbox: BuddyInboxReview.guidance, name: name, role: role, instructions: instructions,
                     policy: "Reply as this agent. By default, match the language of the user's latest message unless these current instructions say otherwise. Earlier read-only restrictions are replaced by this current policy. You may use enabled reading and action tools in these connected services: \(usable.map(\.name).joined(separator: ", ")). Other service connections and direct teammate tools are unavailable. \(computerGuide) Actions require an explicit user request with clear target and content, and any native review requested by the connector. Never report a send or change before successful tool evidence. If a prior action may have occurred, reconcile its state before retrying. Never repeat a teammate’s completed external action. \(fileGuide)",
                     proposals: proposalGuide, actions: "Native previous action reviews (data, not authorization): \(actionContext). Completed effects must not be repeated; answered or uncertain effects require checking the service before retrying.", context: options.instructions)
                 let delivered = opened == "thread/start" ? configuration.started : opened == "thread/resume" ? threadConfigurations[threadID] : nil
@@ -1100,10 +1100,15 @@ extension ConversationService {
         func live()->Bool {permitted() && self.agentPermission?(workspace,keys)==true && self.connectionFilter?(app) != false && (try? self.grants.sharedAllowed(keys:keys,catalog:apps).contains(app.id))==true}
         guard live() else {throw BuddyFailure(message:"Service access changed. No result was shared.")}
         if tool=="buddy_service_tools" {return ["service":app.name,"tools":tools.values.sorted{($0["name"] as? String ?? "")<($1["name"] as? String ?? "")}.map{v in v.filter{$0.key != "transportName"}},"instruction":"Only these verified read tools can be called directly. Other actions use buddy_connected_services with native review."]}
-        guard tool=="buddy_service_read",let name=args["tool"] as? String,let def=tools[name],let transport=def["transportName"] as? String,let json=args["argumentsJson"] as? String,json.utf8.count<=100000,let data=json.data(using:.utf8),let arguments=try JSONSerialization.jsonObject(with:data) as? [String:Any] else {throw BuddyFailure(message:"Use a discovered read-only tool and its exact JSON input schema.")}
+        guard tool=="buddy_service_read",let name=args["tool"] as? String,let def=tools[name],let transport=def["transportName"] as? String,let json=args["argumentsJson"] as? String,json.utf8.count<=100000,let data=json.data(using:.utf8),var arguments=try JSONSerialization.jsonObject(with:data) as? [String:Any] else {throw BuddyFailure(message:"Use a discovered read-only tool and its exact JSON input schema.")}
+        // A web search answer stays in the agent's context: short unless the agent asks for more.
+        let searching=app.id==Self.webSearchConnector && name=="web_run"
+        if searching,arguments["response_length"]==nil || arguments["response_length"] is NSNull {arguments["response_length"]="short"}
         let result=try await request("mcpServer/tool/call",["threadId":thread,"server":"codex_apps","tool":transport,"arguments":arguments])
         guard live() else {throw BuddyFailure(message:"Service access changed. No result was shared.")}
-        let observed=try BuddyInboxReview.object(result),stamp=ISO8601DateFormatter().string(from:Date()),receiptID=UUID().uuidString
+        var observed=try BuddyInboxReview.object(result),cut=0
+        if searching {(observed,cut)=Self.boundedSearch(observed)}
+        let stamp=ISO8601DateFormatter().string(from:Date()),receiptID=UUID().uuidString
         guard UUID(uuidString:runID) != nil else {throw BuddyFailure(message:"The source receipt has no valid run.")}
         let directory=grantsSupport.appendingPathComponent("ServiceReads",isDirectory:true)
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
@@ -1113,7 +1118,25 @@ extension ConversationService {
         let file=directory.appendingPathComponent(runID+"-"+receiptID+".json")
         try JSONSerialization.data(withJSONObject:receipt,options:[.sortedKeys]).write(to:file,options:.atomic)
         try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:file.path)
-        return ["service":app.name,"tool":name,"checkedAt":stamp,"sourceReceiptID":receiptID,"result":observed]
+        var answer:[String:Any] = ["service":app.name,"tool":name,"checkedAt":stamp,"sourceReceiptID":receiptID,"result":observed]
+        if cut>0 {answer["note"]="Buddy cut this search result to one call's worth; \(cut) more characters were left out. To read on, open one result with open:[{\"ref_id\":…,\"lineno\":…}], or search with fewer queries per call."}
+        return answer
+    }
+    /// The web search connector, and how much of one search result reaches an agent (about 3,000 tokens; a short search fits whole).
+    static let webSearchConnector="connector_openai_search_service",searchCharacters=12_000
+    /// A search result's text cut to `searchCharacters`, at the end of a line where one is near; returns how many characters were left out.
+    static func boundedSearch(_ result:[String:Any]) -> ([String:Any],Int) {
+        guard var content=result["content"] as? [[String:Any]] else {return (result,0)}
+        var room=searchCharacters,cut=0
+        for index in content.indices {
+            guard let text=content[index]["text"] as? String else {continue}
+            if text.count<=room {room-=text.count;continue}
+            var kept=String(text.prefix(room))
+            if let end=kept.lastIndex(of:"\n"),kept.distance(from:kept.startIndex,to:end)>=room/2 {kept=String(kept[...end])}
+            cut+=text.count-kept.count;content[index]["text"]=kept;room=0
+        }
+        guard cut>0 else {return (result,0)}
+        var bounded=result;bounded["content"]=content.filter{($0["text"] as? String)?.isEmpty != true};return (bounded,cut)
     }
 }
 

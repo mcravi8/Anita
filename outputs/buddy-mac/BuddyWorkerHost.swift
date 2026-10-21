@@ -259,7 +259,8 @@ import Darwin
             }
             if action=="start" {
                 guard (a["tools"] as? [String:Bool])?["desktop"] != false,(a["tools"] as? [String:Bool])?["web"] != false else {throw BuddyWorkerFailure(message:"Website tasks need both Web research and Mac apps turned on in this agent's settings, and one of them is off.")}
-                return try await handle(["operation":"create","workspace":current,"agentId":agentID,"requestId":request["requestId"] ?? "","title":args["title"] ?? "","goal":args["goal"] ?? "","kind":"general"])
+                // The account the person named for it (their message, which the app adds), or the agent's `account`, checked when the task is made.
+                return try await handle(["operation":"create","workspace":current,"agentId":agentID,"actorId":agentID,"requestId":request["requestId"] ?? "","title":args["title"] ?? "","goal":args["goal"] ?? "","kind":"general","authorizedText":request["authorizedText"] as? String ?? "","account":args["account"] ?? NSNull()])
             }
             guard ["continue","cancel"].contains(action),let id=args["taskId"] as? String else {throw BuddyWorkerFailure(message:"Choose start, status, continue or cancel with a task ID.")}
             let job=try store.job(id)
@@ -268,6 +269,8 @@ import Darwin
             if action=="cancel" {await stop(id,status:"cancelled",cause:cancelCause(agentID,job:job));return ["task":chatTask(try store.job(id))]}
             guard permitted(job,tool:"desktop"),permitted(job,tool:"web") else {throw BuddyWorkerFailure(message:"Reconnect this task's provider and enable browser access before continuing.")}
             guard ["paused","failed","interrupted","waiting_user"].contains(job["status"] as? String ?? ""),let goal=args["goal"] as? String,!goal.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else {throw BuddyWorkerFailure(message:"This task is not paused, or needs the user's missing details. Check its current state instead of starting it again.")}
+            // Its account changes only on the person's own words in this message; an agent's `account` may only repeat it.
+            try await repin(job,requested:args["account"] as? String,userText:request["authorizedText"] as? String ?? "")
             // An agent continuing a task never lifts the person's Pause all.
             return try await handle(["operation":"resume","workspace":current,"taskId":id,"message":from+goal,"fromAgent":true])
         }
@@ -280,7 +283,7 @@ import Darwin
                 return ["tasks":store.jobs.filter{$0["workspace"] as? String==current && whose.contains($0["agentId"] as? String ?? "") && $0["kind"] as? String=="coding"}.map { j in ["id":j["id"] ?? "","agentId":j["agentId"] ?? "","title":j["title"] ?? "","status":j["status"] ?? "","progress":j["progress"] ?? ""] }]
             }
             if action=="start" {
-                return try await handle(["operation":"create","workspace":current,"agentId":agentID,"requestId":request["requestId"] ?? "","title":args["title"] ?? "","goal":args["goal"] ?? "","kind":"coding"])
+                return try await handle(["operation":"create","workspace":current,"agentId":agentID,"actorId":agentID,"requestId":request["requestId"] ?? "","title":args["title"] ?? "","goal":args["goal"] ?? "","kind":"coding"])
             }
             guard ["continue","cancel"].contains(action),let id=args["taskId"] as? String else {throw BuddyWorkerFailure(message:"Choose start, status, continue or cancel with a coding task ID.")}
             let job=try store.job(id)
@@ -443,7 +446,11 @@ import Darwin
             _ = try await handle(["operation": "resume", "workspace": current, "taskId": task, "message": Self.signInSavedNote(profile), "fromAgent": true])
             return ["resumed": true, "profile": profile.id, "taskId": task]
         }
-        if operation == "create" { return try createTask(request) }
+        if operation == "create" {
+            // With no actor the person wrote this task themselves (Background work → New task): its brief is their own words.
+            var made = request; if made["actorId"] == nil { made["authorizedText"] = made["goal"] as? String ?? ""; made["byPerson"] = true }
+            return try createTask(made)
+        }
         if operation == "pauseAll" { try store.setPaused(request["paused"] as? Bool ?? true); if store.paused, let active { await stop(active, status: "paused", cause: "user.pauseAll") }; return ["paused": store.paused] }
         let id = request["taskId"] as? String ?? "", job = try store.job(id)
         guard job["workspace"] as? String == current else { throw BuddyWorkerFailure(message: "This task belongs to another workspace.") }
@@ -465,6 +472,8 @@ import Darwin
             }
             let addition = (request["message"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard addition.count <= 10000 else { throw BuddyWorkerFailure(message: "Keep this update under 10,000 characters.") }
+            // The person's own words when resuming may name another account for the task (Buddy's and agents' notes never do).
+            if request["fromAgent"] == nil { try await repin(job, requested: nil, userText: addition) }
             if !addition.isEmpty {
                 var updates = job["updates"] as? [String] ?? []; updates.append(addition)
                 guard updates.joined().count <= 30000 else { throw BuddyWorkerFailure(message: "This task has too much follow-up context. Start a new task with a fresh brief.") }
@@ -535,15 +544,32 @@ import Darwin
         if provider == "claude" { guard keyReader(current) != nil, budget > 0 else { throw BuddyWorkerFailure(message: "Connect your Claude API key first.") } }
         let requestID = request["requestId"] as? String ?? ""
         let repeated = store.jobs.contains { $0["workspace"] as? String == current && $0["agentId"] as? String == id && $0["requestId"] as? String == requestID }
+        // The Google account the task uses, from the person's own words or the agent's checked choice; settled before anything is made, so a
+        // refusal (an account that is not signed in, another than the person named, words that could mean two) makes no task. Coding sessions
+        // use no browser.
+        let account = coding || repeated ? nil : try BuddyAccountPin.decide(current: nil, requested: request["account"] as? String, userText: request["authorizedText"] as? String ?? "", accounts: BuddyAccountPin.signedIn(profile: sharedProfile), byPerson: request["byPerson"] as? Bool == true)
         // On the other provider a coding session uses the model the agent had there before a switch, else that provider's default.
         let job = coding && provider == "chatgpt" ? try BuddyCodexCoding.create(in: store, workspace: current, agent: id, requestId: requestID, title: request["title"] as? String ?? "", goal: request["goal"] as? String ?? "", model: selected.model(on: provider))
             : try store.create(workspace: current, agent: id, requestId: requestID, title: request["title"] as? String ?? "", goal: request["goal"] as? String ?? "", kind: request["kind"] as? String ?? "general", provider: provider, budget: budget,model:selected.model(on:provider))
+        var fields: [String: Any] = [:]
+        if let account { fields["account"] = account }
         // A new task records who supervises the team now, so its questions and stops can go to them rather than the person.
         if !repeated, let state = try? state(), let supervisor = (try? monitor.store.policy(state))?["supervisorId"] as? String, !supervisor.isEmpty,
-           (state["agents"] as? [[String: Any]] ?? []).contains(where: { $0["id"] as? String == supervisor }), let jobID = job["id"] as? String {
-            return ["task": try store.update(jobID, ["supervisorId": supervisor])]
+           (state["agents"] as? [[String: Any]] ?? []).contains(where: { $0["id"] as? String == supervisor }) {
+            fields["supervisorId"] = supervisor
         }
+        if !repeated, !fields.isEmpty, let jobID = job["id"] as? String { return ["task": try store.update(jobID, fields)] }
         return ["task": job]
+    }
+    /// A task's account after the person's words or an agent's `account` (see `BuddyAccountPin.decide`). A change closes the task's page in
+    /// the shared browser, so its next page opens on the new account; a refusal changes nothing.
+    private func repin(_ job: [String: Any], requested: String?, userText: String) async throws {
+        guard job["kind"] as? String != "coding", let id = job["id"] as? String else { return }
+        let old = BuddyAccountPin.normalized(job["account"] as? String)
+        let new = try BuddyAccountPin.decide(current: old, requested: requested, userText: userText, accounts: BuddyAccountPin.signedIn(profile: sharedProfile), strictAmbiguity: false)
+        guard let new, new != old else { return }
+        try store.update(id, ["account": new, "accountChecked": NSNull()])
+        if let browser, browser.isRunning { _ = try? await browser.request(["command": "closeSession", "session": id], timeout: 15) }
     }
 
     // MARK: who may act on whose task
@@ -740,6 +766,8 @@ import Darwin
     /// holds the session to that scope, and to its own pages only.
     private func pageRequest(_ job: [String: Any], _ payload: [String: Any], timeout: TimeInterval? = nil) async throws -> [String: Any] {
         var value = payload; value["session"] = job["id"] as? String ?? ""; value["scope"] = job["browserOrigin"] as? String ?? ""
+        // And the account the task must use: the browser keeps every page of the session on it.
+        value["account"] = (try? store.job(job["id"] as? String ?? ""))?["account"] as? String ?? job["account"] as? String ?? ""
         return try await sharedBrowser().request(value, timeout: timeout)
     }
     /// The shared browser for the running task's page. Its agent (or, for a delegated routine, the agent whose website it uses) must still
@@ -822,14 +850,18 @@ import Darwin
         let current=(try? store.job(id)) ?? job
         guard !["completed","cancelled"].contains(current["status"] as? String ?? "") else { return }
         let origin=current["signInOrigin"] as? String ?? (current["checkpoint"] as? [String:Any])?["origin"] as? String
-        let waiting=Self.chromeStep(origin: origin, reason: reason)
-        var point=checkpoint(need:"signin",question:waiting); point["where"]="chrome"; if let origin { point["origin"]=origin }
+        // A step for the task's own account keeps saying which account to sign in to.
+        let account=(current["checkpoint"] as? [String:Any])?["account"] as? String
+        let waiting=account.map(BuddyAccountPin.signInStep) ?? Self.chromeStep(origin: origin, reason: reason)
+        var point=checkpoint(need:"signin",question:waiting); point["where"]="chrome"; if let origin { point["origin"]=origin }; if let account { point["account"]=account }
         if again, let old=current["checkpoint"] as? [String:Any], let same=old["id"] { point["id"]=same; point["question"]=old["question"] ?? waiting }
         _ = try store.update(id,["status":"waiting_user","progress":point["question"] as? String ?? waiting,"stopCause":"checkpoint.user","checkpoint":point],cause:"checkpoint.user")
     }
     /// What the person is asked to do in Buddy's Chrome window, in plain words, by what the website needs.
     static func chromeStep(origin: String?, reason: String?) -> String {
         let site = origin.flatMap { URL(string: $0)?.host } ?? "the website", why = reason ?? ""
+        // The browser already said it in full ("… this task must use craviott@usc.edu. Choose it in Buddy’s Chrome window, then press Done.").
+        if why.hasSuffix("then press Done.") { return why }
         let what: String
         if why == "signup" { what = "Create your account on \(site)" }
         else if why.hasPrefix("next:") { what = "Finish the next sign-in step on \(URL(string: String(why.dropFirst(5)))?.host ?? site)" }
@@ -906,6 +938,8 @@ import Darwin
             }
             if let browser, browser.isRunning { _ = try? await browser.request(["command": "closeSession", "session": task], timeout: 15) }
         }
+        // Done on signing in to the task's own account: the next attempt opens Google pages again (the browser still checks each one).
+        if let account = point["account"] as? String { try? store.update(task, ["accountChecked": account]) }
         let note = checked ? "[Buddy] The user finished the sign-in step in Buddy’s Chrome window, and Buddy checked that \(origin ?? "the website") is signed in. Reopen the website and continue."
             : "[Buddy] The user says they finished the step they were asked to do: \(String((point["question"] as? String ?? "").prefix(300))) Reopen the website and check its actual state before continuing."
         _ = try await handle(["operation": "resume", "workspace": current, "taskId": task, "message": note, "fromAgent": true])
@@ -937,7 +971,7 @@ import Darwin
                     out.append(item)
                 } else if ["signin", "captcha", "verification"].contains(need), job["stopCause"] as? String != "review.parked" {
                     var item = base; item["kind"] = "step"; item["key"] = "step:\(id):\(pointID)"; item["need"] = need
-                    item["origin"] = point["origin"] ?? job["signInOrigin"] ?? NSNull(); item["instruction"] = point["question"] ?? ""
+                    item["origin"] = point["origin"] ?? job["signInOrigin"] ?? NSNull(); item["instruction"] = point["question"] ?? ""; item["account"] = point["account"] ?? NSNull()
                     item["chromeOpen"] = privateOpen && privateTask == id; item["legacy"] = legacyPrivate?.task == id
                     out.append(item)
                 }
@@ -984,6 +1018,8 @@ import Darwin
         if let t=typed, t.origin != origin { typed=nil }
         // `waiting`: the website waits for something the person does elsewhere (a push on the phone), so the request offers Done.
         var ask = !auto, note = "", tries = 0, granted = false, tokenUsed = false, waiting = false
+        // The site would sign in as another email than the task's account: the person chooses it themselves (nothing is typed for them).
+        if let reason = plan["accountReason"] as? String, !reason.isEmpty { note = reason; typed = nil }
         // What came of the person's last Send or Done, told to their page once the next request is waiting (with its id).
         var settleAfterAsk:(review:String,outcome:[String:Any])?
         while true {
@@ -1402,6 +1438,9 @@ import Darwin
         // What the earlier attempts of this task did, from the native record, so nothing already done or unconfirmed is repeated.
         let earlier = store.actionFacts(of: id)
         if !earlier.isEmpty { prompt += "\n\n" + earlier }
+        if let pin = BuddyAccountPin.normalized(job["account"] as? String) {
+            prompt += "\n\nNote from Buddy (not from the user): this task must use the Google account \(pin). Buddy keeps every Google page of this task on that account and stops any step on another one; never switch accounts or choose another account yourself."
+        }
         if job["provider"] as? String == "claude" {
             guard let key = keyReader(workspace) else { throw BuddyWorkerFailure(message: "Reconnect Claude API credits.") }
             let budget = BuddyRunLimit.allowance(provider: job["provider"] as? String ?? "", stored: job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)
@@ -1918,7 +1957,18 @@ import Darwin
         try await waitForSharedChrome(job)
         _ = try browserProcess(job); let operation = args["operation"] as? String ?? "read"
         if operation == "open" || operation == "read" {
-            var page=try await pageRequest(job,operation=="open" ? ["command":"open","url":args["url"] ?? ""]:["command":"read"])
+            // A task pinned to a Google account that isn't signed in to Buddy's Chrome asks the person to sign in to it before it opens a
+            // Google page (Google would open it as another account), and so does a page that finds it missing.
+            let saved = (try? store.job(id)) ?? job, pin = BuddyAccountPin.normalized(saved["account"] as? String)
+            let unchecked = pin != nil && saved["accountChecked"] as? String != pin && !BuddyAccountPin.signedIn(profile: sharedProfile).contains(pin!)
+            if let pin, unchecked, operation == "open", Self.googlePage(args["url"] as? String) { return try accountStep(job, pin) }
+            var page: [String: Any]
+            do { page=try await pageRequest(job,operation=="open" ? ["command":"open","url":args["url"] ?? ""]:["command":"read"]) }
+            catch {
+                let message = error.localizedDescription
+                if let pin, BuddyAccountPin.missing(in: message) == pin || unchecked && message.contains("but this task must use \(pin)") { return try accountStep(job, pin) }
+                throw error
+            }
             page["observedAt"]=ISO8601DateFormatter().string(from:Date())
             if job["kind"] as? String=="email",page["authentication"]==nil,let url=page["url"] as? String,url.hasPrefix("https://console.agentmail.to/"),url.range(of:"settings|api.?keys|credentials|billing|security",options:.regularExpression)==nil,let text=page["text"] as? String {
                 var pages=(try store.job(id))["browserPages"] as? [[String:Any]] ?? []
@@ -1961,6 +2011,20 @@ import Darwin
             let neverSent = error.localizedDescription.contains("Nothing was sent by this request")
             try? finishReview(reviewID, job: id, status: neverSent ? "not_sent" : "uncertain", receipt: ["error": error.localizedDescription]); throw error
         }
+    }
+    /// One of Google's own sites, where Google picks the account unless the page is told which.
+    static func googlePage(_ raw: String?) -> Bool {
+        guard let raw, let url = URL(string: raw), url.scheme == "https", let host = url.host?.lowercased() else { return false }
+        return ["google.com", "youtube.com"].contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+    /// The task's account isn't signed in to Buddy's Chrome: the task waits for the person to sign in to it there and press Done (the chat's
+    /// "Tell me when done" step), and the attempt ends as a checkpoint does.
+    private func accountStep(_ job: [String: Any], _ pin: String) throws -> [String: Any] {
+        let id = job["id"] as! String
+        var point = checkpoint(need: "signin", question: BuddyAccountPin.signInStep(pin)); point["where"] = "chrome"; point["origin"] = "https://accounts.google.com"; point["account"] = pin
+        try store.update(id, ["status": "waiting_user", "progress": BuddyAccountPin.signInStep(pin), "stopCause": "checkpoint.user", "checkpoint": point], cause: "checkpoint.user")
+        if job["provider"] as? String == "claude" { taskNeedsInput = true } else { Task { await self.stop(id, status: "waiting_user", keepProgress: true, cause: "checkpoint.user") } }
+        return ["paused": true, "needsUser": true, "instruction": "\(pin), the account this task must use, isn’t signed in to Buddy’s Chrome. Buddy asked the user to sign in to it and press Done. End this attempt now with one short sentence and no more tools; you are resumed when they do."]
     }
     /// Whom a task's agent turns to for a decision it may not make: the supervisor the task records, else the team's (the check-in policy's,
     /// else a group manager's). `id` may be the agent itself, when it supervises the team.

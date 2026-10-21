@@ -15,3 +15,12 @@
 .worker-plain-request>strong{display:block;font-size:14px;line-height:1.5}.worker-plain-request>p{margin:6px 0 0;font-size:13px;line-height:1.55;color:var(--text2)}
 .worker-plain-request .worker-review-caution{display:block;margin-top:8px;color:var(--text2)}
 .worker-review-details{margin-top:10px;font-size:12px;color:var(--text2)}.worker-review-details>summary{cursor:pointer;width:max-content}.worker-review-details dl{margin-top:8px}
+/* A task that must use one account (the person named it): under the reply that started it, and in its details. */
+.task-receipt{display:flex;align-items:center;gap:10px;margin-top:12px;padding:12px 0;border-top:1px solid var(--line);font-size:12px}
+.task-receipt>span{flex:1;min-width:0}
+.task-receipt strong,.task-receipt small{display:block;overflow-wrap:anywhere}
+.task-receipt small{font-size:11px;color:var(--text2);margin-top:3px}
+.task-receipt button{border:0;background:none;color:var(--text1);cursor:pointer;min-height:36px;font:inherit;text-decoration:underline;text-decoration-color:var(--line-strong);text-underline-offset:3px}
+.task-receipt button:hover{color:var(--text);text-decoration-color:currentColor}
+.task-receipt button:focus-visible{outline:2px solid var(--text3);border-radius:4px}
+.worker-task-heading .worker-account{color:var(--text1);overflow-wrap:anywhere}

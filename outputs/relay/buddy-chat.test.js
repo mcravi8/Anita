@@ -70,3 +70,18 @@ test('a reply that saved a routine but ended with no text is a finished reply, n
  const m=s.messages.a[1];
  assert.notEqual(m.status,'failed','a retry would save the routine twice');assert.ok(!m.error,'no error is shown');assert.equal(m.routines.length,1);
 });
+test('a task the reply started says which account it uses: only a real address, for an agent in this chat, and it never finishes the reply',()=>{
+ const s=seed(),r=Chat.begin(s,'a'),task={id:'task-1',title:'Check my calendar',account:'craviott@usc.edu',agentId:'a'};
+ assert.equal(Chat.apply(s,{type:'task',runId:r.run.runId,task:{...task,account:'not an address'}}),false);
+ assert.equal(Chat.apply(s,{type:'task',runId:r.run.runId,task:{...task,agentId:'b'}}),false,'another agent’s task is not this reply’s');
+ assert.equal(Chat.apply(s,{type:'task',runId:'unknown',task}),false);
+ assert.equal(Chat.apply(s,{type:'task',runId:r.run.runId,task}),true);
+ assert.deepEqual(s.messages.a[1].tasks,[{id:'task-1',title:'Check my calendar',account:'craviott@usc.edu'}]);assert.equal(r.run.status,'starting');
+ Chat.apply(s,{type:'task',runId:r.run.runId,task:{...task,account:'me@gmail.com'}});
+ assert.equal(s.messages.a[1].tasks.length,1);assert.equal(s.messages.a[1].tasks[0].account,'me@gmail.com','the same task is updated in place');
+ Chat.apply(s,{runId:r.run.runId,status:'completed',text:''});
+ assert.equal(s.messages.a[1].status,'completed','a reply whose only content is the started task is not an empty answer');
+ const g=grouped(),gr=Chat.begin(g,'team');
+ assert.equal(Chat.apply(g,{type:'task',runId:gr.run.runId,task:{...task,agentId:'b'},delegatedBy:'b'}),true,'a member’s task in a group reply');
+ assert.equal(Chat.apply(g,{type:'task',runId:gr.run.runId,task:{...task,agentId:'outsider'}}),false);
+});

@@ -118,6 +118,145 @@ enum BuddyWorkerSignInPolicy {
     }
 }
 
+/// The Google account a task must use ("Uses craviott@usc.edu"). Several Google accounts can be signed in to the one shared Chrome, and Google
+/// opens a page as the default one unless told otherwise, so the account the person names for a task is saved on the task (`account`) and
+/// the browser holds every page of the task to it. It is set from the person's own words (their message that led to the task, or a later
+/// one), or from an agent's `account` when that is one of the accounts signed in to Buddy's Chrome and not another than the person named.
+/// Once set, only the person's words change it.
+enum BuddyAccountPin {
+    /// What a message says about the account: the one it names (`account`), the ones it could mean (`candidates`, two or more), or neither.
+    struct Named: Equatable { var account: String? = nil; var candidates: [String] = [] }
+    private static let email = #"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"#
+    /// An email address, trimmed and in lower case; nil for anything else.
+    static func normalized(_ text: String?) -> String? {
+        guard let value = text?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !value.isEmpty, value.count <= 254,
+              value.range(of: "^" + email + "$", options: .regularExpression) != nil else { return nil }
+        return value
+    }
+    /// The Google accounts the shared Chrome is signed in to, read from Chrome's own settings files: the account Chrome itself is signed in
+    /// to (Local State), then every Google account it knows (Default/Preferences). Only the names; nothing else in the profile is opened.
+    static func signedIn(profile: URL) -> [String] {
+        func json(_ url: URL) -> [String: Any]? {
+            guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber, size.intValue <= 32 * 1024 * 1024,
+                  let data = try? Data(contentsOf: url) else { return nil }
+            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        }
+        var out: [String] = []
+        func add(_ value: Any?) { if let v = normalized(value as? String), !out.contains(v) { out.append(v) } }
+        let state = json(profile.appendingPathComponent("Local State"))
+        add((((state?["profile"] as? [String: Any])?["info_cache"] as? [String: Any])?["Default"] as? [String: Any])?["user_name"])
+        for account in (json(profile.appendingPathComponent("Default/Preferences"))?["account_info"] as? [[String: Any]]) ?? [] { add(account["email"]) }
+        return out
+    }
+    private static let consumer: Set<String> = ["gmail.com", "googlemail.com"]
+    private static let generic: Set<String> = ["gmail", "googlemail", "google", "mail", "email", "com", "edu", "org", "net", "gov", "co", "ac", "www"]
+    /// Words that make a nearby name an account: "my USC account", "the usc one", "my usc gmail".
+    private static let nouns: Set<String> = ["account", "accounts", "email", "mail", "gmail", "google", "address", "login", "profile", "inbox", "calendar", "drive", "docs", "workspace", "one", "id"]
+    /// Before an address: it is the account to use ("use", "as", "from", "with", "sign in as") or where something goes ("to", "cc").
+    private static let using: Set<String> = ["use", "using", "as", "via", "under", "from", "with", "into", "account", "login", "profile", "switch"]
+    private static let recipient: Set<String> = ["to", "cc", "bcc", "forward", "invite", "share", "reply", "send", "message", "write", "notify", "tell", "contact", "ask"]
+    /// The names a domain goes by ("usc" for usc.edu); none for Gmail's own domains.
+    private static func names(_ account: String) -> [String] {
+        var labels = account.split(separator: "@").last.map { $0.split(separator: ".").map(String.init) } ?? []
+        if labels.count > 1 { labels.removeLast() }
+        if labels.count > 1, ["co", "ac", "com", "edu", "org", "net", "gov"].contains(labels.last!) { labels.removeLast() }
+        return labels.filter { $0.count >= 2 && !generic.contains($0) }
+    }
+    /// The account a message names, from the accounts signed in to Buddy's Chrome: an address (one to use, not one to send to), or a name
+    /// for one ("my USC account" for the one @usc.edu account, "my personal gmail" for the one Gmail address). An address the person names to
+    /// use counts even before it is signed in. A message that could mean several accounts names none of them, and says which.
+    static func named(in text: String, accounts: [String]) -> Named {
+        let accounts = accounts.compactMap(normalized)
+        guard !text.isEmpty, let pattern = try? NSRegularExpression(pattern: "(" + email + ")|([a-z0-9]+(?:'[a-z]+)?)", options: [.caseInsensitive]) else { return Named() }
+        let lower = text.lowercased(), range = NSRange(lower.startIndex..., in: lower)
+        let tokens: [(text: String, address: Bool)] = pattern.matches(in: lower, range: range).compactMap { m in
+            Range(m.range, in: lower).map { (String(lower[$0]), m.range(at: 1).location != NSNotFound) }
+        }
+        var chosen: [String] = [], bare: [String] = []
+        func add(_ value: String, to list: inout [String]) { if !list.contains(value) { list.append(value) } }
+        var specific = Set<Int>()
+        for (i, token) in tokens.enumerated() {
+            let after = tokens[min(i + 1, tokens.count)..<min(i + 3, tokens.count)].map(\.text)
+            if token.address {
+                guard let address = normalized(token.text) else { continue }
+                var marker = ""
+                for j in stride(from: i - 1, through: max(0, i - 4), by: -1) {
+                    let word = tokens[j].text
+                    if recipient.contains(word) { marker = "to"; break }
+                    if using.contains(word) || (word == "in" && j > 0 && ["sign", "signed", "log", "logged"].contains(tokens[j - 1].text)) { marker = "use"; break }
+                }
+                if marker == "to" { continue }
+                if marker == "use" || after.contains(where: { nouns.contains($0) && $0 != "email" }) { add(address, to: &chosen) }
+                else if accounts.contains(address) { add(address, to: &bare) }
+                continue
+            }
+            let before = tokens[max(0, i - 3)..<i].map(\.text)
+            let near = after.contains(where: nouns.contains) || (before.count >= 2 && ["at", "from", "for", "on", "with", "via"].contains(before.last!) && nouns.contains(before[before.count - 2]))
+                || (before.suffix(3).contains("in") && before.contains(where: { ["sign", "signed", "log", "logged"].contains($0) }))
+            let matching = accounts.filter { names($0).contains(token.text) }
+            if !matching.isEmpty, near { specific.insert(i); for a in matching { add(a, to: &chosen) } }
+        }
+        // "personal" or "gmail account" means the Gmail address, unless it only describes a name just before it ("my usc gmail account").
+        for (i, token) in tokens.enumerated() where !token.address && ["personal", "gmail", "googlemail"].contains(token.text) {
+            let after = tokens[min(i + 1, tokens.count)..<min(i + 3, tokens.count)].map(\.text)
+            let fits = token.text == "personal" ? after.contains(where: nouns.contains) : ["account", "address", "one", "login", "profile", "inbox"].contains(after.first ?? "")
+            guard fits, !specific.contains(i - 1), !specific.contains(i - 2) else { continue }
+            for a in accounts where consumer.contains(String(a.split(separator: "@").last ?? "")) { add(a, to: &chosen) }
+        }
+        let pick = chosen.isEmpty ? bare : chosen
+        if pick.count == 1 { return Named(account: pick[0]) }
+        return Named(candidates: pick.count > 1 ? pick.sorted() : [])
+    }
+    static func list(_ values: [String]) -> String { values.count <= 1 ? values.joined() : values.dropLast().joined(separator: ", ") + " or " + values.last! }
+    /// The account a task uses after a request. `current` is what it uses now, `requested` what an agent passed (`account`), `userText` the
+    /// person's own words that came with the request. The person's words win; an agent's choice must be signed in to Buddy's Chrome, never
+    /// another than the person named, and never a change. Words that could mean several accounts make the agent ask which (`strictAmbiguity`,
+    /// for a new task) or leave the task as it was.
+    static func decide(current: String?, requested: String?, userText: String, accounts: [String], strictAmbiguity: Bool = true, byPerson: Bool = false) throws -> String? {
+        let current = normalized(current), accounts = accounts.compactMap(normalized), said = named(in: userText, accounts: accounts)
+        var asked: String?
+        if let requested, !requested.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let value = normalized(requested) else { throw BuddyWorkerFailure(message: "account must be the email address of the Google account the user named for this task.", code: "invalid_input") }
+            asked = value
+        }
+        if let user = said.account {
+            if let asked, asked != user { throw BuddyWorkerFailure(message: "The user named \(user) for this task, so it uses \(user), not \(asked). Pass account \(user), or leave account out.", code: "invalid_input") }
+            return user
+        }
+        if !said.candidates.isEmpty {
+            if let asked, said.candidates.contains(asked) {
+                if let current, current != asked { throw changing(current) }
+                return asked
+            }
+            if let current { return current }
+            if strictAmbiguity {
+                throw BuddyWorkerFailure(message: byPerson
+                    ? "Your brief could mean \(list(said.candidates)), so Buddy didn’t start it. Say which account to use (its email address)."
+                    : "The user’s message could mean \(list(said.candidates)). Ask the user (or your supervisor) which account this task should use, then start it with account set to that email address.", code: "invalid_input")
+            }
+            return nil
+        }
+        guard let asked else { return current }
+        if let current { guard asked == current else { throw changing(current) }; return current }
+        guard accounts.contains(asked) else {
+            throw BuddyWorkerFailure(message: accounts.isEmpty ? "No Google account is signed in to Buddy’s Chrome yet, so this task can’t use \(asked). Ask the user to sign in to it in Buddy’s Chrome first."
+                : "\(asked) isn’t signed in to Buddy’s Chrome. The accounts signed in there are \(list(accounts)). Use one of those, or ask the user to sign in to \(asked) first.", code: "invalid_input")
+        }
+        return asked
+    }
+    private static func changing(_ current: String) -> BuddyWorkerFailure {
+        BuddyWorkerFailure(message: "This task uses \(current), and only the user can change that. Ask them, and continue it with their words.", code: "not_authorized")
+    }
+    /// What the person is asked when the task's account is not signed in to Buddy's Chrome.
+    static func signInStep(_ account: String) -> String { "Sign in to \(account) in Buddy’s Chrome, then press Done." }
+    /// The account a browser message says is not signed in to Buddy's Chrome (its account chooser does not offer it), if it says so.
+    static func missing(in message: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: "Sign in to (\\S+@\\S+) in Buddy’s Chrome, then press Done\\."), let m = regex.firstMatch(in: message, range: NSRange(message.startIndex..., in: message)),
+              let r = Range(m.range(at: 1), in: message) else { return nil }
+        return normalized(String(message[r]))
+    }
+}
+
 enum BuddyWorkerWire {
     static let maximumBytes = 8 * 1024 * 1024
     static func directory(_ support: URL) -> URL {

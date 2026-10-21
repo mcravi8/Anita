@@ -50,24 +50,47 @@ const frame=value=>JSON.stringify(value,(key,item)=>typeof item==='string'?item.
 const identityProvider=host=>/(^|\.)(google|microsoft|microsoftonline|live|apple|icloud)\.com$/i.test(host);
 const OPEN_FOR_YOU='Private sign-in is open: Buddy’s private Chrome is open for you. Agents wait until you choose Done.';
 
+// The account a task must use (the Mac app pins it from the person's own words; a model never sets it). With several Google accounts signed
+// in to the one Chrome, Google opens a page as the default account (/u/0) unless the address says otherwise, so a pinned task's Google pages
+// always name the account (authuser takes an email), the account chooser picks it, and nothing is done on a Google page that shows another.
+const ACCOUNT=/^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/;
+export function pinnedAccount(value){
+  if(value===undefined||value===null||value==='')return '';
+  if(typeof value!=='string'||value.length>254||!ACCOUNT.test(value.trim()))throw Error('Choose the email address of the account this task uses.');
+  return value.trim().toLowerCase();
+}
+const isEmail=value=>typeof value==='string'&&ACCOUNT.test(value.trim());
+const googleProperty=host=>/(^|\.)(google\.com|youtube\.com)$/i.test(host);
+const NUMBERED=/\/u\/\d+(?=\/|$)/;
+const missingAccount=account=>`${account} isn’t signed in to Buddy’s Chrome. Sign in to ${account} in Buddy’s Chrome, then press Done.`;
+const otherAccount=(seen,account)=>`This page is signed in as ${seen}, but this task must use ${account}. Buddy stopped instead of continuing as ${seen}.`;
+
 /** One private Chrome profile for every agent (contract: "set it up once for everyone"). One profile is one Chrome process, so every agent
  *  shares the one Chrome: each task drives its own page, a `BrowserSession`, and only its own. The accounts (cookies, Chrome's Password
  *  Manager) are the profile's and so everyone's; pages, observed controls, approvals and sign-in requests are the session's alone. One
  *  network guard checks every request any page makes. A session that closes, crashes or stops responding takes only its own page with it. */
 export class SharedBrowser {
-  constructor(profile,{testOrigin='',testOrigins=[],testGooglePath='',commandDeadlineMs=40000,resolver=lookup,guardOptions={},manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',secretTTLms=600000}={}) {
+  constructor(profile,{testOrigin='',testOrigins=[],testGooglePath='',testGoogle=[],commandDeadlineMs=40000,resolver=lookup,guardOptions={},manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',secretTTLms=600000}={}) {
     this.profile=resolve(profile);this.testOrigins=new Set([testOrigin,...testOrigins].filter(Boolean));this.testGooglePath=this.testOrigins.size?testGooglePath:'';
+    // Test origins that stand in for Google's own sites (only ever one of the test origins).
+    this.testGoogle=new Set([].concat(testGoogle).filter(o=>this.testOrigins.has(o)));
     this.commandDeadlineMs=commandDeadlineMs;this.resolver=resolver;this.guardOptions=guardOptions;this.manualExecutable=manualExecutable;this.secretTTLms=secretTTLms;
     this.context=null;this.launching=null;this.closing=null;this.spare=[];this.creating=0;this.sessions=new Map();this.manualProcess=null;this.handingOff=false;this.lastURL=null;
     this.secrets=new Set();this.secretOrigins=new Map();this.blockedAt=0;
   }
   isTestOrigin(origin){return this.testOrigins.has(origin);}
-  /** The session of one task. `scope` (a delegated website's origin) is fixed when the session is first opened. */
-  session(id,scope){
+  /** One of Google's own sites (google.com and its subdomains, youtube.com), where several of the person's Google accounts can be signed in. */
+  isGoogle(url){try{const u=url instanceof URL?url:new URL(url);return u.protocol==='https:'&&googleProperty(u.hostname)||this.testGoogle.has(u.origin);}catch{return false;}}
+  /** Google's own sign-in and account-choice pages. */
+  identityPage(url){try{const u=url instanceof URL?url:new URL(url);return u.protocol==='https:'&&u.hostname==='accounts.google.com'||!!this.testGooglePath&&this.isTestOrigin(u.origin)&&u.pathname.startsWith(this.testGooglePath);}catch{return false;}}
+  /** The session of one task. `scope` (a delegated website's origin) and `account` (the email it must use) are fixed when it is first opened. */
+  session(id,scope,account){
     if(typeof id!=='string'||!/^[A-Za-z0-9._:-]{1,120}$/.test(id))throw Error('Choose a browser session.');
+    const pin=pinnedAccount(account);
     let s=this.sessions.get(id);
-    if(!s){s=new BrowserSession(this,id,scope||'');this.sessions.set(id,s);}
+    if(!s){s=new BrowserSession(this,id,scope||'',pin);this.sessions.set(id,s);}
     else if(scope!==undefined&&scope!==null&&(scope||'')!==s.scope)throw Error('This browser session keeps the website scope it was opened with.');
+    else if(account!==undefined&&account!==null&&pin!==s.account)throw Error('This browser session keeps the account it was opened with.');
     return s;
   }
   sessionFor(page){if(!page)return null;for(const s of this.sessions.values())if(s.page===page||s.owned.has(page))return s;return null;}
@@ -164,6 +187,9 @@ export class SharedBrowser {
       }
       const shared=s.scope;
       if(shared&&navigation&&!s.googleFlow&&url.origin!==shared&&!(s.sessionRefresh&&sessionRefreshDestination(shared,url.href)))throw Error('Outside shared website session.');
+      // A pinned task's page heading to a Google page that does not name an account (a link it follows, a redirect) is sent to the same
+      // address with the account named, so Google never opens it as the default account instead.
+      if(navigation&&s.account&&request.method()==='GET'){const pinned=s.pinURL(url.href);if(pinned){await route.fulfill({status:302,headers:{location:pinned,'cache-control':'no-store'}});return;}}
       if(shared&&navigation&&!s.googleFlow){
         const response=await route.fetch({maxRedirects:0}),location=response.headers().location;
         if(location&&response.status()>=300&&response.status()<400){
@@ -226,8 +252,70 @@ export class SharedBrowser {
 
 /** One task's page in the shared Chrome: what it observed, what it may act on, and its sign-in requests. */
 class BrowserSession {
-  constructor(browser,id,scope){this.browser=browser;this.id=id;this.scope=scope;this.page=null;this.owned=new Set();this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.secretPlanState=null;this.googleFlow=null;this.lastURL=null;this.intendedURL=null;this.blockedNavigation=null;this.sessionRefresh=false;this.sessionRefreshes=0;}
+  constructor(browser,id,scope,account=''){this.browser=browser;this.id=id;this.scope=scope;this.account=account;this.pinned=new Map();this.page=null;this.owned=new Set();this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.secretPlanState=null;this.googleFlow=null;this.lastURL=null;this.intendedURL=null;this.blockedNavigation=null;this.sessionRefresh=false;this.sessionRefreshes=0;}
   get sharedOrigin(){return this.scope;}
+  /** The address a pinned task opens instead of `raw`: the same Google page with its account named (authuser), or null when it needs no
+   *  change. `explicit` (an address the agent asked for) also replaces an account given by number (/u/1/), which may be any account; a page
+   *  reached by a link or a redirect keeps it, and is checked before anything is done on it. A page Google keeps sending back without the
+   *  account is left to that check too, so the two never go round in circles. */
+  pinURL(raw,explicit=false){
+    if(!this.account)return null;
+    let u;try{u=new URL(raw);}catch{return null;}
+    if(!this.browser.isGoogle(u)||this.browser.identityPage(u))return null;
+    if(NUMBERED.test(u.pathname)){if(!explicit)return null;u.pathname=u.pathname.replace(NUMBERED,'')||'/';}
+    else if((u.searchParams.get('authuser')||'').trim().toLowerCase()===this.account)return null;
+    u.searchParams.set('authuser',this.account);
+    if(!explicit){
+      const key=u.href,now=Date.now(),last=this.pinned.get(key);
+      for(const [k,v] of this.pinned)if(now-v.at>10000)this.pinned.delete(k);
+      if(last&&now-last.at<10000&&last.count>=2)return null;
+      this.pinned.set(key,{at:now,count:(last&&now-last.at<10000?last.count:0)+1});
+    }
+    return u.href;
+  }
+  /** Which account a Google page is signed in as: the email in the accessible label of Google's account button ("Google Account: Name
+   *  (email)", on every Google app's bar), and on Gmail the address in the window title too. Empty when the page shows none, more than one
+   *  when it shows several. */
+  async pageAccount(page=this.page){
+    return await page.evaluate(()=>{
+      const found=new Set(),take=v=>{for(const m of String(v||'').matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi))found.add(m[0].toLowerCase());};
+      for(const e of document.querySelectorAll('[aria-label]')){const label=e.getAttribute('aria-label')||'';if(/^\s*Google Account\b/i.test(label))take(label);}
+      if(location.hostname==='mail.google.com'){const parts=document.title.split(' - ');if(parts.length>=3)take(parts[parts.length-2]);}
+      return [...found];
+    }).catch(()=>[]);
+  }
+  /** A pinned task acts on a Google page only when the page shows that it is signed in as the task's account. `strict`: an account Buddy
+   *  cannot see is refused too (before an action); reading refuses only a page that shows another account. */
+  async assertAccount({strict=true,tail=''}={}){
+    if(!this.account||!this.page)return;
+    const url=this.page.url();if(!this.browser.isGoogle(url)||this.browser.identityPage(url))return;
+    const seen=await this.pageAccount();
+    if(seen.length===1&&seen[0]===this.account)return;
+    if(seen.length===1)throw Error(otherAccount(seen[0],this.account)+tail);
+    if(strict)throw Error(`Buddy couldn’t tell which Google account this page is signed in as, and this task must use ${this.account}. Buddy stopped instead of acting on it.`+tail);
+  }
+  /** On Google's account chooser, the pinned account's own tile is chosen. 'missing' when the chooser does not offer it (it is not signed
+   *  in to this Chrome); null on any other page, and on a password, code, CAPTCHA or permission step, which stays the person's. */
+  async chooseAccount(page=this.page){
+    if(!this.account||!page||!this.browser.identityPage(page.url()))return null;
+    const url=new URL(page.url());
+    if(/\/consent(?:\/|$)|\/approval(?:\/|$)|\/challenge(?:\/|$)|\/signin\/v\d+/i.test(url.pathname))return null;
+    if(await page.locator('input[type=password],input[autocomplete="one-time-code"],iframe[src*="recaptcha"]').count())return null;
+    const tiles=[];for(const tile of await page.locator('[data-identifier]').all())if(await tile.isVisible().catch(()=>false))tiles.push(tile);
+    if(!tiles.length)return null;
+    for(const tile of tiles){
+      const id=String(await tile.getAttribute('data-identifier').catch(()=>'')||'').trim().toLowerCase();
+      if(id===this.account){this.snapshot=null;await afterSubmit(page,()=>tile.click({timeout:12000}));return 'chosen';}
+    }
+    return 'missing';
+  }
+  /** The username a site's sign-in form holds (what Chrome filled, or what the site asks to sign in as); never a password. */
+  async username(){
+    const field=this.page.locator('input[type=email],input[autocomplete=username],input[autocomplete=email]').first();
+    return await field.count()?await field.inputValue().catch(()=>null):null;
+  }
+  /** Why a sign-in on another site would be as the wrong account: its username is an email that is not the pinned one. */
+  otherSignIn(user){return this.account&&isEmail(user||'')&&user.trim().toLowerCase()!==this.account?user.trim():'';}
   reset(){this.page=null;this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.secretPlanState=null;}
   async ready() {
     await this.browser.ensureContext();
@@ -280,9 +368,14 @@ class BrowserSession {
   read(){return this.guard(()=>this.readPage());}
   async readPage(){
     const {resolver,testOrigins}=this.browser;
-    await this.ready();this.assertScope();if(this.page.url()!=='about:blank')await publicURL(this.page.url(),resolver,testOrigins);this.refs=[];this.prepared=null;
+    await this.ready();
+    // Google's account chooser, for a pinned task: its own account is chosen, never another one.
+    if(this.account)for(let i=0;i<2;i++){this.assertScope();const chosen=await this.chooseAccount();if(chosen==='missing'){this.snapshot=null;throw Error(missingAccount(this.account));}if(!chosen)break;}
+    this.assertScope();if(this.page.url()!=='about:blank')await publicURL(this.page.url(),resolver,testOrigins);this.refs=[];this.prepared=null;
     this.lastURL=this.page.url();const privacy=await this.privacy();
     if(privacy.private){this.snapshot=null;return {url:new URL(this.page.url()).origin,title:'Private sign-in',text:'Sign-in and verification contents are private. Use buddy_browser_signin; never request passwords in chat.',controls:[],authentication:{kind:privacy.kind,private:true}};}
+    // A Google page signed in as another account shows the agent nothing of that account.
+    try{await this.assertAccount({strict:false});}catch(error){this.snapshot=null;throw error;}
     const elements=await this.page.$$('a[href],button,input:not([type=hidden]),textarea,select,[role=button]');const controls=[];
     for(const e of elements.slice(0,250)) {
       if(!await e.isVisible())continue;
@@ -295,7 +388,7 @@ class BrowserSession {
   navigate(url){return this.guard(()=>this.navigatePage(url));}
   async navigatePage(url){
     this.assertScope(url);await this.ready();this.blockedNavigation=null;const started=Date.now();
-    try{const target=await publicURL(url,this.browser.resolver,this.browser.testOrigins);this.intendedURL=target;await this.page.goto(target,{waitUntil:'domcontentloaded',timeout:30000});}
+    try{let target=await publicURL(url,this.browser.resolver,this.browser.testOrigins);target=this.pinURL(target,true)||target;this.intendedURL=target;await this.page.goto(target,{waitUntil:'domcontentloaded',timeout:30000});}
     catch(error){if(this.blockedNavigation)throw Error('Website navigation blocked: '+this.blockedNavigation);if(this.browser.blockedAt>=started)throw Error('Website navigation blocked: Local and private network pages are unavailable in Buddy’s browser.');throw error;}
     return this.read();
   }
@@ -305,6 +398,7 @@ class BrowserSession {
     await this.ready();this.assertScope();
     if((await this.privacy()).private)throw Error('This sign-in step is private. Request buddy_browser_signin instead of reading or filling credentials.');
     if(!this.snapshot||args.snapshotId!==this.snapshot.id||await this.signature()!==this.snapshot.signature)throw Error('The page changed. Read it again before proposing an operation.');
+    await this.assertAccount();
     if(!['click','fill','select','upload'].includes(args.action))throw Error('Choose click, fill, select, or upload.');
     const changes=args.action==='fill'?args.fields:[{ref:args.ref,value:args.value}];
     if(!Array.isArray(changes)||!changes.length||changes.length>25)throw Error('Provide between one and twenty-five fields.');
@@ -331,6 +425,8 @@ class BrowserSession {
     if(!prepared||!this.page||token!==prepared.token)throw Error('The page changed or this approval was already used. Read the page again. Nothing was sent by this request.');
     this.assertScope();
     if(await this.signature()!==prepared.signature)throw Error('The page changed or this approval was already used. Read the page again. Nothing was sent by this request.');
+    // Checked again at the last moment: an approved step is never done as another account.
+    await this.assertAccount({tail:' Nothing was sent by this request.'});
     this.snapshot=null;
     try{
       for(const target of prepared.targets){
@@ -353,17 +449,21 @@ class BrowserSession {
     if(url.protocol!=='https:'&&!this.browser.isTestOrigin(url.origin))throw Error('Sign-in requires HTTPS.');
     if(!['signin','signup','verification'].includes(mode))throw Error('Choose sign-in, account creation, or email verification.');
     const privacy=await this.privacy();if(privacy.kind==='security')throw Error('Account recovery and security changes need you in private Chrome.');
-    const email=this.page.locator('input[type=email],input[autocomplete=username],input[autocomplete=email]').first();
-    const accountEmail=await email.count()?await email.inputValue().catch(()=>null):null;
+    const accountEmail=await this.username();
     // Whether Chrome's Password Manager has filled the password: a yes or no, never the value.
     const filled=await this.page.locator('input[type=password]').first().evaluate(e=>!!e.value).catch(()=>false);
     const token=randomUUID();this.authPlan={token,origin:url.origin,mode,signature:await this.signature(),created:Date.now()};
-    return this.browser.scrub({token,origin:url.origin,mode,accountEmail,filled,googleAvailable:mode==='signin'&&!!await this.googleButton(this.page,url.origin),private:true});
+    const other=this.otherSignIn(accountEmail);
+    return this.browser.scrub({token,origin:url.origin,mode,accountEmail,filled,googleAvailable:mode==='signin'&&!!await this.googleButton(this.page,url.origin),private:true,...(other?{accountReason:this.wrongSignIn(other)}:{})});
   }
+  wrongSignIn(other){return `This sign-in is for ${other}, but this task must use ${this.account}. Choose ${this.account} in Buddy’s Chrome window, then press Done.`;}
   async useSaved(token){
     const plan=this.authPlan;this.authPlan=null;
     if(!plan||plan.token!==token||plan.mode!=='signin'||Date.now()-plan.created>300000||await this.signature()!==plan.signature)throw Error('This sign-in request changed or expired. Request it again.');
     const google=await this.useGoogle(plan.origin);if(google&&!google.switchedSignIn)return google;if(google?.switchedSignIn)plan.signature=await this.signature();
+    // A pinned task never submits a saved login for another email: only the username is looked at, never the password.
+    const other=this.otherSignIn(await this.username());
+    if(other)return {needsUser:true,reason:this.wrongSignIn(other)};
     const password=this.page.locator('input[type=password][autocomplete="current-password"],input[type=password]:not([autocomplete="new-password"])').first();
     // Inspect only a boolean. No API exposes a password or the Password Manager vault.
     const ready=await password.count()?await password.evaluate(e=>{const f=e.form;if(!e.value||!f||[...f.elements].some(x=>x.autocomplete==='new-password'))return false;const target=new URL(f.action||location.href,location.href);return target.origin===location.origin&&f.method.toLowerCase()==='post';}).catch(()=>false):false;
@@ -427,6 +527,13 @@ class BrowserSession {
           for(const tile of await tiles.all())if(await tile.isVisible())visible.push(tile);
           const challenge=await page.locator('input[type=password],input[autocomplete="one-time-code"],iframe[src*="recaptcha"]').count();
           const consent=/\/consent(?:\/|$)|\/approval(?:\/|$)|\/challenge(?:\/|$)|\/signin\/v\d+/i.test(url.pathname);
+          // A pinned task chooses its own account's tile, whatever else is offered; without it, the person is asked to sign in to it.
+          if(!choseAccount&&!challenge&&!consent&&this.account&&visible.length){
+            const ids=[];for(const tile of visible)ids.push(String(await tile.getAttribute('data-identifier').catch(()=>'')||'').trim().toLowerCase());
+            const mine=visible[ids.indexOf(this.account)];
+            if(mine){choseAccount=true;await mine.click();continue;}
+            this.page=page;return {needsUser:true,method:'google',reason:missingAccount(this.account),accountMissing:this.account};
+          }
           if(!choseAccount&&!challenge&&!consent&&visible.length===1){choseAccount=true;await visible[0].click();continue;}
           if(challenge||consent||visible.length>1){this.page=page;return {needsUser:true,method:'google',reason:visible.length>1?'Choose which Google account to use privately.':'Google needs your sign-in, verification or permission choice.'};}
         }else if(url.origin===origin&&!(this.browser.testGooglePath&&url.pathname.startsWith(this.browser.testGooglePath))&&!/\/(?:oauth|[^/]*callback[^/]*|sso|authorize)(?:\/|$)/i.test(url.pathname)){
@@ -495,8 +602,10 @@ class BrowserSession {
       const fit=await b.evaluate((b,field)=>{if(field.form&&b.form!==field.form)return false;if(!(b.offsetWidth||b.offsetHeight||b.getClientRects().length)||b.disabled)return false;const label=(b.innerText||b.value||b.getAttribute('aria-label')||'').trim();return /sign.?in|log.?in|continue|next|verify|submit|confirm|^ok$|done/i.test(label)&&!/create|register|sign.?up|agree|accept|pay|purchase|buy|reset|forgot|delete|remove|google|apple|microsoft|facebook|passkey/i.test(label);},pick.e).catch(()=>false);
       if(fit){button=b;break;}
     }
-    const email=this.page.locator('input[type=email],input[autocomplete=username],input[autocomplete=email]').first();
-    const account=await email.count()?await email.inputValue().catch(()=>null):null;
+    const account=await this.username();
+    // A pinned task types nothing into a sign-in for another email.
+    const other=this.otherSignIn(account);
+    if(other)throw Error(`This sign-in is for ${other}, but this task must use ${this.account}. Nothing was typed. Choose ${this.account} in Buddy’s Chrome window, then press Done.`);
     const token=randomUUID();
     this.secretPlanState={token,origin:url.origin,field:pick.e,kind:pick.kind,button,signature:await this.formSignature(),created:Date.now()};
     return this.browser.scrub({token,origin:url.origin,field:pick.kind,account:account||null,private:true});
@@ -510,6 +619,7 @@ class BrowserSession {
     if(!this.page||this.page.isClosed()||new URL(this.page.url()).origin!==plan.origin||await this.formSignature().catch(()=>'')!==plan.signature)throw Error('The sign-in page changed. Nothing was typed.');
     if(Date.now()-plan.created>this.browser.secretTTLms)throw Error('This sign-in request expired. Nothing was typed.');
     if(!await plan.field.isVisible().catch(()=>false)||!await plan.field.isEnabled().catch(()=>false))throw Error('The sign-in page changed. Nothing was typed.');
+    if(this.otherSignIn(await this.username()))throw Error('The sign-in page now names another account. Nothing was typed.');
     this.browser.remember(value,plan.origin);this.snapshot=null;
     try{
       await plan.field.fill(value);
@@ -557,14 +667,14 @@ export class PrivateBrowser extends SharedBrowser {
 }
 
 // The bridge to the Mac app: one process for the one shared profile. Each request that acts on a page names the task's session (and the
-// delegated website scope it was opened with); the app chooses it, never a model. Requests for different sessions run side by side, those
-// for one session in order.
+// delegated website scope and the account it was opened with); the app chooses them, never a model. Requests for different sessions run
+// side by side, those for one session in order.
 if(process.argv[1]&&import.meta.url===pathToFileURL(realpathSync(process.argv[1])).href){
   const browser=new SharedBrowser(process.argv[2]);
   const lanes=new Map();
   const pageCommands={open:(s,r)=>s.navigate(r.url),read:s=>s.read(),prepare:(s,r)=>s.prepare(r.arguments),commit:(s,r)=>s.commit(r.token,r.upload),prepareSignIn:(s,r)=>s.prepareSignIn(r.mode),useSaved:(s,r)=>s.useSaved(r.token),verificationPlan:s=>s.verificationPlan(),verifyEmail:(s,r)=>s.verifyEmail(r.token,r.code),secretPlan:s=>s.secretPlan(),fillSecret:(s,r)=>s.fillSecret(r.token,r.value),recheck:(s,r)=>s.recheck({reload:r.reload===true})};
   async function answer(request){
-    if(Object.hasOwn(pageCommands,request.command))return pageCommands[request.command](browser.session(request.session,request.scope??''),request);
+    if(Object.hasOwn(pageCommands,request.command))return pageCommands[request.command](browser.session(request.session,request.scope??'',request.account??''),request);
     if(request.command==='manual')return browser.manual(undefined,{session:typeof request.session==='string'?request.session:undefined,url:typeof request.url==='string'?request.url:undefined});
     if(request.command==='manualGoogle')return browser.manual('google',{session:typeof request.session==='string'?request.session:undefined});
     if(request.command==='finishManual')return browser.finishManual();

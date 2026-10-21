@@ -206,3 +206,9 @@ test('a supervisor’s answer is never pinned on a message that does not say whi
  assert.equal(worker.presentation(s,s.messages.coder[0]).body,'I need your approval to continue.');
  assert.equal(worker.recordDecision(s,'code',{reviewId:'cmd',title:'Request to run `x`',verdict:'approved',by:'user'}),true,'the person’s own click, on the one waiting message, may');
 });
+test('a task pinned to an account says “Uses …” on the task and on the reply that started it, escaped, and nothing when unpinned',()=>{
+ assert.equal(worker.accountLine({account:'craviott@usc.edu'}),'Uses craviott@usc.edu');assert.equal(worker.accountLine({}),'');
+ const html=worker.taskReceipts([{id:'t1',title:'Check <my> calendar',account:'craviott@usc.edu'}]);
+ assert.match(html,/Uses craviott@usc\.edu/);assert.match(html,/data-worker-task="t1"/);assert.match(html,/Check &lt;my&gt; calendar/);assert.doesNotMatch(html,/<my>/);
+ assert.equal(worker.taskReceipts([]),'');assert.equal(worker.taskReceipts(),'');
+});

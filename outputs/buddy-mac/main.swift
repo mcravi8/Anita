@@ -83,7 +83,10 @@ import AppKit
                 return try await BuddyWorkerClient.call(support:self.supportURL,payload:request)
             }
             if tool=="buddy_computer_task" {
-                return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"computer","workspace":workspace.workspace,"agentId":id,"actorId":id,"requestId":(context["runId"] as? String ?? "")+":computer","arguments":args])
+                // The person's message in this turn goes with it: the worker pins the account they named for the task, and only their words change it.
+                let result=try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"computer","workspace":workspace.workspace,"agentId":id,"actorId":id,"requestId":(context["runId"] as? String ?? "")+":computer","authorizedText":context["authorizedUserText"] ?? "","arguments":args])
+                self.announceTask(result,context:context,actor:id)
+                return result
             }
             if tool=="buddy_coding_session" {
                 return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"coding","workspace":workspace.workspace,"agentId":id,"actorId":id,"requestId":(context["runId"] as? String ?? "")+":"+(context["callId"] as? String ?? ""),"arguments":args])
@@ -97,7 +100,9 @@ import AppKit
                 return result
             }
             let choice = try self.ai.settings.current(workspace.workspace)
-            return try await BuddyWorkerClient.call(support: self.supportURL, payload: ["operation": "create", "workspace": workspace.workspace, "agentId": id, "actorId": id, "requestId": (context["runId"] as? String ?? "") + ":" + (context["callId"] as? String ?? ""), "title": args["title"] ?? "", "goal": args["goal"] ?? "", "kind": args["kind"] ?? "general", "budgetUSD": choice.claudeBudgetUSD])
+            let result = try await BuddyWorkerClient.call(support: self.supportURL, payload: ["operation": "create", "workspace": workspace.workspace, "agentId": id, "actorId": id, "requestId": (context["runId"] as? String ?? "") + ":" + (context["callId"] as? String ?? ""), "title": args["title"] ?? "", "goal": args["goal"] ?? "", "kind": args["kind"] ?? "general", "budgetUSD": choice.claudeBudgetUSD, "authorizedText": context["authorizedUserText"] ?? "", "account": args["account"] ?? NSNull()])
+            self.announceTask(result, context: context, actor: id)
+            return result
         }
         teamwork.onEvent = { [weak self] event in self?.deliver(event) }
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in Task { @MainActor in await self?.adoptProfileChanges() } }
@@ -264,6 +269,12 @@ import AppKit
         guard !done.isEmpty else { return }
         _ = try? await BuddyWorkerClient.call(support: supportURL, payload: ["operation": "settings", "workspace": context.workspace, "arguments": ["action": "adopt", "adopter": "app", "ids": done]])
         deliver(["type": "agent-settings-changed"])
+    }
+    /// The reply that started a task pinned to an account says so under it ("Uses craviott@usc.edu"), in the chat the person is reading.
+    private func announceTask(_ result: [String: Any], context: [String: Any], actor: String) {
+        guard let task = result["task"] as? [String: Any], let id = task["id"] as? String, let account = task["account"] as? String, !account.isEmpty else { return }
+        let replyRun = (context["replyRunId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? (context["proposalScope"] as? BuddyProposalScope)?.replyRunId ?? context["runId"] as? String ?? ""
+        deliver(["type": "task", "runId": replyRun, "task": ["id": id, "title": task["title"] ?? "", "account": account, "agentId": task["agentId"] ?? actor], "delegatedBy": actor])
     }
     private func deliver(_ event: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: event), let json = String(data: data, encoding: .utf8) else { return }

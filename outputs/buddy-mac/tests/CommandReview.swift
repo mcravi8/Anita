@@ -1,4 +1,5 @@
 // run-tests: BuddyCommandReview.swift
+import CryptoKit
 import Foundation
 
 /// The classifier that decides which coding commands leaving the sandbox the team's supervisor may approve: only shapes it can read word for
@@ -104,5 +105,184 @@ import Foundation
         let signed = assess("curl -fL https://cdn.cboe.com/a.csv -o a.csv", credential: true)
         require(!signed.routine && signed.reason == "It signs in with your saved sign-in.", "a command with a saved sign-in is never routine: \(signed)")
         print("PASS: the coding command classifier sends only public downloads, project installs and public clones to the supervisor (Forge's real CBOE curl among them); uploads, POSTs, headers, git push, ssh/scp/rsync/nc, secrets, sign-ins, writes outside the project, system installs, private addresses and anything it cannot take apart stay with the user")
+
+        try scripts(project: project, outside: outside, assess: { assess($0) })
+    }
+
+    /// Writes a file into the project (making its folders).
+    static func put(_ text: String, _ path: String, in project: URL) throws {
+        let url = project.appendingPathComponent(path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+    }
+    static func sha(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
+
+    /// Commands that run project scripts: Buddy reads every script, sends the ones that plainly do something on the user's list (passwords,
+    /// sending data out, deleting or writing outside the project, changing the Mac) to the user, and gives the rest to the supervisor to read.
+    static func scripts(project: URL, outside: URL, assess: (String) -> BuddyCommandReview.Verdict) throws {
+        let s01 = "stages/S01_protocol/attempt_02"
+        // Chief's real S01 scripts on 21 Oct 2026, in the same shape: a timeout guard that runs its arguments as a command, an install of the
+        // project's own disk image into the project, and a render of a probe document with that project-local LibreOffice.
+        let guardScript = """
+        \"\"\"Run one unit with a per-job timeout.\"\"\"
+        import datetime as dt, subprocess, sys
+        if __name__=='__main__':
+            seconds=int(sys.argv[1]); command=sys.argv[2:]
+            try:
+                p=subprocess.run(command,timeout=seconds,check=False)
+                raise SystemExit(p.returncode)
+            except subprocess.TimeoutExpired:
+                raise SystemExit('PARTIAL: the unit timed out')
+
+        """
+        let install = """
+        from pathlib import Path
+        import hashlib, subprocess
+        p=Path(__file__).resolve().parent
+        f=p/'LibreOffice_mirror.dmg'
+        assert hashlib.sha256(f.read_bytes()).hexdigest()=='0'*64, 'Installer SHA256 mismatch'
+        m=p/'lo_mount'; m.mkdir(exist_ok=True)
+        subprocess.run(['hdiutil','attach','-readonly','-nobrowse','-mountpoint',str(m),str(f)],check=True,timeout=120)
+        try:
+            subprocess.run(['ditto',str(m/'LibreOffice.app'),str(p/'LibreOffice.app')],check=True,timeout=180)
+        finally:
+            subprocess.run(['hdiutil','detach',str(m)],check=True,timeout=60)
+
+        """
+        let render = """
+        from pathlib import Path
+        import subprocess, json
+        p=Path(__file__).resolve().parent
+        exe=p/'LibreOffice.app/Contents/MacOS/soffice'
+        out=p/'render_check'; out.mkdir(exist_ok=True)
+        cmd=[str(exe),'-env:UserInstallation='+(p/'lo_profile').as_uri(),'--headless','--convert-to','pdf','--outdir',str(out),str(p/'template_probe.docx')]
+        r=subprocess.run(cmd,capture_output=True,text=True,timeout=120)
+        (out/'render_receipt.json').write_text(json.dumps({'command':cmd,'exit_code':r.returncode},indent=2))
+        subprocess.run(['pdftoppm','-scale-to','1400','-png',str(out/'template_probe.pdf'),str(out/'page')],check=True,timeout=60)
+
+        """
+        try put(guardScript, "\(s01)/run_guard.py", in: project)
+        try put(install, "\(s01)/install_local.py", in: project)
+        try put(render, "\(s01)/render_probe.py", in: project)
+
+        let first = assess("/bin/zsh -lc 'python3 \(s01)/run_guard.py 420 python3 \(s01)/install_local.py'")
+        require(first.kind == "script" && first.script && !first.routine && first.reason == "Runs the project scripts run_guard.py and install_local.py." && first.runs == first.reason,
+                "Chief's real install command runs two project scripts Buddy read: \(first.kind) \(first.reason)")
+        require(first.scripts.map(\.path) == ["\(s01)/run_guard.py", "\(s01)/install_local.py"] && first.scripts.map(\.sha256) == [sha(guardScript), sha(install)]
+                && first.scripts.map(\.bytes) == [guardScript.utf8.count, install.utf8.count] && first.scripts.allSatisfy { !$0.inline }, "each script with its place, hash and size: \(first.scripts.map(\.record))")
+        let second = assess("/bin/zsh -lc 'python3 \(s01)/run_guard.py 200 python3 \(s01)/render_probe.py'")
+        require(second.kind == "script" && second.reason == "Runs the project scripts run_guard.py and render_probe.py.", "the render command too: \(second.kind) \(second.reason)")
+        let look = assess("/bin/zsh -lc \"pgrep -fl 'S01_protocol/attempt_02/(render_probe.py|LibreOffice.app/Contents/MacOS/soffice|run_guard.py)'\"")
+        require(look.kind == "routine" && look.routine && look.reason == "A look at running processes.", "Chief's real pgrep is a routine look at running processes: \(look.kind) \(look.reason)")
+        for command in ["ps aux", "ps -ax -o pid,command", "pgrep -x soffice", "ps -p 123"] { let v = assess(command); require(v.routine && v.reason == "A look at running processes.", "a look at running processes: \(command) → \(v.reason)") }
+        for command in ["ps -E", "ps auxe", "ps e", "pkill soffice", "pgrep -F pids.txt", "kill 123"] { let v = assess(command); require(!v.routine && !v.script, "not a plain look: \(command) → \(v.kind)") }
+
+        // Harmless shapes Buddy reads as project scripts.
+        let inline = assess("python3 -c 'print(1)'")
+        require(inline.kind == "script" && inline.reason == "Runs inline Python code." && inline.scripts.count == 1 && inline.scripts[0].inline && inline.scripts[0].code == "print(1)" && inline.scripts[0].sha256 == sha("print(1)"),
+                "inline code is a script whose content is that code: \(inline.kind) \(inline.reason) \(inline.scripts.map(\.record))")
+        try put("console.log('ok')\n", "tools/check.js", in: project)
+        try put("#!/usr/bin/env bash\nset -eu\necho built > build/out.txt\n", "tools/build.sh", in: project)
+        try put("print('module')\n", "pkg/report.py", in: project)
+        try FileManager.default.createDirectory(at: project.appendingPathComponent(".venv/bin"), withIntermediateDirectories: true)
+        for (command, reason) in [
+            ("python3 -u -B -X utf8 \(s01)/render_probe.py", "Runs the project script render_probe.py."),
+            ("node tools/check.js", "Runs the project script check.js."),
+            ("bash tools/build.sh", "Runs the project script build.sh."),
+            ("./tools/build.sh", "Runs the project script build.sh."),
+            ("python3 -m pkg.report", "Runs the project script report.py."),
+            (".venv/bin/python \(s01)/run_guard.py 60 node tools/check.js", "Runs the project scripts run_guard.py and check.js."),
+            ("mkdir -p build && bash tools/build.sh", "Runs the project script build.sh."),
+            ("/bin/zsh -lc 'python3 \(s01)/render_probe.py\npython3 \(s01)/render_probe.py'", "Runs the project script render_probe.py."),
+        ] {
+            let v = assess(command)
+            require(v.kind == "script" && v.reason == reason, "a project script: \(command) → \(v.kind) \(v.reason)")
+        }
+        // Run from a folder inside the project (Codex may say where a command runs), paths are read from there.
+        let fromStage = BuddyCommandReview.assess("python3 render_probe.py", project: project.path, cwd: project.appendingPathComponent(s01).path)
+        require(fromStage.kind == "script" && fromStage.scripts.first?.path == "\(s01)/render_probe.py", "a script relative to the command's own folder: \(fromStage.kind) \(fromStage.reason) \(fromStage.scripts.map(\.path))")
+        let elsewhere = BuddyCommandReview.assess("python3 render_probe.py", project: project.path, cwd: outside.path)
+        require(!elsewhere.script && !elsewhere.routine, "a command that runs outside the project folder is the user's: \(elsewhere.reason)")
+
+        // Scripts that plainly do something on the user's list go to the user, with what Buddy saw.
+        let sensitive: [(String, String, String)] = [
+            ("tools/probe_db.py", "import os\nwith open(os.path.expanduser('~/.pgpass')) as f:\n    print(f.read())\n", "reads passwords, keys or tokens"),
+            ("tools/keys.py", "import subprocess\nsubprocess.run(['security', 'find-generic-password', '-s', 'wrds', '-w'])\n", "reads passwords, keys or tokens"),
+            ("tools/env_key.py", "import os\nkey = os.environ.get('WRDS_API_KEY')\nprint(len(key))\n", "reads passwords, keys or tokens"),
+            ("tools/share.py", "import requests\nrequests.post('https://collector.invalid/upload', data=open('results.csv').read())\n", "can send data out of this Mac"),
+            ("tools/mail.py", "import smtplib\nsmtplib.SMTP('mail.invalid').sendmail('a@b.invalid', ['c@d.invalid'], 'hi')\n", "can send data out of this Mac"),
+            ("tools/push.sh", "#!/bin/sh\nscp results.csv me@server.invalid:/tmp/\n", "can send data out of this Mac"),
+            ("tools/hook.js", "fetch('https://hooks.slack.com/services/T0/B0/X', {method: 'POST', body: '{}'})\n", "can send data out of this Mac"),
+            ("tools/clean.py", "import shutil\nshutil.rmtree('/Users/Shared/old-results')\n", "deletes or writes files outside the project"),
+            ("tools/clean_var.py", "import shutil\nOLD = '/Users/Shared/old-results'\nshutil.rmtree(OLD)\n", "deletes or writes files outside the project"),
+            ("tools/home.py", "import os\nopen(os.path.expanduser('~/notes.txt'), 'w').write('x')\n", "deletes or writes files outside the project"),
+            ("tools/up.sh", "rm -rf ../../old\n", "deletes or writes files outside the project"),
+            ("tools/setup.sh", "#!/bin/bash\nsudo cp tools/x /usr/local/bin/x\n", "changes this Mac"),
+            ("tools/prefs.py", "import os\nopen(os.path.expanduser('~/Library/Preferences/com.example.plist'), 'w').write('x')\n", "changes this Mac"),
+            ("tools/brew.sh", "brew install postgresql\n", "changes this Mac"),
+            ("tools/defaults.py", "import subprocess\nsubprocess.run(['defaults', 'write', 'com.apple.finder', 'AppleShowAllFiles', 'YES'])\n", "changes this Mac"),
+            ("tools/attach.py", "import subprocess\nsubprocess.run(['hdiutil', 'attach', '/Users/Shared/Installer.dmg'])\n", "changes this Mac"),
+            ("tools/apps.sh", "cp -R build/Tool.app /Applications/\n", "changes this Mac"),
+        ]
+        for (path, text, concern) in sensitive {
+            try put(text, path, in: project)
+            let tool = path.hasSuffix(".py") ? "python3" : path.hasSuffix(".js") ? "node" : "bash"
+            let v = assess("\(tool) \(path)")
+            let name = (path as NSString).lastPathComponent
+            require(!v.routine && !v.script && v.kind == "sensitive" && v.reason.hasPrefix("The script \(name) \(concern) (") && v.scripts.first?.path == path && v.runs == "Runs the project script \(name).",
+                    "a script that \(concern) goes to the user: \(path) → \(v.kind) \(v.reason)")
+        }
+        let inlineSecret = assess("python3 -c 'import requests; requests.post(\"https://collector.invalid\", data=\"x\")'")
+        require(inlineSecret.kind == "sensitive" && inlineSecret.reason.hasPrefix("The inline Python code can send data out of this Mac ("), "inline code is read too: \(inlineSecret.reason)")
+        let child = assess("python3 \(s01)/run_guard.py 60 python3 tools/share.py")
+        require(child.kind == "sensitive" && child.reason.hasPrefix("The script share.py can send data out of this Mac"), "a script run by another script is read too: \(child.reason)")
+
+        // Not a script Buddy can read: it stays with the user, as before.
+        try put("print('outside')\n", "x.py", in: outside)
+        try put(String(repeating: "# padding line for a script that is far too long to read\n", count: 1800), "tools/big.py", in: project)
+        try FileManager.default.createDirectory(at: project.appendingPathComponent("tools/folder.py"), withIntermediateDirectories: true)
+        try Data([0x70, 0x72, 0x00, 0x69]).write(to: project.appendingPathComponent("tools/binary.py"))
+        for i in 1...5 { try put("print(\(i))\n", "tools/s\(i).py", in: project) }
+        for (command, reason) in [
+            ("python3 ../Elsewhere/x.py", "It runs a script from outside the project."),
+            ("python3 \(outside.path)/x.py", "It runs a script from outside the project."),
+            ("python3 escape/x.py", "It runs a script from outside the project."),
+            ("python3 tools/missing.py", BuddyCommandReview.unclear),
+            ("python3 tools/big.py", "The script big.py is larger than Buddy reads (64 KB), so you decide."),
+            ("python3 tools/binary.py", "Buddy cannot read the script binary.py as text, so you decide."),
+            ("python3 tools/folder.py", BuddyCommandReview.unclear),
+            ("python3 -m http.server", BuddyCommandReview.unclear),
+            ("python3", BuddyCommandReview.unclear),
+            ("python3 -i tools/s1.py", BuddyCommandReview.unclear),
+            ("node --require ./x.js tools/check.js", BuddyCommandReview.unclear),
+            ("python3 tools/s1.py /Users/Shared/data.csv", "It points a script at a place outside the project."),
+            ("python3 tools/s1.py --out=../result.csv", "It points a script at a place outside the project."),
+            ("python3 \(s01)/run_guard.py 60 rm -rf build", BuddyCommandReview.unclear),
+            ("python3 \(s01)/run_guard.py 60 curl -d @x https://collector.invalid", BuddyCommandReview.unclear),
+            ("python3 tools/s1.py && curl -fL https://cdn.cboe.com/a.csv -o a.csv", BuddyCommandReview.unclear),
+            ("python3 tools/s1.py; rm -rf data", BuddyCommandReview.unclear),
+            ("python3 tools/s1.py | tee out.txt", BuddyCommandReview.unclear),
+            ("python3 tools/s1.py tools/s2.py tools/s3.py tools/s4.py tools/s5.py", "It runs more than 4 scripts; Buddy reads at most 4 for one command, so you decide."),
+        ] {
+            let v = assess(command)
+            require(!v.routine && !v.script && v.reason == reason, "not a script Buddy reads: \(command) → \(v.kind) \(v.reason) (expected: \(reason))")
+        }
+        try put("#!/usr/bin/osascript\nsay \"hi\"\n", "tools/talk.sh", in: project)
+        require(!assess("./tools/talk.sh").script, "a file run directly whose first line names a program Buddy does not read is not a script")
+
+        // A reviewed script runs only as it was read: any change, a move or its removal counts.
+        let reviewed = assess("python3 tools/s1.py").scripts.map(\.record)
+        require(BuddyCommandReview.unchanged(reviewed, project: project.path), "an untouched script is unchanged")
+        try put("print(1)  # edited\n", "tools/s1.py", in: project)
+        require(!BuddyCommandReview.unchanged(reviewed, project: project.path), "an edited script has changed")
+        try put("print(1)\n", "tools/s1.py", in: project)
+        require(BuddyCommandReview.unchanged(reviewed, project: project.path), "the same bytes again are what was read")
+        try FileManager.default.removeItem(at: project.appendingPathComponent("tools/s1.py"))
+        require(!BuddyCommandReview.unchanged(reviewed, project: project.path), "a removed script has changed")
+        try FileManager.default.createSymbolicLink(at: project.appendingPathComponent("tools/s1.py"), withDestinationURL: outside.appendingPathComponent("x.py"))
+        try put("print(1)\n", "x.py", in: outside)
+        require(!BuddyCommandReview.unchanged(reviewed, project: project.path), "a script swapped for a link out of the project has changed, even with the same bytes")
+        require(BuddyCommandReview.unchanged(inline.scripts.map(\.record), project: project.path), "inline code is part of the command itself")
+        print("PASS: project scripts are read: Chief's real S01 run_guard/install/render commands go to the supervisor as scripts and its pgrep is a routine look; scripts that read secrets, send data out, delete or write outside the project or change the Mac go to the user with the reason; scripts outside the project, missing, too large, not text, or more than 4 stay with the user; a reviewed script that changed no longer counts as reviewed")
     }
 }

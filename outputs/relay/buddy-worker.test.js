@@ -146,6 +146,28 @@ test('a coding command Buddy assessed reads as what it does and why, in everyday
  for(const r of [two,one,unclear]){const line=worker.requestTitle(r);assert.equal(line.includes('\n'),false);assert.doesNotMatch(line,/curl|zsh/,'no command text in the one line');}
 });
 
+test('a command that runs project scripts reads as which scripts it runs, and the chat line says what was decided (Chief’s real S01 render, 21 Oct 2026)',()=>{
+ const command="/bin/zsh -lc 'python3 stages/S01_protocol/attempt_02/run_guard.py 200 python3 stages/S01_protocol/attempt_02/render_probe.py'";
+ const scripts=[{path:'stages/S01_protocol/attempt_02/run_guard.py',sha256:'a'.repeat(64),bytes:746},{path:'stages/S01_protocol/attempt_02/render_probe.py',sha256:'b'.repeat(64),bytes:779}];
+ const script={id:'s1',kind:'coding',status:'pending',route:'user',assessment:{routine:false,kind:'script',reason:'Runs the project scripts run_guard.py and render_probe.py.',runs:'Runs the project scripts run_guard.py and render_probe.py.',hosts:[],writes:[],scripts},
+  tool:{name:'Run command outside the sandbox',service:'Buddy coding project',arguments:{command,reason:'Render the probe document with the project-local LibreOffice to check the template.',project:'/x/Files'}},questions:[{id:'command',question:'Allow this command to run outside the project sandbox, with network access?',options:[{label:'Accept'},{label:'Decline'}]}]};
+ assert.deepEqual(worker.plainRequest(script),{what:'run the project scripts run_guard.py and render_probe.py',why:'Render the probe document with the project-local LibreOffice to check the template',caution:''});
+ assert.equal(worker.requestTitle(script),'Run the project scripts run_guard.py and render_probe.py');
+ const one={...script,assessment:{...script.assessment,reason:'Runs the project script render_probe.py.',runs:'Runs the project script render_probe.py.',scripts:scripts.slice(1)}};
+ assert.equal(worker.plainRequest(one).what,'run the project script render_probe.py');
+ // A script Buddy's own reading sent to the person still says which script it is, with what Buddy saw as the caution.
+ const flagged={...script,assessment:{routine:false,kind:'sensitive',reason:'The script share.py can send data out of this Mac (requests.post).',runs:'Runs the project script share.py.',hosts:[],writes:[],scripts:[{path:'tools/share.py',sha256:'c'.repeat(64),bytes:90}]}};
+ assert.deepEqual(worker.plainRequest(flagged),{what:'run the project script share.py',why:'Render the probe document with the project-local LibreOffice to check the template',caution:'The script share.py can send data out of this Mac (requests.post).'});
+ assert.equal(worker.requestTitle({...script,assessment:{routine:true,kind:'routine',reason:'A look at running processes.',hosts:[],writes:[]}}),'Look at the running processes');
+ // The person's answer turns the approval message into one line: what it was and what they decided.
+ const s={conversationWorkspace:'w',messages:{chief:[{id:'worker-code-1-waiting_review-s1',workerTaskID:'code',workerAttempt:1,workerStatus:'waiting_review',workerReviewIds:['s1'],body:'I need your approval.'}]}};
+ assert.equal(worker.recordDecision(s,'code',{reviewId:'s1',title:worker.requestTitle(script),verdict:'approved',by:'user'}),true);
+ assert.equal(s.messages.chief[0].body,'Run the project scripts run_guard.py and render_probe.py — approved');
+ assert.doesNotMatch(worker.requestTitle(script),/zsh|python3|stages\//,'no command text in the one line');
+ // One the supervisor reads posts nothing in the chat.
+ assert.equal(worker.deliverable({id:'code',agentId:'chief',status:'waiting_review',attempt:1,reviews:[{...script,route:'supervisor'}]}),false);
+});
+
 test('what was asked is named in one short line',()=>{
  assert.equal(worker.requestTitle(commandReview),'Request to run `curl … data/SPX_History.csv`');
  assert.equal(worker.requestTitle(browserReview),'Request to create inbox');

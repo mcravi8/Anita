@@ -303,6 +303,94 @@ import Security
             try require(asked.isEmpty, "no one was asked, not even Chief: \(asked)")
             try require(!fixture("supervisor").dropFirst(seen).flatMap { $0["items"] as? [[String: Any]] ?? [] }.contains { $0["workerTaskId"] as? String == id }, "Chief's review never saw it")
         }
+
+        // MARK: commands that run project scripts
+
+        let terminal: ([String: Any]) -> Bool = { ["completed", "failed", "interrupted", "paused", "waiting_user"].contains($0["status"] as? String ?? "") }
+        /// What the supervisor was shown, across its runs: on Claude (this stand-in's log) and on ChatGPT (the lane's own app-server stand-in).
+        func shownToSupervisor() -> [[String: Any]] {
+            let gpt = lines(support.appendingPathComponent("Conversations/codex-fixture.jsonl")).filter { $0["kind"] as? String == "supervisor" }.compactMap { $0["value"] as? [String: Any] }
+            return (fixture("supervisor") + gpt).flatMap { $0["items"] as? [[String: Any]] ?? [] }.filter { $0["kind"] as? String == "command_review" }
+        }
+        await section("a Claude coding command that runs a project script goes to the supervisor, who is shown the script as it is and approves it; it runs, and the user is never asked") {
+            try await clearQueue()
+            try await waitForLane(true)
+            let id = try await start("NETWORK_SCRIPT_FIXTURE: run the project probe.", as: clara, request: "script-claude")
+            let done = try await poll(id, "the approved script runs", seconds: 60, terminal)
+            let review = reviews(done).first ?? [:], assessed = review["assessment"] as? [String: Any] ?? [:]
+            try require(review["route"] as? String == "supervisor" && review["status"] as? String == "completed" && review["answeredBy"] as? String == "supervisor" && review["answeredByName"] as? String == "Chief",
+                        "Chief approved it: \(review)")
+            try require(assessed["kind"] as? String == "script" && text(assessed["reason"]) == "Runs the project script probe1.js." && ((assessed["scripts"] as? [[String: Any]])?.first?["path"] as? String) == "tools/probe1.js",
+                        "Buddy read it as a project script: \(assessed)")
+            try require((try? String(contentsOf: project(id).appendingPathComponent("tools/probe1-out.txt"), encoding: .utf8)) == "probe ran\n" && text(done["result"]).hasPrefix("Ran the project probe."), "the script ran: \(done["result"] ?? "")")
+            let shown = shownToSupervisor().first { ($0["command"] as? [String: Any])?["command"] as? String == "node tools/probe1.js" }?["command"] as? [String: Any] ?? [:]
+            let script = (shown["scripts"] as? [[String: Any]])?.first ?? [:]
+            try require(shown["kind"] as? String == "script" && script["path"] as? String == "tools/probe1.js" && text(script["content"]).contains("PROBE_FIXTURE") && script["note"] == nil,
+                        "Chief was shown the script's contents: \(shown)")
+            try require(!(try everyDecision(id)).contains { $0.audience == "user" }, "the user was never asked")
+        }
+        await section("a script edited after Buddy read it does not run, even once approved, and the agent is told why (Claude coding)") {
+            try await clearQueue()
+            let id = try await start("NETWORK_SCRIPT_EDIT_FIXTURE: run the project probe again.", as: clara, request: "script-claude-edit")
+            let done = try await poll(id, "the edited script's command ends", seconds: 60, terminal)
+            let review = reviews(done).first ?? [:]
+            try require(review["route"] as? String == "supervisor" && review["answeredBy"] as? String == "supervisor" && review["status"] as? String == "not_sent"
+                        && ((review["receipt"] as? [String: Any])?["blocked"] as? String) == BuddyCommandReview.changedAfterReview, "approved, then refused: \(review)")
+            try require(!FileManager.default.fileExists(atPath: project(id).appendingPathComponent("tools/probe2-out.txt").path) && ((done["commands"] as? [[String: Any]]) ?? []).count == 1, "it did not run: \(done["commands"] ?? [])")
+            try require(json(toolResult("script2") ?? [:]).contains(BuddyCommandReview.changedAfterReview) && text(done["result"]).contains(BuddyCommandReview.changedAfterReview), "the agent was told: \(toolResult("script2") ?? [:])")
+            try require(!(try everyDecision(id)).contains { $0.audience == "user" }, "the user was never asked")
+        }
+        // Chief on ChatGPT, as on 21 Oct 2026: its own coding task runs on Codex, and its supervision runs on ChatGPT too.
+        try? models.set(workspace: workspace, agent: chief, selection: .init(provider: "chatgpt", model: "gpt-fixture-coder"))
+        await section("Chief's own Codex command to run its project scripts (its real S01 render, 21 Oct 2026) goes to its supervision, which reads the scripts and approves; it runs, with nothing for the user") {
+            try await clearQueue()
+            try await waitForLane(true)
+            let id = try await start("CODEX_SCRIPT: render the probe document.", as: chief, request: "script-own")
+            let done = try await poll(id, "Chief's own script command runs", seconds: 90, terminal)
+            let review = reviews(done).first ?? [:], assessed = review["assessment"] as? [String: Any] ?? [:]
+            try require(done["agentId"] as? String == chief && done["supervisorId"] as? String == chief && done["provider"] as? String == "chatgpt" && done["status"] as? String == "completed",
+                        "Chief's own Codex task, supervised by Chief, completed: \(done["provider"] ?? "-") \(done["status"] ?? "-") \(done["progress"] ?? "")")
+            try require(review["route"] as? String == "supervisor" && review["status"] as? String == "completed" && review["answeredBy"] as? String == "supervisor" && review["answeredByName"] as? String == "Chief",
+                        "not approved by Buddy at once like a routine command, but read and approved by Chief's supervision: \(review)")
+            let s01 = "stages/S01_protocol/attempt_02"
+            try require(assessed["kind"] as? String == "script" && text(assessed["reason"]) == "Runs the project scripts run_guard.py and render_probe.py."
+                        && ((assessed["scripts"] as? [[String: Any]]) ?? []).compactMap { $0["path"] as? String } == ["\(s01)/run_guard.py", "\(s01)/render_probe.py"], "Buddy read both scripts: \(assessed)")
+            try require(FileManager.default.fileExists(atPath: project(id).appendingPathComponent("\(s01)/render_check/render_receipt.json").path), "the approved command ran")
+            let shown = shownToSupervisor().first { json($0).contains("CODEX_SCRIPT: render") }?["command"] as? [String: Any] ?? [:]
+            let scripts = shown["scripts"] as? [[String: Any]] ?? []
+            try require(shown["kind"] as? String == "script" && scripts.count == 2 && text(scripts.first?["content"]).contains("PARTIAL: the unit timed out") && text(scripts.last?["content"]).contains("RENDER_PROBE_FIXTURE")
+                        && text(shown["reason"]).hasPrefix("Render the probe document"), "the supervision on ChatGPT was shown both scripts and why: \(shown)")
+            let every = try everyDecision(id)
+            try require(every.contains { $0.kind == "command_review" && $0.audience == "supervisor" } && !every.contains { $0.audience == "user" }, "it went to the supervisor, never to the user: \(every)")
+        }
+        await section("Chief's own script edited after its supervision read it does not run: Buddy declines it to Codex, and the review says why") {
+            try await clearQueue()
+            let id = try await start("CODEX_SCRIPT_EDIT: render the probe document again.", as: chief, request: "script-own-edit")
+            let done = try await poll(id, "the edited script's command ends", seconds: 90, terminal)
+            let review = reviews(done).first ?? [:]
+            try require(review["route"] as? String == "supervisor" && review["answeredBy"] as? String == "supervisor" && review["status"] as? String == "not_sent"
+                        && ((review["receipt"] as? [String: Any])?["blocked"] as? String) == BuddyCommandReview.changedAfterReview, "approved, then refused: \(review)")
+            let decided = codexLog(id).filter { $0["kind"] as? String == "decision" }.compactMap { $0["value"] as? String }
+            try require(decided == ["decline"] && !FileManager.default.fileExists(atPath: project(id).appendingPathComponent("stages/S01_protocol/attempt_02/render_check/render_receipt.json").path),
+                        "Codex was told no and nothing ran: \(decided)")
+            try require(!(try everyDecision(id)).contains { $0.audience == "user" }, "the user was never asked")
+        }
+        await section("a project script that sends data out goes to the user, with what Buddy saw in it, and never to the supervisor") {
+            try await clearQueue()
+            let id = try await start("CODEX_SCRIPT_SECRET: render the probe document.", as: chief, request: "script-own-secret")
+            let waiting = try await poll(id, "the script's command waits for the user") { pending($0) != nil }
+            let review = pending(waiting) ?? [:], assessed = review["assessment"] as? [String: Any] ?? [:]
+            let open = try await decisions(id)
+            try require(review["route"] as? String == "user" && assessed["kind"] as? String == "sensitive" && text(assessed["reason"]).hasPrefix("The script render_probe.py can send data out of this Mac (")
+                        && text(assessed["runs"]) == "Runs the project scripts run_guard.py and render_probe.py." && open.contains { $0["kind"] as? String == "review" && $0["audience"] as? String == "user" },
+                        "the user's, with the reason: \(review["route"] ?? "-") \(assessed) \(open)")
+            try await answer(id, review, accept: false)
+            let done = try await poll(id, "the declined command ends", terminal)
+            try require(reviews(done).first?["answeredBy"] as? String == "user" && codexLog(id).filter { $0["kind"] as? String == "decision" }.compactMap { $0["value"] as? String } == ["decline"], "the user declined it; it did not run")
+            try require(!shownToSupervisor().contains { json($0).contains("CODEX_SCRIPT_SECRET") }, "the supervisor never saw it")
+        }
+        try? models.set(workspace: workspace, agent: chief, selection: .init(provider: "claude", model: "claude-fixture"))
+
         await section("with the supervisor lane offline (its daily limit used up), a routine command review falls back to the user") {
             try await clearQueue()
             _ = try await worker(["operation": "limit", "scope": "agent", "agentId": chief, "amountUSD": 0.01])

@@ -78,21 +78,27 @@
     return `${line.slice(0,18).trimEnd()}…${line.slice(-18).trimStart()}`;
   }
   // A coding command's request in everyday words: what it does, from what Buddy itself read in the command (its review's assessment), and
-  // the agent's own reason as the why. Null for anything that isn't a coding command, and for older reviews Buddy didn't assess.
+  // the agent's own reason as the why. A command that runs project scripts says which ones ("run the project scripts a.py and b.py"), also
+  // when what Buddy saw in one sent it to the person (that is then the caution). Null for anything that isn't a coding command, and for older
+  // reviews Buddy didn't assess.
   function plainRequest(r){
     const a=r?.tool?.arguments||{};if(r?.kind!=='coding'||typeof a.command!=='string'||!a.command.trim()||!r.assessment||typeof r.assessment!=='object')return null;
-    const said=plain(r.assessment?.reason).replace(/\.$/,'');let m,what=a.sign_in?'sign in with your saved sign-in and run a command':'run a command that uses the internet';
-    if(r.assessment?.routine){
+    // Script names keep their underscores (run_guard.py), which never start emphasis inside a word.
+    const said=plain(r.assessment?.reason).replace(/\.$/,''),runs=String(r.assessment?.runs??'').replace(/\s+/g,' ').replace(/[*`[\]<>#|~\\]/g,'').trim().replace(/\.$/,'');let m,what=a.sign_in?'sign in with your saved sign-in and run a command':'run a command that uses the internet';
+    const script=r.assessment?.kind==='script';
+    if(!a.sign_in&&(m=runs.match(/^Runs (.+)$/)))what=`run ${m[1]}`;
+    else if(r.assessment?.routine){
       if((m=said.match(/^(\d+) downloads from (.+) into the project$/)))what=`download ${m[1]} files from ${m[2]}`;
       else if((m=said.match(/^A download from (.+) into the project$/)))what=`download a file from ${m[1]}`;
       else if((m=said.match(/^A download from (.+) \(shown, not saved\)$/)))what=`read a page from ${m[1]}`;
       else if((m=said.match(/^A clone of a public repository from (.+) into the project$/)))what=`copy a public code repository from ${m[1]}`;
       else if((m=said.match(/^A fetch of a public repository from (.+) into the project$/)))what=`update a public code repository from ${m[1]}`;
       else if(/^A package install into the project/.test(said))what='install packages into the project';
+      else if(said==='A look at running processes')what='look at the running processes';
       else if(said)what=said[0].toLowerCase()+said.slice(1);
     }
     const why=plain(a.reason).replace(/^(please\s+)?allow(\s+me)?(\s+to)?\s+/i,'').replace(/^(can|may) i\s+/i,'').replace(/[?.!\s]+$/,'');
-    return {what,why:why?why[0].toUpperCase()+why.slice(1):'',caution:r.assessment&&!r.assessment.routine?plain(r.assessment.reason):''};
+    return {what,why:why?why[0].toUpperCase()+why.slice(1):'',caution:r.assessment&&!r.assessment.routine&&!script?plain(r.assessment.reason):''};
   }
   function requestTitle(r){
     if(r?.kind==='checkpoint')return 'Check the work';

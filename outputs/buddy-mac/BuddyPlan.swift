@@ -885,12 +885,15 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
 
     /// What waits for the supervisor in a workspace's open plans. Each key changes when the item does, so a handled item is never presented
     /// again and a new result of the same task is a new item. The authorized stage the team is on, while it has no tasks, is a stage to plan;
-    /// only a stage with tasks, all done or waived, is a stage to check.
+    /// only a stage with tasks, all done or waived, is a stage to check. A task whose run was cancelled by anything but the supervisor's own
+    /// cancel, waive or reassign (which settle the task themselves), say the user's Cancel task, is the supervisor's to start again or waive:
+    /// a cancelled run never resumes, and no decision is opened for it, so without the item the stage would wait for ever. It is only while
+    /// the plan is active; a plan the user stopped waits for the user.
     func workItems(workspace: String) throws -> [[String: Any]] {
         var results: [[String: Any]] = [], blocked: [[String: Any]] = [], planning: [[String: Any]] = [], checks: [[String: Any]] = []
         for row in try db.rows("SELECT id, status FROM plans WHERE workspace = ? AND status IN ('draft', 'active', 'holding') ORDER BY created_at, id", [.text(workspace)]) {
-            let planID = Self.s(row, 0)
-            let current = Self.s(row, 1) == "active" ? try activeScope(planID).flatMap { try currentStage(planID, through: $0.through) } : nil
+            let planID = Self.s(row, 0), active = Self.s(row, 1) == "active"
+            let current = active ? try activeScope(planID).flatMap { try currentStage(planID, through: $0.through) } : nil
             for stage in try stageRows(planID) {
                 let tasks = try taskRows(stage: stage.id)
                 for task in tasks {
@@ -898,6 +901,9 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
                                                "assignee": task.assignee, "taskKind": task.kind, "brief": task.brief, "deliverable": task.deliverable]
                     if task.status == "review" { results.append(base.merging(["key": "result:\(task.id):\(task.reviewAttempt)", "kind": "result", "attempt": task.reviewAttempt, "resultSummary": task.resultSummary] as [String: Any]) { $1 }) }
                     if task.status == "blocked" && task.workerTaskId.isEmpty { blocked.append(base.merging(["key": "blocked:\(task.id):\(task.dispatches)", "kind": "dispatch_blocked", "reason": task.blockedReason] as [String: Any]) { $1 }) }
+                    if active && task.status == "blocked" && !task.workerTaskId.isEmpty && task.blockedReason == "cancelled" {
+                        blocked.append(base.merging(["key": "cancelled:\(task.id):\(task.dispatches)", "kind": "cancelled"] as [String: Any]) { $1 })
+                    }
                 }
                 if tasks.isEmpty {
                     if stage.id == current?.id, ["approved", "working", "review"].contains(stage.status) {

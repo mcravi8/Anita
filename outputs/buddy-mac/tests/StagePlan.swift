@@ -427,6 +427,132 @@ import Foundation
             print("PASS: a plan task whose words say it runs code (a coding session, a script, a hash, a protocol to execute) is a coding task whether it is proposed, added, revised, reassigned or started from an older plan, and Chief is told why; once its stage is authorized, its brief says the user's request is the go-ahead that “do not execute now” wording waited for")
         }
 
+        // 12. A run cancelled outside the supervisor's own actions (the user's Cancel task): a cancelled run never resumes, so the plan task waits
+        // on the supervisor, and the supervisor gets an item for it. Starting it again makes one new worker task for the next dispatch; a second
+        // cancel is a new item; a waive ends it. While the user has the plan stopped, the cancelled task waits for the plan, not the supervisor.
+        do {
+            let (store12, plans12, _) = try fresh(root, "cancelled")
+            let plan12 = try plans12.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Reproduce the Omori results", stages: stages, tasks: tasks, members: members, by: chief)
+            let (planID12, _, keys12) = ids(plan12)
+            let p1 = keys12["t1"] ?? "", p2 = keys12["t2"] ?? ""
+            _ = try plans12.authorize(planId: planID12, through: 1, quote: "get stage 1 done", messageId: "m12", viaButton: false, now: Date())
+            let run1 = try step(store12, plans12).first ?? ""
+            try store12.update(run1, ["status": "running", "attempt": 1, "executionRunID": "r12"])
+            try store12.update(run1, ["status": "cancelled", "stopCause": "user.cancel", "progress": "Cancelled. Check any interrupted external action before retrying."])
+            for _ in 0..<2 { require(try step(store12, plans12).isEmpty, "a cancelled run is not started again by itself") }
+            let summary12 = try plans12.summary(workspace: w, jobs: store12.jobs, names: names).first ?? [:]
+            let row12 = row(in: summary12, p1)
+            require(row12["status"] as? String == "blocked" && row12["blockedReason"] as? String == "cancelled" && row12["blockedOn"] as? String == "supervisor"
+                    && (summary12["run"] as? [String: Any])?["state"] as? String == "waiting_on_supervisor", "the cancelled task waits on the supervisor: \(row12) \(summary12["run"] ?? "")")
+            let items12 = try plans12.workItems(workspace: w)
+            require(items12.map { $0["key"] as? String ?? "" } == ["cancelled:\(p1):1"] && items12.first?["kind"] as? String == "cancelled" && items12.first?["workerTaskId"] as? String == run1
+                    && items12.first?["taskId"] as? String == p1, "the supervisor gets an item for the cancelled run: \(items12)")
+
+            // Started again (reassigned to the same teammate): one new worker task, for dispatch 2, and nothing waits meanwhile.
+            try plans12.reassign(taskId: p1, assignee: forge, by: chief, members: members)
+            require(try plans12.workItems(workspace: w).isEmpty, "once the supervisor decided, nothing waits")
+            var again: [String] = []
+            for _ in 0..<3 { again += try step(store12, plans12) }
+            require(again.count == 1 && jobs(store12, p1).count == 2 && store12.jobs.first { $0["id"] as? String == again.first }?["requestId"] as? String == "plan:\(p1):2",
+                    "starting it again makes exactly one worker task, for the next dispatch: \(jobs(store12, p1).map { $0["requestId"] ?? "" })")
+            require(try task(plans12, planID12, p1)["status"] as? String == "dispatched" && (try task(plans12, planID12, p1))["workerTaskId"] as? String == again.first, "the task follows its new run")
+
+            // Cancelled again: a new item for the new dispatch. Waived: nothing waits and the next task starts.
+            try store12.update(again.first ?? "", ["status": "cancelled", "stopCause": "user.cancel"])
+            _ = try step(store12, plans12)
+            require(try plans12.workItems(workspace: w).map { $0["key"] as? String ?? "" } == ["cancelled:\(p1):2"], "a second cancel is a new item")
+            try plans12.waive(taskId: p1, reason: "The baseline is already in the paper's replication files.", by: chief)
+            require(try plans12.workItems(workspace: w).isEmpty, "a waived task leaves nothing waiting")
+            let next12 = try step(store12, plans12)
+            require(next12.count == 1 && jobs(store12, p2).count == 1 && jobs(store12, p1).count == 2, "the waived task's dependent starts and the waived one does not: \(next12)")
+
+            // Stopped by the user, then cancelled: the plan is stopped, so nothing is the supervisor's until the user authorizes the stage again.
+            _ = try plans12.stop(planId: planID12)
+            try store12.update(next12.first ?? "", ["status": "cancelled", "stopCause": "user.cancel"])
+            _ = try step(store12, plans12)
+            require(try plans12.workItems(workspace: w).isEmpty, "a cancelled task of a stopped plan is not the supervisor's")
+            _ = try plans12.authorize(planId: planID12, through: 1, quote: "get stage 1 done after all", messageId: "m12b", viaButton: false, now: Date())
+            _ = try step(store12, plans12)
+            require(try plans12.workItems(workspace: w).map { $0["key"] as? String ?? "" } == ["cancelled:\(p2):1"], "once the stage is authorized again, the supervisor gets it")
+            print("PASS: a plan task whose run was cancelled outside the supervisor's own actions (the user's Cancel task) is an item for the supervisor, never a stage that silently waits; starting it again makes one worker task for the next dispatch, a second cancel is a new item, and a stopped plan waits for the user")
+        }
+
+        // 13. A run the user paused (Pause on the task, Pause all, or stopping the plan) waits for the user to resume it. The supervisor has no
+        // item for it and may not resume it, so the plan never says it waits on the supervisor; it is not something to act on either (the user
+        // did it), so it does not count as needing the user. The plan reads "paused" when nothing else is going on. A pause Buddy made (a stall)
+        // is still the supervisor's.
+        do {
+            let (store13, plans13, _) = try fresh(root, "user-paused")
+            let plan13 = try plans13.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Reproduce the Omori results", stages: stages, tasks: tasks, members: members, by: chief)
+            let (planID13, _, keys13) = ids(plan13)
+            let p1 = keys13["t1"] ?? ""
+            _ = try plans13.authorize(planId: planID13, through: 1, quote: "get stage 1 done", messageId: "m13", viaButton: false, now: Date())
+            let run13 = try step(store13, plans13).first ?? ""
+            try store13.update(run13, ["status": "running", "attempt": 1, "executionRunID": "r13"])
+            func look() throws -> (row: [String: Any], run: [String: Any]) {
+                _ = try step(store13, plans13)
+                let summary = try plans13.summary(workspace: w, jobs: store13.jobs, names: names).first ?? [:]
+                return (row(in: summary, p1), summary["run"] as? [String: Any] ?? [:])
+            }
+            for cause in ["user.pause", "user.pauseAll"] {
+                try store13.update(run13, ["status": "paused", "stopCause": cause, "progress": "Paused. Saved progress is available."])
+                let (paused, run) = try look()
+                require(paused["status"] as? String == "blocked" && paused["blockedOn"] as? String == "paused" && run["state"] as? String == "paused" && run["needsYou"] as? Int == 0,
+                        "a run the user paused (\(cause)) waits for the user to resume it, without counting as needing them: \(paused["blockedOn"] ?? "") \(run)")
+                require(try plans13.workItems(workspace: w).isEmpty, "the supervisor has nothing for it")
+            }
+            // A pause Buddy made (the run stalled) is the supervisor's to resume.
+            try store13.update(run13, ["status": "paused", "stopCause": "stall", "progress": "Stalled."])
+            let (stalled, stalledRun) = try look()
+            require(stalled["blockedOn"] as? String == "supervisor" && stalledRun["state"] as? String == "waiting_on_supervisor", "a stall still waits on the supervisor: \(stalled["blockedOn"] ?? "") \(stalledRun)")
+            // Resumed by the user: working again.
+            try store13.update(run13, ["status": "paused", "stopCause": "user.pause"])
+            _ = try look()
+            _ = try store13.resume(run13)
+            let (resumed, resumedRun) = try look()
+            require(resumed["status"] as? String == "dispatched" && resumed["blockedOn"] as? String == "none" && resumedRun["state"] as? String == "working", "resumed, the task works again: \(resumedRun)")
+            // Stopping the plan pauses its runs: each reads as paused by the user, and the plan as stopped.
+            try store13.update(run13, ["status": "running"])
+            _ = try plans13.stop(planId: planID13)
+            try store13.update(run13, ["status": "paused", "stopCause": "user.plan_stop", "progress": "Paused: you stopped the team plan."])
+            let (stopped, stoppedRun) = try look()
+            require(stopped["blockedOn"] as? String == "paused" && stoppedRun["state"] as? String == "stopped", "a run paused by stopping the plan reads as paused by the user: \(stopped["blockedOn"] ?? "") \(stoppedRun)")
+            print("PASS: a plan task whose run the user paused (on the task, with Pause all, or by stopping the plan) waits for the user to resume it: never “waiting on the supervisor”, not counted as needing the user, and the plan reads paused when nothing else goes on; a stall stays the supervisor's")
+        }
+
+        // 14. Stopping the plan pauses its runs (user.plan_stop); authorizing the stage again lets them go on ("You can choose a stage again
+        // later"). Only the plan task's current run that the stop paused goes on: not one the user paused by itself afterwards, not one that may
+        // have sent something (its action is unconfirmed), not an older run, and nothing while the plan is still stopped.
+        do {
+            let (store14, plans14, _) = try fresh(root, "stop-resume")
+            let tasks14: [[String: Any]] = [tasks[0], ["stage": 1, "key": "tb", "title": "Collect the sources", "assignee": vera, "kind": "research", "brief": "Collect the sources.", "deliverable": "sources.md"],
+                                            ["stage": 1, "key": "tc", "title": "Draft the email", "assignee": vera, "kind": "general", "brief": "Draft the email to the authors.", "deliverable": "A draft"], tasks[2]]
+            let plan14 = try plans14.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Reproduce the Omori results", stages: stages, tasks: tasks14, members: members, by: chief)
+            let (planID14, _, keys14) = ids(plan14)
+            let p1 = keys14["t1"] ?? "", pb = keys14["tb"] ?? "", pc = keys14["tc"] ?? ""
+            _ = try plans14.authorize(planId: planID14, through: 1, quote: "get stage 1 done", messageId: "m14", viaButton: false, now: Date())
+            let started14 = try step(store14, plans14)
+            require(started14.count == 3, "the three stage-1 tasks start: \(started14)")
+            let run1 = jobs(store14, p1).first?["id"] as? String ?? "", runB = jobs(store14, pb).first?["id"] as? String ?? "", runC = jobs(store14, pc).first?["id"] as? String ?? ""
+            for id in [run1, runB, runC] { try store14.update(id, ["status": "running", "attempt": 1, "executionRunID": UUID().uuidString]) }
+            // The person stops the plan; the worker pauses every open run (as the host does). One had an action in flight: it is unconfirmed now.
+            let open14 = try plans14.stop(planId: planID14)
+            require(Set(open14) == [run1, runB, runC], "the stop returns the open runs: \(open14)")
+            for id in open14 { try store14.update(id, ["status": "paused", "stopCause": "user.plan_stop", "progress": "Paused: you stopped the team plan."]) }
+            try store14.update(runC, ["reviews": [["id": "email-1", "kind": "connected", "status": "uncertain", "tool": ["name": "Send email"]]]])
+            _ = try step(store14, plans14)
+            require(try plans14.stoppedRuns(planId: planID14, jobs: store14.jobs).isEmpty, "nothing goes on while the plan is stopped")
+            // Afterwards the person pauses one of them by itself.
+            try store14.update(runB, ["stopCause": "user.pause", "progress": "Paused."])
+            _ = try plans14.authorize(planId: planID14, through: 1, quote: "get stage 1 done again", messageId: "m14b", viaButton: false, now: Date())
+            require(try plans14.stoppedRuns(planId: planID14, jobs: store14.jobs) == [run1], "only the run the stop paused, with nothing unconfirmed, goes on: \(try plans14.stoppedRuns(planId: planID14, jobs: store14.jobs))")
+            _ = try store14.resume(run1)
+            for _ in 0..<2 { require(try step(store14, plans14).isEmpty, "resuming the run starts no second worker task") }
+            require(try task(plans14, planID14, p1)["status"] as? String == "dispatched" && jobs(store14, p1).count == 1, "the task goes on with its run")
+            require(try plans14.stoppedRuns(planId: planID14, jobs: store14.jobs).isEmpty, "once going, nothing more to resume")
+            print("PASS: authorizing a stage again after the person stopped the plan lets the runs the stop paused go on, with no second worker task; a run the person paused by itself, one with an unconfirmed action, and anything while the plan is stopped stay paused")
+        }
+
         // 8. Graceful read.
         let empty = root.appendingPathComponent("empty")
         _ = try BuddyWorkerStore(directory: empty.appendingPathComponent("Worker"))

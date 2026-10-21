@@ -529,9 +529,18 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
         let shown = try await raw(["operation": "status"])
         require((shown["plans"] as? [[String: Any]])?.contains { $0["id"] as? String == planID && $0["status"] as? String == "holding" } == true && (shown["supervisorLane"] as? [String: Any])?["online"] is Bool
                 && (shown["pulse"] as? [String: Any])?["queuePaused"] as? Bool == false, "the status reply carries the plans, the supervisor lane and the pulse")
+        // "You can choose a stage again later": the person authorizes the stage again, and the run their stop paused goes on, with no second
+        // worker task for it.
+        let reauthorized = try await plan(["action": "authorize", "planId": planID, "through": 1, "quote": "Tapped “Get stage 1 done”"])
+        require(reauthorized["error"] == nil && (reauthorized["plan"] as? [String: Any])?["status"] as? String == "active", "the person authorizes stage 1 again: \(reauthorized)")
+        let goingOn = try await pollAs(forge, t1Job, "the run the stop paused goes on") { $0["status"] as? String != "paused" }
+        require(["queued", "starting", "running"].contains(goingOn["status"] as? String ?? "") && (goingOn["stopCause"] as? String ?? "").isEmpty, "it is queued or running again: \(goingOn["status"] ?? "")")
+        try await Task.sleep(nanoseconds: 2_500_000_000)
+        let madeAgain = try await planJobs()
+        require(madeAgain.count == 1 && madeAgain[0]["id"] as? String == t1Job, "and no second worker task is made for it: \(madeAgain.map { $0["requestId"] ?? "" })")
         for id in [askID, signinID, generalID, t1Job] { _ = try await raw(["operation": "cancel", "taskId": id]) }
         _ = try await raw(["operation": "team", "arguments": ["action": "configure", "supervisorId": "", "enabled": true]])
-        print("PASS: the team plan through the worker: only the supervisor proposes, only the user's words or tap authorize, the stage's first task is dispatched once inside the stage, the Mac stays awake while it is live, and the person's stop pauses it")
+        print("PASS: the team plan through the worker: only the supervisor proposes, only the user's words or tap authorize, the stage's first task is dispatched once inside the stage, the Mac stays awake while it is live, the person's stop pauses it, and authorizing the stage again lets that run go on")
 
         // 7. A restart in the middle of an attempt: the next worker carries the same task on to completion by itself, and nobody is asked.
         let again = FileManager.default.temporaryDirectory.appendingPathComponent("buddy-worker-restart-" + UUID().uuidString + ".noindex")

@@ -764,5 +764,48 @@ import Foundation
         let forUser16 = try reworked.store.openDecisions(workspace: w).filter { $0["audience"] as? String == "user" }, escalations16 = try notices(reworked, "escalation")
         require(forUser16.isEmpty && escalations16.isEmpty, "nothing reaches the user: \(forUser16) \(escalations16)")
         print("PASS: a rework whose instruction runs code makes the plan task a coding task for the same assignee, so Buddy restarts it as a coding session with the instruction, and nothing reaches the user")
+
+        // 17. The user presses Cancel task on a plan task's run. A cancelled run never resumes and opens no decision, so before this the plan read
+        // "waiting on the supervisor" while the supervisor had nothing, and the stage never finished. Now the lane is given the cancelled run, says
+        // who cancelled it, may not resume it, and starts the task again with its assignee: one new worker task for the next dispatch, and nothing
+        // reaches the user.
+        let cancelled = try world(base, "cancelled")
+        try mode(cancelled, "auto")
+        try propose(cancelled)
+        _ = try step(cancelled)
+        let cancelledRun = jobs(cancelled, "t1").first?["id"] as? String ?? ""
+        try cancelled.store.update(cancelledRun, ["status": "running", "attempt": 1, "executionRunID": UUID().uuidString])
+        try cancelled.store.update(cancelledRun, ["status": "cancelled", "stopCause": "user.cancel", "progress": "Cancelled. Check any interrupted external action before retrying."])
+        _ = try step(cancelled)
+        let waitingRun = (try cancelled.plans.summary(workspace: w, jobs: cancelled.store.jobs, names: names)).first?["run"] as? [String: Any] ?? [:]
+        require(try planTask(cancelled, "t1")["status"] as? String == "blocked" && waitingRun["state"] as? String == "waiting_on_supervisor", "the cancelled task waits on the supervisor: \(waitingRun)")
+        require(try cancelled.store.openDecisions(workspace: w).isEmpty, "a cancelled run opens no decision for anyone")
+        await tick(cancelled)
+        let call17 = calls(cancelled).last ?? [:], t1 = cancelled.keys["t1"] ?? ""
+        require((call17["items"] as? [String]) == ["cancelled:\(t1):1"] && (call17["kinds"] as? [String]) == ["cancelled"] && (call17["cancelled"] as? [String]) == ["The user cancelled this run (Cancel task)."]
+                && (call17["expected"] as? [String]) == ["reassign or waive"] && call17["cancelRule"] as? Bool == true, "the lane is given the cancelled run, who cancelled it and the two ways on: \(call17)")
+        let startedAgain = try planTask(cancelled, "t1")
+        require(try itemState(cancelled, "cancelled:\(t1):1").state == "handled" && startedAgain["status"] as? String == "pending" && startedAgain["assignee"] as? String == forge, "the lane starts it again with its assignee: \(startedAgain)")
+        require(try count(cancelled, "SELECT COUNT(*) FROM plan_decisions WHERE kind = 'reassign' AND decided_by = ? AND task_id = ?", [.text(chief), .text(t1)]) == 1, "the restart is Chief's recorded decision")
+        var restartedRuns: [String] = []
+        for _ in 0..<3 { restartedRuns += try step(cancelled) }
+        require(restartedRuns.count == 1 && jobs(cancelled, "t1").count == 2 && cancelled.store.jobs.first { $0["id"] as? String == restartedRuns.first }?["requestId"] as? String == "plan:\(t1):2",
+                "Buddy starts exactly one new run, for dispatch 2: \(jobs(cancelled, "t1").map { $0["requestId"] ?? "" })")
+        let workingAgain = (try cancelled.plans.summary(workspace: w, jobs: cancelled.store.jobs, names: names)).first?["run"] as? [String: Any] ?? [:]
+        require(try cancelled.store.job(cancelledRun)["status"] as? String == "cancelled" && workingAgain["state"] as? String == "working" && cancelled.stopped.isEmpty, "the team works again and the cancelled run is left as it was: \(workingAgain)")
+        let runsSoFar = calls(cancelled).count
+        await tick(cancelled)
+        require(calls(cancelled).count == runsSoFar, "nothing more waits for the supervisor")
+        // Resuming a cancelled run is refused: it never resumes; the item stays open with the reason.
+        try cancelled.store.update(restartedRuns.first ?? "", ["status": "cancelled", "stopCause": "agent.cancel:\(vera)"])
+        _ = try step(cancelled)
+        try mode(cancelled, "resumeall")
+        await tick(cancelled)
+        let refused17 = try itemState(cancelled, "cancelled:\(t1):2")
+        require((calls(cancelled).last?["cancelled"] as? [String]) == ["Vera cancelled this run."] && refused17.state == "open" && refused17.refusal.contains("resume is only for work that stopped for a technical reason"),
+                "a resume of a cancelled run is refused, with the reason: \(refused17) \(calls(cancelled).last?["cancelled"] ?? "")")
+        let forUser17 = try cancelled.store.openDecisions(workspace: w).filter { $0["audience"] as? String == "user" }, escalations17 = try notices(cancelled, "escalation")
+        require(forUser17.isEmpty && escalations17.isEmpty, "nothing reaches the user: \(forUser17) \(escalations17)")
+        print("PASS: a plan task whose run the user (or a teammate) cancelled is a supervisor item that says who cancelled it; a cancelled run cannot be resumed, so the lane starts the task again with its assignee and Buddy makes exactly one new worker task for the next dispatch; nothing reaches the user")
     }
 }

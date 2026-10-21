@@ -711,6 +711,8 @@ import Darwin
             let viaButton = actor == nil && (args["viaButton"] as? Bool ?? messageID.isEmpty)
             if quote.isEmpty { quote = "Tapped “Get stage \(through) done”" }
             let out = try plans.authorize(planId: id, through: through, quote: quote, messageId: messageID, viaButton: viaButton, now: Date())
+            // The runs the user's stop paused go on now that their stage is authorized again.
+            for task in (try? plans.stoppedRuns(planId: id, jobs: store.jobs)) ?? [] { _ = try? store.resume(task) }
             return try reply(id, ["through": (out["scope"] as? [String: Any])?["through"] ?? through, "quote": quote])
         case "revise":
             let plan = try existing(), id = plan["id"] as? String ?? ""

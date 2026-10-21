@@ -55,6 +55,20 @@ test('an authorized stage with no tasks yet reads as the supervisor planning it,
  assert.doesNotMatch(P.banner(later,pulse({}),names,NOW),/planning/,'a stage outside the authorization is not being planned');
 });
 
+test('a task the person paused reads as paused by them, waiting for them to resume it, never as with the supervisor or as needing them',()=>{
+ const one=active([task('t1','done'),task('t2','blocked',{assignee:'forge',blockedOn:'paused',workerTaskId:'w2',workerStatus:'paused'}),task('t3','pending')],{state:'paused'});
+ assert.equal(P.banner(one,pulse({}),names,NOW),'You paused “Task t2” (Forge) — resume it to finish Stage 1');
+ const two=active([task('t1','blocked',{blockedOn:'paused'}),task('t2','blocked',{assignee:'forge',blockedOn:'paused'}),task('t3','pending')],{state:'paused'});
+ assert.equal(P.banner(two,pulse({}),names,NOW),'You paused 2 tasks — resume them to finish Stage 1');
+ const html=P.stripHTML(one,pulse({}),names,{open:true,now:NOW});
+ assert.match(html,/class="plan-strip tone-idle open"/);assert.match(html,/data-plan-state="paused"/);assert.match(html,/Paused by you/);
+ assert.doesNotMatch(html,/With Chief|Needs you|See what needs you/);
+ // Beside other work the paused task keeps its own chip, and the strip says what is going on.
+ const beside=active([task('t1','dispatched',{workerTaskId:'w1'}),task('t2','blocked',{assignee:'forge',blockedOn:'paused'}),task('t3','pending')],{state:'working'});
+ assert.match(P.banner(beside,pulse({}),names,NOW),/^Working on Stage 1 of 3 — 0 of 3 tasks done — Lyra is working on “Task t1”/);
+ assert.equal(P.taskChip(task('t2','blocked',{blockedOn:'paused'}),pulse({}),'Chief').label,'Paused by you');
+});
+
 test('stage and task chips say where each piece of work stands',()=>{
  assert.deepEqual(['proposed','approved','working','review','done'].map(s=>P.stageChip({status:s}).label),['Not started','Up next','Working','Being checked','Done']);
  const chip=(t,p)=>P.taskChip(t,pulse(p||{}),'Chief').label;

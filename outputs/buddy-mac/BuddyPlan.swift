@@ -312,7 +312,8 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         return try db.rows("SELECT id FROM plans WHERE workspace = ? AND (status IN ('draft', 'active', 'holding') OR (status = 'achieved' AND updated_at >= ?)) ORDER BY created_at, id", [.text(workspace), .text(since)])
             .compactMap { $0.first?.string }.map { try render($0, jobs: byID, detail: false) }
     }
-    /// Who a blocked task is waiting for, read from its worker task.
+    /// Who a blocked task is waiting for, read from its worker task. A run the user paused (on the task, with Pause all, or by stopping the
+    /// plan) is `paused`: it waits for them to resume it, the supervisor has nothing to act on, and it is not a question for them either.
     private static func blockedOn(_ task: TaskRow, _ job: [String: Any]?) -> String {
         let retrying = ["pending", "queued"].contains((job?["recovery"] as? [String: Any])?["state"] as? String ?? "")
         switch task.status {
@@ -322,6 +323,7 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
             let status = job["status"] as? String ?? ""
             if status == "waiting_user" { let to = (job["checkpoint"] as? [String: Any])?["routedTo"] as? String ?? ""; return to == "supervisor" ? "supervisor" : "user" }
             if status == "waiting_review" || job["blockedBy"] as? String == "limit" || job["stopCause"] as? String == "limit" { return "user" }
+            if status == "paused", (job["stopCause"] as? String ?? "").hasPrefix("user.") { return "paused" }
             return retrying ? "retry" : "supervisor"
         default: return "none"
         }
@@ -330,7 +332,7 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         guard let plan = try planRow(planId) else { throw Self.missing() }
         let active = try activeScope(planId), latest = try latestScope(planId)
         let shown = active ?? (latest?.status == "achieved" ? latest : nil)
-        var needsYou = 0, forSupervisor = false, lastChange = max(plan.updatedAt, active?.at ?? "")
+        var needsYou = 0, forSupervisor = false, pausedByUser = false, lastChange = max(plan.updatedAt, active?.at ?? "")
         var working: [[String: Any]] = [], stages: [[String: Any]] = []
         let current = plan.status == "active" ? try active.flatMap { try currentStage(planId, through: $0.through) } : nil
         for stage in try stageRows(planId) {
@@ -338,6 +340,7 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
             for task in try taskRows(stage: stage.id) {
                 let job = task.workerTaskId.isEmpty ? nil : jobs[task.workerTaskId], on = Self.blockedOn(task, job)
                 if on == "user" { needsYou += 1 }
+                if on == "paused" { pausedByUser = true }
                 if task.status == "review" || (task.status == "blocked" && on == "supervisor") { forSupervisor = true }
                 if task.status == "dispatched" { working.append(["agentId": task.assignee, "title": task.title, "since": task.updatedAt]) }
                 lastChange = max(lastChange, task.updatedAt)
@@ -360,7 +363,7 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         let state: String
         switch plan.status {
         case "draft": state = "draft"
-        case "active": state = needsYou > 0 ? "needs_you" : !working.isEmpty ? "working" : forSupervisor ? "waiting_on_supervisor" : "idle"
+        case "active": state = needsYou > 0 ? "needs_you" : !working.isEmpty ? "working" : forSupervisor ? "waiting_on_supervisor" : pausedByUser ? "paused" : "idle"
         case "holding", "achieved": state = latest?.status == "withdrawn" ? "stopped" : "stage_done"
         default: state = "stopped"
         }
@@ -553,6 +556,22 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
             _ = try recordDecision(planId: planId, kind: "cancel", by: "user", question: "", choice: "stop", rationale: "The user stopped the plan.", stageId: "", taskId: "", workerTaskId: "")
         }
         return open
+    }
+    /// The runs the user's stop paused (`user.plan_stop`) that go on once the user authorizes their stage again: each the current run of an
+    /// open task of an authorized stage, with nothing that may have been sent (an unconfirmed action is the user's to check first). A run the
+    /// user paused by itself, an older run, and anything while the plan is stopped stay as they are.
+    func stoppedRuns(planId: String, jobs: [[String: Any]]) throws -> [String] {
+        guard let plan = try planRow(planId), plan.status == "active", let scope = try activeScope(planId) else { return [] }
+        let byID = Self.index(jobs)
+        var out: [String] = []
+        for stage in try stageRows(planId) where stage.n <= scope.through && !["done", "superseded"].contains(stage.status) {
+            for task in try taskRows(stage: stage.id) where ["dispatched", "blocked"].contains(task.status) {
+                guard let job = byID[task.workerTaskId], job["status"] as? String == "paused", job["stopCause"] as? String == "user.plan_stop",
+                      !(job["reviews"] as? [[String: Any]] ?? []).contains(where: { ["uncertain", "dispatched"].contains($0["status"] as? String ?? "") }) else { continue }
+                out.append(task.workerTaskId)
+            }
+        }
+        return out
     }
 
     // MARK: following the worker
@@ -885,12 +904,15 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
 
     /// What waits for the supervisor in a workspace's open plans. Each key changes when the item does, so a handled item is never presented
     /// again and a new result of the same task is a new item. The authorized stage the team is on, while it has no tasks, is a stage to plan;
-    /// only a stage with tasks, all done or waived, is a stage to check.
+    /// only a stage with tasks, all done or waived, is a stage to check. A task whose run was cancelled by anything but the supervisor's own
+    /// cancel, waive or reassign (which settle the task themselves), say the user's Cancel task, is the supervisor's to start again or waive:
+    /// a cancelled run never resumes, and no decision is opened for it, so without the item the stage would wait for ever. It is only while
+    /// the plan is active; a plan the user stopped waits for the user.
     func workItems(workspace: String) throws -> [[String: Any]] {
         var results: [[String: Any]] = [], blocked: [[String: Any]] = [], planning: [[String: Any]] = [], checks: [[String: Any]] = []
         for row in try db.rows("SELECT id, status FROM plans WHERE workspace = ? AND status IN ('draft', 'active', 'holding') ORDER BY created_at, id", [.text(workspace)]) {
-            let planID = Self.s(row, 0)
-            let current = Self.s(row, 1) == "active" ? try activeScope(planID).flatMap { try currentStage(planID, through: $0.through) } : nil
+            let planID = Self.s(row, 0), active = Self.s(row, 1) == "active"
+            let current = active ? try activeScope(planID).flatMap { try currentStage(planID, through: $0.through) } : nil
             for stage in try stageRows(planID) {
                 let tasks = try taskRows(stage: stage.id)
                 for task in tasks {
@@ -898,6 +920,9 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
                                                "assignee": task.assignee, "taskKind": task.kind, "brief": task.brief, "deliverable": task.deliverable]
                     if task.status == "review" { results.append(base.merging(["key": "result:\(task.id):\(task.reviewAttempt)", "kind": "result", "attempt": task.reviewAttempt, "resultSummary": task.resultSummary] as [String: Any]) { $1 }) }
                     if task.status == "blocked" && task.workerTaskId.isEmpty { blocked.append(base.merging(["key": "blocked:\(task.id):\(task.dispatches)", "kind": "dispatch_blocked", "reason": task.blockedReason] as [String: Any]) { $1 }) }
+                    if active && task.status == "blocked" && !task.workerTaskId.isEmpty && task.blockedReason == "cancelled" {
+                        blocked.append(base.merging(["key": "cancelled:\(task.id):\(task.dispatches)", "kind": "cancelled"] as [String: Any]) { $1 })
+                    }
                 }
                 if tasks.isEmpty {
                     if stage.id == current?.id, ["approved", "working", "review"].contains(stage.status) {

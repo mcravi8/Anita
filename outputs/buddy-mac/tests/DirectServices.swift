@@ -18,6 +18,16 @@ import Foundation
   for bad in ["send_email","forged_read","other.read_email"] {
    var rejected=false;do{_ = try await call("buddy_service_read",["service":"Gmail","tool":bad,"argumentsJson":"{}"])}catch{rejected=true};require(rejected,"write, unverified and wrong-connector tools are denied")
   }
+  // A web search result stays in the agent's context: it comes back short unless the agent asks for more, and never longer than one call's worth.
+  func searchText(_ value:[String:Any])->String {((value["result"] as? [String:Any])?["content"] as? [[String:Any]] ?? []).compactMap{$0["text"] as? String}.joined()}
+  func search(_ arguments:String) async throws -> [String:Any] {try await call("buddy_service_read",["service":"Search Service","tool":"web_run","argumentsJson":arguments])}
+  let quick=try await search(#"{"system2_search_query":[{"q":"vvix history"}]}"#)
+  require(searchText(quick).hasPrefix("response_length=short queries=1") && searchText(quick).contains("vvix history") && quick["note"]==nil,"a search that doesn't say how much it wants gets the short answer, whole: \(searchText(quick).prefix(60))")
+  let medium=try await search(#"{"system2_search_query":[{"q":"one"}],"response_length":"medium"}"#)
+  require(searchText(medium).hasPrefix("response_length=medium") && searchText(medium).count>9000 && medium["note"]==nil,"an answer within the bound is untouched")
+  let long=try await search(#"{"system2_search_query":[{"q":"first"},{"q":"second"}],"response_length":"long"}"#),longText=searchText(long),note=long["note"] as? String ?? ""
+  require(longText.hasPrefix("response_length=long queries=2") && longText.count<=ConversationService.searchCharacters && longText.contains("Result 0 for first"),"a long answer is cut to one call's worth: \(longText.count) characters")
+  require(note.contains("open") && note.contains("lineno") && note.contains("fewer queries") && note.range(of:#"\d{4,} more characters"#,options:.regularExpression) != nil,"the cut says how much was left out and how to read on: \(note)")
   // A prepared result must verify the live mailbox, without rereading its mail.
   let at=ISO8601DateFormatter().string(from:Date()),rid=UUID().uuidString,task=UUID().uuidString,review=UUID().uuidString,sourceRun=UUID().uuidString
   let coverage:[String:Any] = ["id":review,"runID":sourceRun,"query":"assessment","partial":false,"searchExhausted":true,"unread":0,"read":2,"checkedAt":at,"accountHash":BuddyInboxReview.accountHash("fixture@example.invalid")]

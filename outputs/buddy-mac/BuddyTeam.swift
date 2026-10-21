@@ -51,7 +51,14 @@ struct BuddyTurnOptions {
 }
 
 enum BuddyRuntimeCapabilities {
-    static func guidance(provider:String,model:String)->String {
+    /// How to search the web, for an agent that can: named, so it isn't looked up in the tool catalogue, and kept short, because every result
+    /// stays in the agent's context. ChatGPT calls the connector itself; Claude reaches it through Buddy's direct read.
+    static func webSearch(provider:String)->String {
+        provider=="claude"
+            ? #"Web search: call buddy_service_read with service "Search Service", tool "web_run" and argumentsJson such as {"system2_search_query":[{"q":"…"}],"response_length":"short"}; no need to look it up with buddy_service_tools first. Use one to three queries per call and "medium" or "long" only when short isn't enough; open:[{"ref_id":…}] reads one result."#
+            : #"Web search: call mcp__codex_apps__search_service_web_run directly (tools.mcp__codex_apps__search_service_web_run in code); don't search ALL_TOOLS for it. Pass system2_search_query with one to three queries and response_length "short"; ask for "medium" or "long" only when short isn't enough, and open:[{ref_id}] only the results you need. Its whole answer stays in your context, so in code print only the parts you use."#
+    }
+    static func guidance(provider:String,model:String,webSearch:Bool=false)->String {
         let engine=provider=="claude" ? "Claude through the Claude Agent SDK":"OpenAI through Codex app-server"
         return """
         Native Buddy runtime facts (authoritative over older capability claims):
@@ -62,7 +69,7 @@ enum BuddyRuntimeCapabilities {
         When buddy_computer_task is provided, use it directly for requested website work. The native private browser is separate from connected services and uses this agent's selected provider/model; a Claude browser task does not need ChatGPT connected or a website-specific plugin. Choose execution automatically from the user's goal, without requiring the words background or worker. Its persistent profile reuses website sessions; private sign-in and native action reviews still apply. A missing connector does not establish that the website cannot be used. Capability questions and hypothetical examples do not request execution.
         When buddy_build_team is provided, explicit current human creation requests can register real teams and agents directly. Unsolicited team ideas need approval. A saved team creates its group chat and editable teammate instructions; it does not itself launch work. Use the tool’s native created/proposed status and IDs.
         When buddy_team is provided, it reads actual teammate work and requests real private status responses. The saved supervisor checks participating agents proactively; other agents message the user proactively only when enabled. Check-ins cannot create or reassign work. An accepted check-in is queued, not answered. Use native receipts before claiming progress, saved settings or learned instructions. Automatic instruction learning uses the connected Claude API, stores exact user-message sources and remains editable in this agent's settings.
-        """
+        """ + (webSearch ? "\n" + Self.webSearch(provider: provider) : "")
     }
 }
 

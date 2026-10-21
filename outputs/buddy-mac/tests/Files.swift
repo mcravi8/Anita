@@ -145,5 +145,63 @@ import Darwin
             require((escaped["copied"] as? [Any])?.isEmpty == true && (escaped["failed"] as? [Any])?.count == 1 && leaked.isEmpty, "a copy never follows a link out of the project")
         }
         print("PASS: native copy of connected-folder files into a project: large files, partial failure, repeat, originals untouched, and no link escape")
+        // What an agent sees of a folder costs its context: paths and sizes two levels down, and a folder it didn't open says what it holds so
+        // the agent lists that one next. The whole tree stays one depth away, within the same 200 files and 500 folders as before.
+        do {
+            let base = fm.temporaryDirectory.appendingPathComponent("buddy-listing-test-" + UUID().uuidString), tree = base.appendingPathComponent("Research"), listSupport = base.appendingPathComponent("Support")
+            defer { try? fm.removeItem(at: base) }
+            for directory in ["notes", "data/raw/2024", "data/clean", "deep/a/b/c", "node_modules/dep"] { try fm.createDirectory(at: tree.appendingPathComponent(directory), withIntermediateDirectories: true) }
+            func put(_ path: String, _ text: String = "x") throws { try Data(text.utf8).write(to: tree.appendingPathComponent(path)) }
+            try put("README.md", "hello"); try put("notes/plan.md", "plan"); try put("data/clean/prices.csv", "1,2"); try put("data/raw/2024/jan.csv"); try put("deep/a/b/c/target.txt", "target"); try put("node_modules/dep/index.js"); try put(".env", "secret")
+            for n in 0..<30 { try put("data/raw/f\(n).csv") }
+            let listWorkspace = UUID().uuidString, lister = BuddyProjectFiles(support: listSupport), home = try lister.scope(listWorkspace)
+            let treeID = try lister.addFolder(listWorkspace, to: tree)["folderId"] as! String
+            func listing(_ arguments: [String: Any]) throws -> [String: Any] { try lister.call(home, tool: "buddy_list_files", arguments: arguments.merging(["folderId": treeID]) { mine, _ in mine }, actor: "a", actorName: "A") }
+            func paths(_ result: [String: Any], _ key: String) -> [String] { (result[key] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String } }
+            func folder(_ result: [String: Any], _ path: String) -> [String: Any] { (result["subfolders"] as? [[String: Any]])?.first { $0["path"] as? String == path } ?? [:] }
+            func held(_ result: [String: Any], _ path: String) -> [Int] { let entry = folder(result, path); return [entry["moreFiles"] as? Int ?? 0, entry["moreFolders"] as? Int ?? 0] }
+
+            let shallow = try listing([:])
+            require(paths(shallow, "files") == ["notes/plan.md", "README.md"], "by default an agent sees two levels: \(paths(shallow, "files"))")
+            require((shallow["files"] as? [[String: Any]])?.allSatisfy { Set($0.keys) == ["path", "bytes"] } == true && (shallow["files"] as? [[String: Any]])?.first { $0["path"] as? String == "README.md" }?["bytes"] as? Int == 5, "a file is its path and size, nothing else")
+            require(paths(shallow, "subfolders") == ["data", "data/clean", "data/raw", "deep", "deep/a", "node_modules", "notes"], "every folder it reached is named: \(paths(shallow, "subfolders"))")
+            require(held(shallow, "data/raw") == [30, 1] && held(shallow, "data/clean") == [1, 0] && held(shallow, "deep/a") == [0, 1] && held(shallow, "notes") == [0, 0] && held(shallow, "data") == [0, 0], "a folder below the depth says how many files and folders it holds")
+            require(folder(shallow, "node_modules")["omitted"] as? Bool == true && held(shallow, "node_modules") == [0, 0], "a dependency folder is named but not opened")
+            let note = shallow["note"] as? String ?? ""
+            require(shallow["complete"] as? Bool == false && note.contains("31 files") && note.contains("2 folders") && note.contains("path"), "the listing says what it left out and how to list it: \(note)")
+            for key in ["folders", "location", "workspace", "maximumBytes", "directories", "limited", "managed", "primary"] { require(shallow[key] == nil, "no \(key) in what the agent sees") }
+            require(shallow["folderId"] as? String == treeID && shallow["name"] as? String == "Research", "the listing names its folder")
+
+            let top = try listing(["depth": 1])
+            require(paths(top, "files") == ["README.md"] && held(top, "data") == [0, 2] && held(top, "notes") == [1, 0] && held(top, "deep") == [0, 1], "depth 1 is this folder alone, with what each subfolder holds")
+            let raw = try listing(["path": "data/raw", "depth": 1])
+            require(paths(raw, "files").count == 30 && paths(raw, "files").first == "data/raw/f0.csv" && paths(raw, "files").last == "data/raw/f29.csv" && held(raw, "data/raw/2024") == [1, 0] && raw["path"] as? String == "data/raw", "the agent lists a folder it was pointed to with its path")
+            require(try listing(["path": "data/raw"])["complete"] as? Bool == true, "a folder within the depth is listed completely")
+
+            let whole = try listing(["depth": 8])
+            require(Set(paths(whole, "files")) == Set(["README.md", "notes/plan.md", "data/clean/prices.csv", "data/raw/2024/jan.csv", "deep/a/b/c/target.txt"] + (0..<30).map { "data/raw/f\($0).csv" }) && whole["complete"] as? Bool == true && whole["note"] == nil, "depth 8 reaches the whole tree, as every listing did before")
+            require(!paths(whole, "files").contains("node_modules/dep/index.js") && !paths(whole, "files").contains(".env"), "dependency folders and hidden files stay out")
+
+            // A crowded folder stops at 200 files, top level first, and every folder past the limit says what it still holds.
+            try fm.createDirectory(at: tree.appendingPathComponent("lots"), withIntermediateDirectories: true)
+            for n in 0..<210 { try put("lots/n\(n).txt") }
+            let crowded = try listing(["depth": 8]), listed = paths(crowded, "files")
+            require(listed.count == 200 && listed.contains("README.md") && !listed.contains { $0.split(separator: "/").count > 2 } && crowded["complete"] as? Bool == false, "a listing stops at 200 files, nearest first")
+            // Breadth first, by name: lots fills the listing before notes, and folders queued after that are only counted, one level in.
+            require(held(crowded, "lots") == [11, 0] && held(crowded, "notes") == [1, 0] && held(crowded, "data/clean") == [1, 0] && held(crowded, "data/raw") == [30, 1] && held(crowded, "deep/a") == [0, 1], "every folder past the limit says what it still holds")
+            let cutNote = crowded["note"] as? String ?? ""
+            require(cutNote.contains("200 files") && cutNote.contains("43 files") && cutNote.contains("2 folders"), "the note says where it stopped and how much is left: \(cutNote)")
+            let lots = try listing(["path": "lots"])
+            let lotsNote = lots["note"] as? String ?? ""
+            require(paths(lots, "files").count == 200 && lotsNote == "A listing stops at 200 files and 500 folders. Not listed: 10 files directly in this folder, after the ones shown by name.", "a single folder of 210 files lists 200 and says 10 more are in it: \(lotsNote)")
+
+            for bad: Any in [0, 9, "two", 2.5] { rejects("invalid_arguments") { _ = try listing(["depth": bad]) } }
+            let tool = BuddyProjectFiles.tools.first { $0["name"] as? String == "buddy_list_files" } ?? [:]
+            let properties = (tool["inputSchema"] as? [String: Any])?["properties"] as? [String: Any] ?? [:], depthSchema = properties["depth"] as? [String: Any] ?? [:]
+            require(depthSchema["type"] as? String == "integer" && depthSchema["minimum"] as? Int == 1 && depthSchema["maximum"] as? Int == 8 && Set(properties.keys) == ["folderId", "path", "depth"], "the schema offers depth 1–8: \(properties)")
+            let description = tool["description"] as? String ?? ""
+            require(description.contains("moreFiles") && description.contains("path") && description.contains("depth"), "the description tells the agent how to list deeper: \(description)")
+        }
+        print("PASS: an agent's folder listing is shallow paths and sizes, says what it left out, and reaches the whole tree on request")
     }
 }

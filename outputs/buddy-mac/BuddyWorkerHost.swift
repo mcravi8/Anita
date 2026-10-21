@@ -1476,8 +1476,10 @@ import Darwin
         service.computerPermission = { _, _ in false }
         service.extraToolHandler = { [weak self] tool, args, _ in guard let self else { throw BuddyWorkerFailure(message: "Worker stopped.") }; return try await self.tool(tool, args, job: job) }
         service.onEvent = { [weak self] event in self?.event(event, job: job) }
+        // A ChatGPT task is told about web search by its conversation, which knows whether the connector is there; Claude reaches it through Buddy.
+        let webSearch = job["provider"] as? String == "claude" && permitted(job, tool: "web") && (try? providerSettings.current(workspace).chatgptEnabled) == true
         let instructions = """
-        \(BuddyRuntimeCapabilities.guidance(provider:job["provider"] as? String ?? "chatgpt",model:claudeModel ?? job["model"] as? String ?? (job["provider"] as? String=="claude" ? "claude-sonnet-4-6":"OpenAI account default")))
+        \(BuddyRuntimeCapabilities.guidance(provider:job["provider"] as? String ?? "chatgpt",model:claudeModel ?? job["model"] as? String ?? (job["provider"] as? String=="claude" ? "claude-sonnet-4-6":"OpenAI account default"),webSearch:webSearch))
         \(BuddyInboxReview.guidance)
         You are \(a["name"] as? String ?? "Buddy"), a background worker in Buddy. \(a["role"] as? String ?? "")
         User configuration: \(a["description"] as? String ?? "")

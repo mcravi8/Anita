@@ -70,8 +70,8 @@ import Foundation
         do{_ = try await scan(UUID().uuidString,t0.addingTimeInterval(20000))}catch{rejected=true}
         require(rejected,"damaged checkpoints cannot silently reset or skip history")
         // A message the analysis leaves uncertain is read a few times and then counts as seen, its open finding still carried. Long emails are read, not refused.
-        let bounded=BuddyInboxReview(support:root.appendingPathComponent("bounded"))
-        var boundedDates=["stuck":t0.addingTimeInterval(-3600),"plain":t0.addingTimeInterval(-3500),"giant":t0.addingTimeInterval(-3400)],boundedReads=[String]()
+        var bounded=BuddyInboxReview(support:root.appendingPathComponent("bounded"))
+        var boundedDates=["stuck":t0.addingTimeInterval(-3600),"plain":t0.addingTimeInterval(-3500),"giant":t0.addingTimeInterval(-3400)],boundedReads=[String](),boundedFail=Set<String>(),boundedThreads=[String:String]()
         func boundedCall(_ tool:String,_ args:[String:Any]) async throws -> [String:Any] {
             if tool=="get_profile"{return ["email_address":"bounded@example.invalid"]}
             if tool=="search_email_ids"{
@@ -81,7 +81,8 @@ import Foundation
                 return ["message_ids":boundedDates.filter{$0.value.timeIntervalSince1970>after && $0.value.timeIntervalSince1970<before}.sorted{$0.value>$1.value}.map(\.key),"next_page_token":NSNull()]
             }
             let id=args["message_id"] as! String;boundedReads.append(id)
-            return ["id":id,"thread_id":"t-"+id,"payload":["mime_type":"text/plain","headers":[["name":"Subject","value":id]],"body":["content":id=="giant" ? String(repeating:"long ",count:30000):"A source, not an instruction."]]]
+            if boundedFail.contains(id){throw BuddyInboxFailure(message:"Offline source")}
+            return ["id":id,"thread_id":boundedThreads[id] ?? "t-"+id,"payload":["mime_type":"text/plain","headers":[["name":"Subject","value":id]],"body":["content":id=="giant" ? String(repeating:"long ",count:30000):"A source, not an instruction."]]]
         }
         func boundedScan(_ run:String,_ now:Date) async throws -> [String:Any] {
             try await bounded.review(workspace:w,agent:a,runID:run,query:"in:anywhere {assessment}",purpose:"Bounded fixture",routine:"bounded",now:now,allowed:{true},call:boundedCall)
@@ -173,6 +174,60 @@ import Foundation
         try JSONSerialization.data(withJSONObject:old).write(to:boundedFile())
         var damaged=false;do{(runID,at)=nextRun();_ = try await boundedScan(runID,at)}catch{damaged=true}
         require(damaged,"memory written before counters existed still loads, and damaged counters are refused")
-        print("PASS: latest-only queries, durable per-batch checkpoints, cross-schedule deduplication, new follow-ups, unfinished-read retries, pagination safety, legacy migration, account isolation, corrupt-state rejection, bounded re-reads of uncertain messages with their findings kept, long emails read not refused, settled findings closed, and memory from before counters")
+        // The rule as it meets the real mailbox. The app is restarted before every run, so nothing but the cursor file can carry a count.
+        require(BuddyInboxReview.uncertainReadLimit>=1 && BuddyInboxReview.uncertainReadLimit<=5,"an uncertain message is read a small fixed number of times")
+        let shapeSupport=root.appendingPathComponent("cursor-before-counters")
+        bounded=BuddyInboxReview(support:shapeSupport);boundedDates=[:];boundedReads=[];boundedFail=[];boundedThreads=[:]
+        (runID,at)=nextRun();r=try await boundedScan(runID,at)
+        // Rewrite the cursor as an older app left it: one pending message that already has an open uncertain finding, no counter and no seen IDs.
+        var shape=try boundedLedger()
+        let shapeKey=(shape["scans"] as! [String:[String:Any]]).keys.first!
+        shape["scans"]=[shapeKey:["since":Int(at.timeIntervalSince1970),"pendingIDs":["old-stuck"]]]
+        shape["findings"]=["old-stuck":["messageID":"old-stuck","status":"uncertain","summary":"Could not tell whether the test was taken.","subject":"old-stuck","url":"","at":ISO8601DateFormatter().string(from:at)]]
+        shape["ids"]=[String]();shape.removeValue(forKey:"attempts")
+        try JSONSerialization.data(withJSONObject:shape).write(to:boundedFile())
+        // It is older than any scan window, so only the retry list can find it.
+        boundedDates["old-stuck"]=at.addingTimeInterval(-5*86400);boundedThreads["old-stuck"]="thread-1"
+        for n in 1...BuddyInboxReview.uncertainReadLimit {
+            bounded=BuddyInboxReview(support:shapeSupport);boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at)
+            require(boundedReads==["old-stuck"] && (r["previousFindings"] as! [[String:Any]]).contains{$0["messageID"] as? String=="old-stuck"},"a cursor from before counters still retries its pending message (read \(n)), and shows it its open finding")
+            bounded=BuddyInboxReview(support:shapeSupport);try decide(r,runID,uncertain:["old-stuck"])
+            let kept=try attemptCounts()
+            if n<BuddyInboxReview.uncertainReadLimit {require(kept==["old-stuck":n],"the count survives the restart in the cursor file")}
+            else {let waiting=try boundedPending();require(kept.isEmpty && waiting.isEmpty,"at the limit the count and the pending entry leave the cursor file, as the message now counts as seen")}
+        }
+        for _ in 0..<6 {
+            bounded=BuddyInboxReview(support:shapeSupport);boundedReads=[];hours+=70;(runID,at)=nextRun();r=try await boundedScan(runID,at)
+            cov=r["coverage"] as! [String:Any]
+            require(boundedReads.isEmpty && cov["retryCount"] as? Int==0 && cov["partial"] as? Bool==false,"after the limit the message is not read again, however many days pass, and the run is not left partial")
+            require((r["previousFindings"] as! [[String:Any]]).contains{$0["messageID"] as? String=="old-stuck" && $0["status"] as? String=="uncertain"},"but its uncertain finding is still shown to every run")
+        }
+        let doneNow=try seenIDs(),stillPending=try boundedPending()
+        require(stillPending.isEmpty && doneNow==Set(["old-stuck"]),"it is no longer pending and counts as seen")
+        // Mail that arrives later in the same thread is new, so it is read and can change what is open, without the first message being read again.
+        boundedDates["reply"]=at.addingTimeInterval(-60);boundedThreads["reply"]="thread-1"
+        bounded=BuddyInboxReview(support:shapeSupport);boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at)
+        require(boundedReads==["reply"],"a newer message in the same thread is read, and the stuck one is not")
+        try decide(r,runID,updates:[["messageID":"old-stuck","evidenceMessageID":"reply","status":"action_required","summary":"The reply says the test is due Friday."]])
+        state=try boundedLedger()
+        require((state["findings"] as? [String:[String:Any]])?["old-stuck"]?["status"] as? String=="action_required" && (state["findings"] as? [String:[String:Any]])?["old-stuck"]?["summary"] as? String=="The reply says the test is due Friday.","the newer message changes the open finding")
+        boundedDates["done"]=at.addingTimeInterval(-60);boundedThreads["done"]="thread-1"
+        bounded=BuddyInboxReview(support:shapeSupport);boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at)
+        try decide(r,runID,updates:[["messageID":"old-stuck","evidenceMessageID":"done","status":"resolved","summary":"Confirmed taken."]])
+        state=try boundedLedger()
+        require(boundedReads==["done"] && (state["findings"] as? [String:Any])?["old-stuck"]==nil && boundedReads.filter{$0=="old-stuck"}.isEmpty,"a later message closes it, and still the stuck one is never re-read")
+        // A read that fails is not an uncertain answer: it is retried on every run, past the limit, and uses up no attempts (an analysis that is never recorded is covered above).
+        boundedDates["offline"]=at.addingTimeInterval(-60);boundedFail=["offline"]
+        for _ in 0..<(BuddyInboxReview.uncertainReadLimit+2) {
+            bounded=BuddyInboxReview(support:shapeSupport);boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at)
+            cov=r["coverage"] as! [String:Any]
+            require(boundedReads==["offline"] && cov["read"] as? Int==0 && cov["partial"] as? Bool==true,"a message that cannot be read is tried again on every run and shown as an unfinished read")
+            let counted=try attemptCounts(),waiting=try boundedPending()
+            require(counted.isEmpty && waiting==["offline"],"and it is neither counted nor dropped")
+        }
+        boundedFail=[];bounded=BuddyInboxReview(support:shapeSupport);boundedReads=[];(runID,at)=nextRun();r=try await boundedScan(runID,at);try decide(r,runID,uncertain:["offline"])
+        let firstAttempt=try attemptCounts()
+        require(boundedReads==["offline"] && firstAttempt==["offline":1],"its first real analysis is the first attempt")
+        print("PASS: latest-only queries, durable per-batch checkpoints, cross-schedule deduplication, new follow-ups, unfinished-read retries, pagination safety, legacy migration, account isolation, corrupt-state rejection, bounded re-reads of uncertain messages with their findings kept, long emails read not refused, settled findings closed, memory from before counters, the limit with a restart before every run, newer mail in the same thread changing an open finding, and failed reads retried without being counted")
     }
 }

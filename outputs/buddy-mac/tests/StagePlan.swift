@@ -520,6 +520,39 @@ import Foundation
             print("PASS: a plan task whose run the user paused (on the task, with Pause all, or by stopping the plan) waits for the user to resume it: never “waiting on the supervisor”, not counted as needing the user, and the plan reads paused when nothing else goes on; a stall stays the supervisor's")
         }
 
+        // 14. Stopping the plan pauses its runs (user.plan_stop); authorizing the stage again lets them go on ("You can choose a stage again
+        // later"). Only the plan task's current run that the stop paused goes on: not one the user paused by itself afterwards, not one that may
+        // have sent something (its action is unconfirmed), not an older run, and nothing while the plan is still stopped.
+        do {
+            let (store14, plans14, _) = try fresh(root, "stop-resume")
+            let tasks14: [[String: Any]] = [tasks[0], ["stage": 1, "key": "tb", "title": "Collect the sources", "assignee": vera, "kind": "research", "brief": "Collect the sources.", "deliverable": "sources.md"],
+                                            ["stage": 1, "key": "tc", "title": "Draft the email", "assignee": vera, "kind": "general", "brief": "Draft the email to the authors.", "deliverable": "A draft"], tasks[2]]
+            let plan14 = try plans14.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Reproduce the Omori results", stages: stages, tasks: tasks14, members: members, by: chief)
+            let (planID14, _, keys14) = ids(plan14)
+            let p1 = keys14["t1"] ?? "", pb = keys14["tb"] ?? "", pc = keys14["tc"] ?? ""
+            _ = try plans14.authorize(planId: planID14, through: 1, quote: "get stage 1 done", messageId: "m14", viaButton: false, now: Date())
+            let started14 = try step(store14, plans14)
+            require(started14.count == 3, "the three stage-1 tasks start: \(started14)")
+            let run1 = jobs(store14, p1).first?["id"] as? String ?? "", runB = jobs(store14, pb).first?["id"] as? String ?? "", runC = jobs(store14, pc).first?["id"] as? String ?? ""
+            for id in [run1, runB, runC] { try store14.update(id, ["status": "running", "attempt": 1, "executionRunID": UUID().uuidString]) }
+            // The person stops the plan; the worker pauses every open run (as the host does). One had an action in flight: it is unconfirmed now.
+            let open14 = try plans14.stop(planId: planID14)
+            require(Set(open14) == [run1, runB, runC], "the stop returns the open runs: \(open14)")
+            for id in open14 { try store14.update(id, ["status": "paused", "stopCause": "user.plan_stop", "progress": "Paused: you stopped the team plan."]) }
+            try store14.update(runC, ["reviews": [["id": "email-1", "kind": "connected", "status": "uncertain", "tool": ["name": "Send email"]]]])
+            _ = try step(store14, plans14)
+            require(try plans14.stoppedRuns(planId: planID14, jobs: store14.jobs).isEmpty, "nothing goes on while the plan is stopped")
+            // Afterwards the person pauses one of them by itself.
+            try store14.update(runB, ["stopCause": "user.pause", "progress": "Paused."])
+            _ = try plans14.authorize(planId: planID14, through: 1, quote: "get stage 1 done again", messageId: "m14b", viaButton: false, now: Date())
+            require(try plans14.stoppedRuns(planId: planID14, jobs: store14.jobs) == [run1], "only the run the stop paused, with nothing unconfirmed, goes on: \(try plans14.stoppedRuns(planId: planID14, jobs: store14.jobs))")
+            _ = try store14.resume(run1)
+            for _ in 0..<2 { require(try step(store14, plans14).isEmpty, "resuming the run starts no second worker task") }
+            require(try task(plans14, planID14, p1)["status"] as? String == "dispatched" && jobs(store14, p1).count == 1, "the task goes on with its run")
+            require(try plans14.stoppedRuns(planId: planID14, jobs: store14.jobs).isEmpty, "once going, nothing more to resume")
+            print("PASS: authorizing a stage again after the person stopped the plan lets the runs the stop paused go on, with no second worker task; a run the person paused by itself, one with an unconfirmed action, and anything while the plan is stopped stay paused")
+        }
+
         // 8. Graceful read.
         let empty = root.appendingPathComponent("empty")
         _ = try BuddyWorkerStore(directory: empty.appendingPathComponent("Worker"))

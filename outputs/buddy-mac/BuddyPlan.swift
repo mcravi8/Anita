@@ -557,6 +557,22 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         }
         return open
     }
+    /// The runs the user's stop paused (`user.plan_stop`) that go on once the user authorizes their stage again: each the current run of an
+    /// open task of an authorized stage, with nothing that may have been sent (an unconfirmed action is the user's to check first). A run the
+    /// user paused by itself, an older run, and anything while the plan is stopped stay as they are.
+    func stoppedRuns(planId: String, jobs: [[String: Any]]) throws -> [String] {
+        guard let plan = try planRow(planId), plan.status == "active", let scope = try activeScope(planId) else { return [] }
+        let byID = Self.index(jobs)
+        var out: [String] = []
+        for stage in try stageRows(planId) where stage.n <= scope.through && !["done", "superseded"].contains(stage.status) {
+            for task in try taskRows(stage: stage.id) where ["dispatched", "blocked"].contains(task.status) {
+                guard let job = byID[task.workerTaskId], job["status"] as? String == "paused", job["stopCause"] as? String == "user.plan_stop",
+                      !(job["reviews"] as? [[String: Any]] ?? []).contains(where: { ["uncertain", "dispatched"].contains($0["status"] as? String ?? "") }) else { continue }
+                out.append(task.workerTaskId)
+            }
+        }
+        return out
+    }
 
     // MARK: following the worker
 

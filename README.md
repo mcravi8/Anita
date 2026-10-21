@@ -1,79 +1,166 @@
-# Anita
+# Buddy
 
-A personal AI workspace with configurable agents, individual chats, and group teamwork. This repository contains the Buddy macOS app and its web frontend.
+**A team of AI agents on your Mac that takes a job from start to finish, and only asks you what matters.**
 
-## Features
+Give Buddy an objective and its supervisor, Chief, splits it into stages and tasks for
+your agents. Say "get stage 1 done" and the team works through that stage on its own,
+with your files, your browser accounts and your sign-ins, while the agents never see a
+password. It runs on your ChatGPT subscription or your Claude API key.
 
-- Configurable agents with independent conversations, roles, appearances, instructions, and access settings.
-- **Team plans that run on their own.** Chief splits an objective into stages, each with tasks for named agents, and asks which stage to do. Say "get stage 1 done" (or tap the stage button on the plan strip) and the team works through that stage without waiting for you: each task starts when its inputs are ready, Chief reviews results, reworks or accepts them, plans an empty stage itself, and the team stops at the end of the stage with one report.
-- **Agents decide by default.** Only sign-ins and credentials, money, anything sent or deleted in your name, changes to the plan, and facts only you know come to you; everything else goes to the team's supervisor (Chief), who decides in the background and records why.
-- **Work recovers by itself.** Restarts, stalls, step caps, dropped connections and connector failures retry within bounds and then go to the supervisor; a stop is never silent, and nothing waits for you unless it is on that short list.
-- Halftone dot figures whose motion shows what each agent is really doing, one dot field behind the chat list, and Light, Dark or Match system appearance.
-- Live progress in every chat: an agent sees its running background work (what is running, since when, the command running now, recent results) and the supervisor sees everyone's; times are always in your own time zone.
-- Adaptive setup in each new agent's chat, turned into editable instructions; standing preferences you state are saved as directives that override older instructions.
-- Agents create requested teams and teammates, with editable briefs and approval for unsolicited suggestions.
-- Group coordination with assignments, dependent handoffs, and one shared response.
-- **ChatGPT or Claude, switchable in one step.** Settings → AI provider → "Switch all agents to …" previews and moves every agent to the matching model on the other side (by the account's own model descriptions), and switching back restores each agent's previous model. ChatGPT uses your subscription through the local Codex app-server; Claude uses Console/API credits.
-- Coding sessions on the agent's own provider: Claude Code on Claude, Codex on ChatGPT, always in a private copy of the project with network and outside writes behind your review.
-- Connected services for research, email, and other supported tools, with action reviews.
-- Connected-folder files with version checks, recoverable edits, and in-app previews.
-- Word paragraph editing, Excel cell and formula editing, PDF forms and annotations, Markdown, HTML, and code.
-- Reviewed control of applications on the connected Mac.
-- Durable background tasks with a separate local browser and files, saved results, approvals, and pause/resume.
-- Spending: runs have no limit of their own; an optional daily limit per agent is the only thing that stops paid work, and a run that reaches it pauses and continues by itself the next day or when the limit is raised.
+[Get started](#get-started)
+· [Go further](#go-further)
+· [Development](#development)
+· [Report an issue](https://github.com/mcravi8/Anita/issues)
 
-Independent cloud computers and an always-on remote worker are future work. The local Mac must remain available for local operations. The browser-only frontend is a preview; real conversations and tools run in the native app.
+![Buddy showing a team chat with four agents, the chat list and the dot-field sidebar.](docs/images/buddy.png)
 
-## Source layout
+*The interface with its built-in sample team.*
 
-| Directory | Contents |
-| --- | --- |
-| `outputs/buddy-mac/` | Native Swift app, scoped tools, build script, and native tests |
-| `outputs/buddy-worker/` | Private Playwright browser bridge, optional Claude Agent SDK bridge, pinned dependencies and tests |
-| `outputs/relay/` | Web frontend, assets, vendored dependencies, and frontend tests |
+## What you can do
 
-## Build the Mac app
+- **Hand over a whole objective.** Chief splits it into stages, each with tasks and a
+  clear "done when". Choose a stage and the team runs it to the end: each task starts
+  when its inputs are ready, Chief checks the results, asks for rework or accepts them,
+  and you get one report when the stage is done. The plan and the project's files stay
+  open beside the chat, and you can close or reopen that panel.
+- **Only be asked what matters.** Agents decide by default. Sign-ins, money, anything
+  sent or deleted in your name, changes to the plan and facts only you know come to you.
+  Everything else goes to Chief, who decides in the background and records why.
+- **Approve less, in plain words.** Public downloads into the project are approved for
+  you, and Chief reads a script before letting it run outside the sandbox. What still
+  reaches you reads as one sentence, such as "Chief wants to download 2 files from
+  arxiv.org", with the reason, the exact command under Details, and two buttons:
+  Approve and Disapprove.
+- **Sign in once, for everyone.** Sign in to your accounts in one Chrome window and every
+  agent with internet access can use them. A password or code you type goes into a
+  private field in the chat and only to the page that asked for it. Your WRDS sign-in is
+  kept in your Mac's Keychain, and Duo or any other step you take outside the chat ends
+  with a Done button.
+- **Keep each task on the right account.** Name an account for a task ("use my USC
+  account") and Buddy opens every Google page of that task as that account, and stops
+  instead of acting as another one.
+- **Work with your real files.** Connect folders on your Mac. Agents read and edit the
+  originals with version checks: Word, Excel, PDF forms, Markdown, HTML and code. A file
+  linked in a chat opens in Buddy, and a finished stage shows the files it made.
+- **Code on either provider.** Coding sessions use Claude Code on Claude and Codex on
+  ChatGPT, always in a private copy of the project, and save their results back into
+  your folders.
+- **Switch between ChatGPT and Claude in one step.** Every agent moves to the matching
+  model on the other side, and switching back restores each agent's previous model.
+- **See what is happening.** Each agent's figure moves with what it is really doing, and
+  agents see their own running work: what is running, since when, and the latest result.
+  Times are in your own time zone.
+- **Leave work to run.** Background tasks and scheduled checks keep going between your
+  messages. They recover from restarts, stalls and dropped connections, and a stop is
+  never silent.
 
-Requires macOS 13 or later, Xcode command-line tools, Python 3, Node.js 22+, and Chrome for the worker browser.
+Each agent has its own chat; group chats bring a team together around one objective.
+Buddy has no limit per run: an optional daily limit per agent is the only thing that
+stops paid work, and a run that reaches it continues the next day.
+
+## Get started
+
+You need a Mac with macOS 13 or later, the Xcode command-line tools, Python 3,
+Node.js 22 or later and Google Chrome. For the AI, use a ChatGPT subscription with the
+Codex app signed in, or a Claude API key.
+
+1. Install the background worker's dependencies, then build and install the app:
+
+   ```sh
+   npm ci --ignore-scripts --no-audit --no-fund --prefix outputs/buddy-worker
+   python3 outputs/buddy-mac/build.py --install
+   ```
+
+   This puts a single `Buddy.app` in Applications, for Apple Silicon and Intel.
+2. Open Buddy. In **Settings → AI provider**, connect ChatGPT or add your Claude key.
+3. Open **Background work → Browser sign-in → Open Chrome**. Sign in to Chrome with your
+   Google account, to bring your saved passwords, and to any sites your agents should
+   use. The page then shows which Google accounts are signed in.
+4. Connect a folder under **Buddy desktop**, create your agents or a team, and give
+   Chief an objective. When the plan is ready, say "get stage 1 done".
+
+> **Buddy acts with your accounts.** Every agent with internet access uses the accounts
+> signed in to Buddy's Chrome, so give internet access only to agents that need it.
+> Agents never see your passwords, codes or saved-password contents, and sending,
+> deleting, paying and signing in still wait for you.
+
+Buddy is a personal project. Your ChatGPT or Claude usage follows your provider's plan
+and billing.
+
+<details>
+<summary>Build without installing, or try the interface in a browser</summary>
+
+To produce only `outputs/Buddy-mac.zip`, leave out `--install`. Install that archive
+later with:
 
 ```sh
-npm ci --ignore-scripts --no-audit --no-fund --prefix outputs/buddy-worker
-python3 outputs/buddy-mac/build.py --install
+python3 outputs/buddy-mac/install.py
 ```
 
-Quit Buddy before installing an update (background tasks that were running continue by themselves after the restart). This updates the single `/Applications/Buddy.app`, with Apple Silicon and Intel support and an ad-hoc signature. Build staging is temporary and excluded from search; packages and rollback copies are ZIP archives. Agents, chats, files, browser profiles, and Keychain credentials stay in their existing locations. To produce only `outputs/Buddy-mac.zip`, omit `--install`; to install that archive later, run `python3 outputs/buddy-mac/install.py`. Do not create separate check apps or unpack builds elsewhere. Real conversations also require the supported Codex CLI/app-server and ChatGPT sign-in; see the [native app documentation](outputs/buddy-mac/README.md).
+To update, build and install the same way. Quit Buddy first; running background tasks
+continue by themselves after the restart. Your agents, chats, files, browser profiles
+and Keychain sign-ins stay where they are.
 
-## Preview the frontend
+To look at the interface without the Mac app, serve the frontend and open
+`http://127.0.0.1:4173`:
 
 ```sh
 python3 -m http.server 4173 --bind 127.0.0.1 --directory outputs/relay
 ```
 
-Open `http://127.0.0.1:4173`. See the [frontend documentation](outputs/relay/README.md) for interface details.
+The browser preview uses sample content; real conversations and tools run in the app.
 
-## Run checks
+</details>
 
-Frontend checks require Node.js:
+## What happens when you close your Mac?
+
+Buddy runs on your Mac, so its work pauses while the Mac sleeps and picks up by itself
+when it wakes. A restart or an update doesn't lose work either: running and waiting
+tasks continue afterwards.
+
+To keep the team working with the lid closed, keep the Mac on power and either connect
+an external display or use a keep-awake app in closed-display mode. Don't run it closed
+inside a bag.
+
+Buddy doesn't move work to cloud machines, because they couldn't use your signed-in
+accounts, your Keychain sign-ins or your folders without copying them off your Mac.
+
+## Go further
+
+| Task | Guide |
+| --- | --- |
+| How plans, the supervisor and recovery work | [How Buddy works now](outputs/buddy-mac/README.md#how-buddy-works-now) |
+| Providers, approvals, the private browser and daily limits | [Background worker](outputs/buddy-worker/README.md) |
+| What the private browser refuses on the network | [Network rules](outputs/buddy-worker/README.md#what-the-private-browser-refuses-on-the-network) |
+| Connect folders and edit documents | [Connected folders](outputs/buddy-mac/README.md#connected-folders) |
+| Figures, the dot-field sidebar and appearance | [Interface](outputs/relay/README.md#figures-the-dot-field-sidebar-and-appearance) |
+| What Buddy stores on your Mac | [Local data](outputs/buddy-mac/README.md#local-data) |
+| Every change, release by release | [Native app notes](outputs/buddy-mac/README.md) |
+
+## Development
+
+This repository (Anita) holds the app in three parts:
+
+| Directory | Contents |
+| --- | --- |
+| `outputs/buddy-mac/` | Native Swift app, scoped tools, build and install scripts, native tests |
+| `outputs/buddy-worker/` | Private Chrome bridge, coding-command runner, pinned dependencies and tests |
+| `outputs/relay/` | The interface (web page shown inside the app), assets, vendored dependencies and tests |
+
+Run the checks:
 
 ```sh
 node --test outputs/relay/*.test.js
 node --test outputs/buddy-worker/test/*.test.mjs
-```
-
-Native checks require macOS and Xcode command-line tools:
-
-```sh
 python3 outputs/buddy-mac/run-tests.py
 ```
 
-The native tests use isolated local fixtures rather than personal account actions.
+The native tests use local stand-ins for Claude, Codex, websites and the Keychain.
+They never use your accounts.
 
-## Local data and limits
+Keep exactly one installed app, `/Applications/Buddy.app`, and update it in place; see
+[AGENTS.md](AGENTS.md). Runtime data, sign-ins, built apps and archives stay out of
+version control. Third-party frontend licenses are in `outputs/relay/vendor/`.
 
-Runtime conversations, credentials, connected-folder registrations, file history, local backups, app bundles, and generated archives are excluded from version control. Buddy stores runtime state separately in the user's Application Support folder.
-
-PDF editing covers forms, annotations, page rotation, and additional pages; existing printed text is preserved. Excel recalculates formulas when opened in Excel. See the native documentation for format, size, access, and preview limits.
-
-Third-party frontend dependency licenses are included in `outputs/relay/vendor/`.
-
-See the [background worker guide](outputs/buddy-worker/README.md) for startup, provider connections, approvals, local isolation, recovery, and daily limits.
+Bug reports are welcome as [GitHub issues](https://github.com/mcravi8/Anita/issues).
+Include what you did, what you expected and what Buddy showed.

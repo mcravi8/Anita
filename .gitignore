@@ -3,6 +3,7 @@
 !/.gitignore
 !/README.md
 !/AGENTS.md
+!/docs/
 !/outputs/
 /outputs/*
 !/outputs/buddy-mac/

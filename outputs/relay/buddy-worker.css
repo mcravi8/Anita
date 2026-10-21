@@ -12,3 +12,6 @@
 .worker-decided .bot-bubble{min-width:0}
 .worker-decided .reply-content{min-width:0}
 .worker-decided .reply-content p{margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.worker-plain-request>strong{display:block;font-size:14px;line-height:1.5}.worker-plain-request>p{margin:6px 0 0;font-size:13px;line-height:1.55;color:var(--text2)}
+.worker-plain-request .worker-review-caution{display:block;margin-top:8px;color:var(--text2)}
+.worker-review-details{margin-top:10px;font-size:12px;color:var(--text2)}.worker-review-details>summary{cursor:pointer;width:max-content}.worker-review-details dl{margin-top:8px}

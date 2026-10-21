@@ -287,6 +287,17 @@ import Security
             try require(!FileManager.default.fileExists(atPath: project(id).appendingPathComponent("data/vix.csv").path) && ((done["commands"] as? [[String: Any]]) ?? []).isEmpty && text(done["result"]).contains("declined"), "it did not run: \(done["result"] ?? "")")
             try require(!(try everyDecision(id)).contains { $0.audience == "user" }, "the user was never asked")
         }
+        await section("the supervisor's own routine command goes to its background review too, never to the user (Chief's S01 downloads, 20 Oct 2026)") {
+            try await clearQueue()
+            let id = try await start("NETWORK_ROUTINE_FIXTURE: fetch the VIX history.", as: chief, request: "routine-own")
+            let done: [String: Any]
+            do { done = try await poll(id, "Chief's own routine command is answered", seconds: 60) { ["completed", "failed", "interrupted", "paused", "waiting_user"].contains($0["status"] as? String ?? "") } }
+            catch { throw Failed(message: "\(error) — lane: \((try? await worker(["operation": "status"]))?["supervisorLane"] ?? "-")") }
+            let review = reviews(done).first ?? [:]
+            try require(done["supervisorId"] as? String == chief && done["agentId"] as? String == chief, "the task is Chief's own and Chief supervises it: \(done["agentId"] ?? "-") / \(done["supervisorId"] ?? "-")")
+            try require(review["route"] as? String == "supervisor" && review["answeredBy"] as? String == "supervisor" && review["answeredByName"] as? String == "Chief", "Chief's background review answered it: \(review)")
+            try require(!(try everyDecision(id)).contains { $0.audience == "user" }, "the user was never asked")
+        }
         await section("with the supervisor lane offline (its daily limit used up), a routine command review falls back to the user") {
             try await clearQueue()
             _ = try await worker(["operation": "limit", "scope": "agent", "agentId": chief, "amountUSD": 0.01])

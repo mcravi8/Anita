@@ -70,9 +70,27 @@
     if(words.length>1&&first.length<=16&&last.length<=28)return `${first} … ${last}`;
     return `${line.slice(0,18).trimEnd()}…${line.slice(-18).trimStart()}`;
   }
+  // A coding command's request in everyday words: what it does, from what Buddy itself read in the command (its review's assessment), and
+  // the agent's own reason as the why. Null for anything that isn't a coding command, and for older reviews Buddy didn't assess.
+  function plainRequest(r){
+    const a=r?.tool?.arguments||{};if(r?.kind!=='coding'||typeof a.command!=='string'||!a.command.trim()||!r.assessment||typeof r.assessment!=='object')return null;
+    const said=plain(r.assessment?.reason).replace(/\.$/,'');let m,what=a.sign_in?'sign in with your saved sign-in and run a command':'run a command that uses the internet';
+    if(r.assessment?.routine){
+      if((m=said.match(/^(\d+) downloads from (.+) into the project$/)))what=`download ${m[1]} files from ${m[2]}`;
+      else if((m=said.match(/^A download from (.+) into the project$/)))what=`download a file from ${m[1]}`;
+      else if((m=said.match(/^A download from (.+) \(shown, not saved\)$/)))what=`read a page from ${m[1]}`;
+      else if((m=said.match(/^A clone of a public repository from (.+) into the project$/)))what=`copy a public code repository from ${m[1]}`;
+      else if((m=said.match(/^A fetch of a public repository from (.+) into the project$/)))what=`update a public code repository from ${m[1]}`;
+      else if(/^A package install into the project/.test(said))what='install packages into the project';
+      else if(said)what=said[0].toLowerCase()+said.slice(1);
+    }
+    const why=plain(a.reason).replace(/^(please\s+)?allow(\s+me)?(\s+to)?\s+/i,'').replace(/^(can|may) i\s+/i,'').replace(/[?.!\s]+$/,'');
+    return {what,why:why?why[0].toUpperCase()+why.slice(1):'',caution:r.assessment&&!r.assessment.routine?plain(r.assessment.reason):''};
+  }
   function requestTitle(r){
     if(r?.kind==='checkpoint')return 'Check the work';
-    const a=r?.tool?.arguments||{},name=plain(r?.tool?.name);
+    const a=r?.tool?.arguments||{},name=plain(r?.tool?.name),said=plainRequest(r);
+    if(said)return said.what[0].toUpperCase()+said.what.slice(1);
     if(typeof a.command==='string'&&a.command.trim())return `Request to run \`${shortCommand(a.command)}\``;
     if(!name)return 'Request to continue';
     const action=/^[A-Z][a-z]/.test(name)?name[0].toLowerCase()+name.slice(1):name;
@@ -142,7 +160,7 @@
     const prior=attention(t.status)?state.messages[t.agentId].find(m=>m.workerTaskID===t.id&&attention(m.workerStatus)&&!m.workerDecision&&(m.workerAttempt===message.workerAttempt||m.id.startsWith(`worker-${t.id}-${message.workerAttempt}-`))):null;
     if(prior){if(prior.workerUpdatedAt&&prior.workerUpdatedAt>t.updatedAt)return false;Object.assign(prior,message);}else state.messages[t.agentId].push(message);return true;
   }
-  const api={labels,canResume,needsAllowance,pending,unconfirmed,authTitle,systemPause,signinWait,deliverable,deliveryID,deliverResult,taskMessage,presentation,isApproval,reviewRequest,requestTitle,recordDecision,reconcile,reviewIds,setupOnce};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
+  const api={labels,canResume,needsAllowance,pending,unconfirmed,authTitle,systemPause,signinWait,deliverable,deliveryID,deliverResult,taskMessage,presentation,isApproval,reviewRequest,requestTitle,plainRequest,recordDecision,reconcile,reviewIds,setupOnce};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
   let snapshot={online:false,tasks:[],routines:[],paused:false},detail=null,view='list',routine=null,busy=false,error='',last='',preview=null;
   const drafts=new Map();
@@ -191,6 +209,9 @@
     const data=Object.entries(args).filter(([k])=>!['payload'].includes(k));
     // An approval is answered with Approve or Disapprove; its question is shown as what the buttons answer. Any other question keeps its input.
     const approval=isApproval(r),off=answered.has(r.id)?'disabled':'';
+    // A coding command reads as one line of what it wants to do and why; the command itself is under Details.
+    const said=approval&&plainRequest(r);
+    if(said)return `<section class="worker-review worker-plain-request" data-worker-review="${esc(r.id)}"><strong>${esc(agentName(detail?.agentId||'')||'The agent')} wants to ${esc(said.what)}.</strong>${said.why?`<p>Why: ${esc(said.why)}.</p>`:''}${said.caution?`<small class="worker-review-caution">${esc(said.caution)}</small>`:''}<details class="worker-review-details"><summary>Details</summary>${data.length?`<dl>${data.map(([k,v])=>`<div><dt>${esc(k.replace(/_/g,' '))}</dt><dd>${esc(typeof v==='string'?v:JSON.stringify(v,null,2))}</dd></div>`).join('')}</dl>`:''}</details><div class="worker-toolbar">${button('decline','Disapprove',`data-review-id="${esc(r.id)}" ${off}`)}${button('approve','Approve',`data-review-id="${esc(r.id)}" ${off}`,true)}</div></section>`;
     const asked=(r.questions||[]).map(q=>approval&&approvalQuestion(q)?`<p class="worker-review-question">${esc(q.question)}</p>`:`<fieldset><legend>${esc(q.question)}</legend>${q.options?.length?`<select data-worker-question="${esc(q.id)}"><option value="">Choose…</option>${q.options.map(o=>`<option value="${esc(o.label)}" ${drafts.get(r.id)?.[q.id]===o.label?'selected':''}>${esc(o.label==='Accept'?'Approve once':o.label)}</option>`).join('')}</select>`:`<textarea data-worker-question="${esc(q.id)}" rows="3" maxlength="10000">${esc(drafts.get(r.id)?.[q.id]||'')}</textarea>`}</fieldset>`).join('');
     return `<section class="worker-review" data-worker-review="${esc(r.id)}"><strong>${esc(r.tool?.name||'Review action')}</strong><small>${esc(r.tool?.service||'Buddy private browser')}</small>${data.length?`<dl>${data.map(([k,v])=>`<div><dt>${esc(k.replace(/_/g,' '))}</dt><dd>${esc(typeof v==='string'?v:JSON.stringify(v,null,2))}</dd></div>`).join('')}</dl>`:''}${asked}<div class="worker-toolbar">${button('decline',approval?'Disapprove':'Cancel action',`data-review-id="${esc(r.id)}" ${off}`)}${button('approve',approval?'Approve':'Continue',`data-review-id="${esc(r.id)}" ${off}`,true)}</div></section>`;
   }

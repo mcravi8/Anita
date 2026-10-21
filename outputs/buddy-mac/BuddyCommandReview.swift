@@ -37,26 +37,36 @@ enum BuddyCommandReview {
             segments = inner
         }
         let root = URL(fileURLWithPath: project).resolvingSymlinksInPath().standardizedFileURL
-        var hosts: [String] = [], writes: [String] = [], kinds: [String] = []
+        var hosts: [String] = [], writes: [String] = [], kinds: [String] = [], downloads: [Part] = []
         for segment in segments {
             switch simple(segment, root: root) {
             case .failure(let refusal): return sensitive(refusal.reason, hosts: hosts)
-            case .success(let part): hosts += part.hosts; writes += part.writes; kinds.append(part.kind)
+            case .success(let part):
+                hosts += part.hosts; writes += part.writes
+                if part.kind.hasPrefix("a download from ") { downloads.append(part) } else if part.kind != "folder" { kinds.append(part.kind) }
             }
         }
-        let uniqueHosts = Array(NSOrderedSet(array: hosts)) as? [String] ?? hosts, uniqueWrites = Array(NSOrderedSet(array: writes)) as? [String] ?? writes
-        let what = kinds.filter { $0 != "folder" }
-        let summary = what.isEmpty ? "It only makes folders in the project." : (Array(NSOrderedSet(array: what)) as? [String] ?? what).joined(separator: "; ")
+        func unique(_ list: [String]) -> [String] { Array(NSOrderedSet(array: list)) as? [String] ?? list }
+        let uniqueHosts = unique(hosts), uniqueWrites = unique(writes)
+        // Several downloads read as one phrase ("3 downloads from arxiv.org and iop.org into the project"), so the person sees one line.
+        let files = downloads.reduce(0) { $0 + max(1, $1.hosts.count) }
+        let fetched: [String] = files == 1 ? [downloads[0].kind] : files > 1 ? ["\(files) downloads from \(listed(unique(downloads.flatMap(\.hosts)))) into the project"] : []
+        let what = fetched + unique(kinds)
+        let summary = what.isEmpty ? "It only makes folders in the project." : what.joined(separator: "; ")
         return Verdict(routine: true, reason: summary.prefix(1).uppercased() + summary.dropFirst() + (summary.hasSuffix(".") ? "" : "."), hosts: uniqueHosts, writes: uniqueWrites)
     }
+
+    /// "a", "a and b", "a, b and c".
+    static func listed(_ items: [String]) -> String { items.count <= 2 ? items.joined(separator: " and ") : items.dropLast().joined(separator: ", ") + " and " + items[items.count - 1] }
 
     static let secretMarks = [".ssh", "id_rsa", "id_ed25519", "id_ecdsa", ".pgpass", ".netrc", ".aws", ".env", ".npmrc", ".pypirc", ".git-credentials", ".docker/config", "keychain",
                               "security find", "token", "password", "passwd", "secret", "credential", "api_key", "apikey", "pgpassword", "/etc/", "library/application support"]
 
     // MARK: reading the words
 
-    /// The command as simple commands joined by `&&`, each a list of words, or nil when it uses anything else of the shell (pipes,
-    /// redirections, `;`, `||`, background `&`, substitutions, variables, globs, history, comments, a backslash) or leaves a quote open.
+    /// The command as simple commands joined by `&&`, `;` or a new line (each one is judged on its own, so running one after another is no
+    /// riskier than one at a time), each a list of words, or nil when it uses anything else of the shell (pipes, redirections, `||`,
+    /// background `&`, substitutions, variables, globs, history, comments, a backslash) or leaves a quote open.
     static func words(_ text: String) -> [[String]]? {
         var segments: [[String]] = [], current: [String] = [], word = "", started = false
         var single = false, double = false
@@ -65,7 +75,7 @@ enum BuddyCommandReview {
         func endWord() { if started { current.append(word) }; word = ""; started = false }
         while i < chars.count {
             let c = chars[i]
-            if c == "\n" || c == "\r" || c == "\0" { return nil }
+            if c == "\r" || c == "\0" { return nil }
             if single { if c == "'" { single = false } else { word.append(c) }; i += 1; continue }
             if double {
                 if c == "\"" { double = false } else if "$`\\!".contains(c) { return nil } else { word.append(c) }
@@ -79,8 +89,11 @@ enum BuddyCommandReview {
                 guard i + 1 < chars.count, chars[i + 1] == "&" else { return nil }
                 endWord(); guard !current.isEmpty else { return nil }
                 segments.append(current); current = []; i += 1
+            case "\n", ";":
+                // Codex writes several commands as lines of one script. A blank line, or a line break after `&&`, adds nothing.
+                endWord(); if !current.isEmpty { segments.append(current); current = [] }
             default:
-                if ";|<>()$`{}*?[]!~#\\^".contains(c) { return nil }
+                if "|<>()$`{}*?[]!~#\\^".contains(c) { return nil }
                 word.append(c); started = true
             }
             i += 1

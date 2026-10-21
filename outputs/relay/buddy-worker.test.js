@@ -121,6 +121,21 @@ test('an approval review is answered with Approve or Disapprove, and each sends 
  assert.deepEqual(worker.reviewRequest('task',{id:'q',questions:[{id:'name',question:'Which name?'}]},{name:'Ada'},'approve'),{operation:'review',taskId:'task',id:'q',answers:{name:['Ada']},cancel:false,accept:false},'a plain question is answered as before');
 });
 
+test('a coding command Buddy assessed reads as what it does and why, in everyday words (Chief’s real S01 requests)',()=>{
+ const s01=(command,reason,assessment)=>({id:'r',kind:'coding',status:'pending',assessment,tool:{name:'Run command outside the sandbox',service:'Buddy coding project',arguments:{command,reason,project:'/x/Files',access:'Runs outside the project sandbox.'}},questions:[{id:'command',question:'Allow this command to run outside the project sandbox, with network access?',options:[{label:'Accept'},{label:'Decline'}]}]});
+ const two=s01("/bin/zsh -lc 'curl -fL --max-time 90 https://download.documentfoundation.org/libreoffice/stable/26.8.1/mac/aarch64/ -o a.html\ncurl -fL --max-time 90 https://arxiv.org/html/2106.07040 -o b.html'",'Allow checking the LibreOffice package URL and an alternate full-text record for the paper?',{routine:true,reason:'2 downloads from download.documentfoundation.org and arxiv.org into the project.',hosts:['download.documentfoundation.org','arxiv.org'],writes:['a.html','b.html']});
+ assert.deepEqual(worker.plainRequest(two),{what:'download 2 files from download.documentfoundation.org and arxiv.org',why:'Checking the LibreOffice package URL and an alternate full-text record for the paper',caution:''});
+ assert.equal(worker.requestTitle(two),'Download 2 files from download.documentfoundation.org and arxiv.org');
+ const one=s01("/bin/zsh -lc 'curl -fL https://arxiv.org/pdf/2106.07040 -o m.pdf'",'Allow downloading the second public full paper required for S01 verification?',{routine:true,reason:'A download from arxiv.org into the project.',hosts:['arxiv.org'],writes:['m.pdf']});
+ assert.equal(worker.plainRequest(one).what,'download a file from arxiv.org');assert.equal(worker.plainRequest(one).why,'Downloading the second public full paper required for S01 verification');
+ const unclear=s01('python3 fetch.py','Fetch the data',{routine:false,reason:'Buddy cannot tell exactly what this command does, so you decide.',hosts:[],writes:[]});
+ assert.deepEqual(worker.plainRequest(unclear),{what:'run a command that uses the internet',why:'Fetch the data',caution:'Buddy cannot tell exactly what this command does, so you decide.'});
+ assert.equal(worker.requestTitle({...one,assessment:{routine:true,reason:'A clone of a public repository from github.com into the project.'}}),'Copy a public code repository from github.com');
+ assert.equal(worker.requestTitle({...one,assessment:{routine:true,reason:'A package install into the project.'}}),'Install packages into the project');
+ assert.equal(worker.plainRequest(commandReview),null,'an older review without an assessment keeps its old wording');
+ for(const r of [two,one,unclear]){const line=worker.requestTitle(r);assert.equal(line.includes('\n'),false);assert.doesNotMatch(line,/curl|zsh/,'no command text in the one line');}
+});
+
 test('what was asked is named in one short line',()=>{
  assert.equal(worker.requestTitle(commandReview),'Request to run `curl … data/SPX_History.csv`');
  assert.equal(worker.requestTitle(browserReview),'Request to create inbox');

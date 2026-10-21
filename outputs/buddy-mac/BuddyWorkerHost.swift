@@ -2128,7 +2128,8 @@ import Darwin
     /// supervisor oversees (and that is not its own) can be answered this way.
     private func supervisorAnswer(_ id: String, review reviewID: String, accept: Bool, supervisor: String, name: String, reason: String) throws {
         let job = try store.job(id)
-        guard active == id, permitted(job), reviewDecisions[reviewID] != nil, job["supervisorId"] as? String == supervisor, supervisor != job["agentId"] as? String,
+        // The supervisor's own task included (see reviewRoute): only a review Buddy itself routed to the supervisor is accepted here.
+        guard active == id, permitted(job), reviewDecisions[reviewID] != nil, job["supervisorId"] as? String == supervisor,
               let review = (job["reviews"] as? [[String: Any]])?.first(where: { $0["id"] as? String == reviewID }),
               review["status"] as? String == "pending", review["route"] as? String == "supervisor", review["kind"] as? String == "coding" else {
             throw BuddyWorkerFailure(message: "This command review no longer waits for the supervisor.")
@@ -2136,10 +2137,11 @@ import Darwin
         _ = try answerHeldReview(id, reviewID: reviewID, accepted: accept, request: [:], by: "supervisor", name: name, reason: reason)
     }
     /// Who answers a coding command's review: the team's supervisor when Buddy judges the command routine (BuddyCommandReview), the task names
-    /// that supervisor (and it is not the task's own agent), and its background lane is online now; the person for everything else. When the
-    /// lane goes quiet later, the page shows the waiting item to the person after its usual grace.
+    /// that supervisor, and its background lane is online now; the person for everything else. The supervisor's own tasks count too: the lane
+    /// is a separate review of the exact command, and the person asked to be reached only for what is sensitive. When the lane goes quiet
+    /// later, the page shows the waiting item to the person after its usual grace.
     private func reviewRoute(_ verdict: BuddyCommandReview.Verdict, job: [String: Any]) -> String {
-        guard verdict.routine, let lead = job["supervisorId"] as? String, !lead.isEmpty, lead != job["agentId"] as? String,
+        guard verdict.routine, let lead = job["supervisorId"] as? String, !lead.isEmpty,
               (try? state()).flatMap({ teamSupervisor($0) }) == lead, supervisor.status["online"] as? Bool == true else { return "user" }
         return "supervisor"
     }

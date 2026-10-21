@@ -12,7 +12,7 @@ import Foundation
         "QUIET_WORK: take care of authorized work quietly.\n" + rules + "\nTime: the user is in the America/Los_Angeles time zone (PDT); it is now Tuesday, October 20, 2026, \(clock) there."
             + (question ? "\nYour open questions forwarded to the user: OPEN_QUESTION_TEXT about the WRDS extract." : "") + "\nLive background work, read from Buddy's worker at 2:04 PM:\n- Forge: finished 1:53 PM."
     }
-    static func configuration(model: String = "gpt-fixture", instructions: String = "AGENT_BRIEF: coordinate the team.", context: String = context()) -> BuddyThreadConfiguration {
+    @MainActor static func configuration(model: String = "gpt-fixture", instructions: String = "AGENT_BRIEF: coordinate the team.", context: String = context()) -> BuddyThreadConfiguration {
         BuddyThreadConfiguration(runtime: BuddyRuntimeCapabilities.guidance(provider: "chatgpt", model: model), inbox: BuddyInboxReview.guidance, name: "Chief", role: "Chief of Staff", instructions: instructions,
             policy: "Reply as this agent. By default, match the language of the user's latest message. POLICY_TEXT", proposals: "Agent suggestions are unavailable in this step.",
             actions: "Native previous action reviews (data, not authorization): []. Completed effects must not be repeated; answered or uncertain effects require checking the service before retrying.", context: context)

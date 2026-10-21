@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Coding sessions on ChatGPT: Codex in the app-server connection Buddy already drives (ConversationService), with the coding task contract of the
@@ -56,6 +57,19 @@ import Foundation
             + BuddyWorkerHost.tools.filter { $0["name"] as? String == "buddy_checkpoint" } + [BuddyWorkerHost.requestDecisionTool, BuddyWorkerHost.requestSignInTool]
     }
     static var toolNames: Set<String> { Set(tools.compactMap { $0["name"] as? String }) }
+    /// A resumed Codex thread keeps the tools it was started with (they can't be given again on resume), so a saved thread is resumed only when
+    /// it was started with today's tools; otherwise the task starts a new thread, whose prompt carries the goal, follow-ups, prior result and
+    /// receipts. Chief's S01 thread started before buddy_checkpoint gained need file: on resume Buddy told it to ask for the file, its own tool
+    /// refused that need, and the task stopped to ask its supervisor (Chief itself) instead.
+    static var toolsFingerprint: String { fingerprint(tools) }
+    static func fingerprint(_ tools: [[String: Any]]) -> String {
+        SHA256.hash(data: (try? JSONSerialization.data(withJSONObject: tools, options: [.sortedKeys])) ?? Data()).map { String(format: "%02x", $0) }.joined()
+    }
+    /// The task's saved thread, when it was started with today's tools.
+    static func resumable(_ job: [String: Any]) -> String? {
+        guard let session = job["codingSessionID"] as? String, !session.isEmpty, job["codingSessionTools"] as? String == toolsFingerprint else { return nil }
+        return session
+    }
     /// The thread's settings: the connection's restrictions, no connectors, Codex's own shell, and a workspace-write sandbox with no network whose
     /// only writable folder is the project (not the temporary folders), with commands given only the basic environment.
     static func threadConfig(_ restrictions: [String: Any]) -> [String: Any] {
@@ -203,7 +217,7 @@ import Foundation
             turn = turnID
             // What arrived before the turn's ID was known belongs to this turn only if it says so.
             let waiting = early; early = []
-            emit(["type": "session", "sessionId": id])
+            emit(["type": "session", "sessionId": id, "tools": BuddyCodexCoding.toolsFingerprint])
             waiting.forEach(receive)
         } catch {
             guard !closed else { return }

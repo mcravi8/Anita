@@ -94,6 +94,22 @@ import AppKit
             try require(result.hasPrefix("Built the fixture: node --check passed") && result.contains("Command receipts: 2 finished, 1 exited successfully") && !result.contains("Checking the build."), "the last answer is the result, with the receipts line: \(result)")
             try require((try? String(contentsOf: project(buildID).appendingPathComponent("index.js"), encoding: .utf8)) == "console.log(\"codex fixture\");\n", "Codex's edit is in the project copy")
             try require(UUID(uuidString: text(done["codingSessionID"])) != nil, "the Codex thread is saved for continuing: \(done["codingSessionID"] ?? "-")")
+            try require(text(done["codingSessionTools"]) == BuddyCodexCoding.toolsFingerprint, "with the tools it was started with: \(done["codingSessionTools"] ?? "-")")
+        }
+
+        // A resumed Codex thread keeps the tools it was started with. Chief's S01 thread started before buddy_checkpoint gained need file; on
+        // resume Buddy told it to use need file, its own tool refused it, and it asked its supervisor (itself) to route the download instead.
+        await section("a Codex thread started with other tools isn't resumed: the task starts a new thread with today's tools") {
+            let saved: [String: Any] = ["codingSessionID": "01a15d8a-de36-7db1-b82e-ce2dcccc3cb5", "codingSessionTools": BuddyCodexCoding.toolsFingerprint]
+            try require(BuddyCodexCoding.resumable(saved) == "01a15d8a-de36-7db1-b82e-ce2dcccc3cb5", "a thread with today's tools is resumed")
+            try require(BuddyCodexCoding.resumable(saved.merging(["codingSessionTools": "older-tools"]) { $1 }) == nil, "a thread started with other tools is not")
+            try require(BuddyCodexCoding.resumable(["codingSessionID": "01a15d8a-de36-7db1-b82e-ce2dcccc3cb5"]) == nil, "nor one saved before Buddy recorded its tools")
+            try require(BuddyCodexCoding.resumable(["codingSessionTools": BuddyCodexCoding.toolsFingerprint]) == nil, "and a task with no thread starts one")
+            let checkpoint = BuddyCodexCoding.tools.first { $0["name"] as? String == "buddy_checkpoint" }
+            let needs = ((checkpoint?["inputSchema"] as? [String: Any])?["properties"] as? [String: Any])?["need"] as? [String: Any]
+            try require((needs?["enum"] as? [String])?.contains("file") == true, "today's tools let a coding session ask for a file")
+            var changed = BuddyCodexCoding.tools; changed[0]["description"] = "changed"
+            try require(BuddyCodexCoding.fingerprint(changed) != BuddyCodexCoding.toolsFingerprint && BuddyCodexCoding.fingerprint(BuddyCodexCoding.tools) == BuddyCodexCoding.toolsFingerprint, "any change to a tool's description or schema counts, and the same tools always read the same")
         }
 
         // 2. Continue works as on Claude: the same task, the same thread, a second attempt.
@@ -103,6 +119,7 @@ import AppKit
             let again = try await poll(buildID, "the continued task finishes") { $0["attempt"] as? Int == 2 && settled($0) }
             try require(again["status"] as? String == "completed" && text(again["result"]).hasPrefix("Continued on the same thread"), "the follow-up finished: \(again["status"] ?? "") \(again["result"] ?? "")")
             try require(requests(buildID, "thread/resume").last?["threadId"] as? String == text(before["codingSessionID"]) && !text(before["codingSessionID"]).isEmpty, "it resumed the saved thread")
+            try require(requests(buildID, "thread/start").count == 1, "and started no new one, since its tools are today's")
             try require((again["commands"] as? [[String: Any]])?.count == 3, "the earlier receipts stay and the new one is added")
         }
 

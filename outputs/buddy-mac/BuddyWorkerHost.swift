@@ -1576,7 +1576,7 @@ import Darwin
             review:{[weak self] key,tool,network in self?.codexReview(key,tool:tool,network:network,job:job)},
             finished:{[weak self] review,status,receipt in try? self?.finishReview(review,job:id,status:status,receipt:receipt)})
         let session=BuddyCodexCodingSession(service:service,runID:runID,cwd:project.path,commands:current["commands"] as? [[String:Any]] ?? [],hooks:hooks);codex=session
-        session.start(model:job["model"] as? String ?? "",instructions:BuddyCodexCoding.instructions(agent:a,memory:BuddyAgentMemory.guidance(a),decisions:decisionGuidance(job),project:project.path,folderID:id),prompt:BuddyCodexCoding.prompt(current),resume:job["codingSessionID"] as? String)
+        session.start(model:job["model"] as? String ?? "",instructions:BuddyCodexCoding.instructions(agent:a,memory:BuddyAgentMemory.guidance(a),decisions:decisionGuidance(job),project:project.path,folderID:id),prompt:BuddyCodexCoding.prompt(current),resume:BuddyCodexCoding.resumable(job))
     }
     private func codexMayLeaveSandbox(_ job:[String:Any],network:Bool)->Bool {
         active==job["id"] as? String && !stopped && !codingNeedsInput && permitted(job,tool:"projectFiles") && (!network || permitted(job,tool:"web")) && !BuddyAccessDiff.narrows(from:authorization,to:authorizationData(job))
@@ -1839,7 +1839,7 @@ import Darwin
             return
         }
         let coding=job["kind"] as? String=="coding"
-        if coding,event["type"] as? String=="session",let session=event["sessionId"] as? String,UUID(uuidString:session) != nil {try? store.update(id,["codingSessionID":session]);return}
+        if coding,event["type"] as? String=="session",let session=event["sessionId"] as? String,UUID(uuidString:session) != nil {try? store.update(id,["codingSessionID":session,"codingSessionTools":event["tools"] as? String ?? ""]);return}
         if event["type"] as? String == "call", let callID = event["id"] as? String, let name = event["tool"] as? String, let args = event["arguments"] as? [String: Any] {
             let process = claude, codex = self.codex
             let callRun=runID

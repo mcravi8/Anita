@@ -4,6 +4,8 @@ source=Path(__file__).resolve().parent
 worker=source.parent/'buddy-worker'
 import os
 os.environ['CLANG_MODULE_CACHE_PATH'] = str(source.parent.parent / 'work/background-worker/test-module-cache')
+# No test may start the real Codex, which is signed in to the person's ChatGPT account (ConversationService refuses under this flag).
+os.environ['BUDDY_TEST_NO_REAL_CODEX'] = '1'
 snapshot=tempfile.TemporaryDirectory(prefix='buddy-test-source-')
 shutil.copytree(source,Path(snapshot.name)/'Source',ignore=shutil.ignore_patterns('__pycache__'))
 source=Path(snapshot.name)/'Source'

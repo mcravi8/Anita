@@ -111,7 +111,16 @@ struct BuddyFailure: LocalizedError {
     }
 
     private func launch() async throws {
-        let paths = (executableOverride.map { [$0.path] } ?? []) + ["/opt/homebrew/bin/codex", "/usr/local/bin/codex", FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path]
+        // A chosen program (a test's stand-in) is the only one used: if it can't run, nothing falls back to the real Codex, which is signed in
+        // to the person's ChatGPT account.
+        let paths = executableOverride.map { [$0.path] } ?? ["/opt/homebrew/bin/codex", "/usr/local/bin/codex", FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path]
+        if let chosen = executableOverride, !FileManager.default.isExecutableFile(atPath: chosen.path) {
+            throw BuddyFailure(message: "The chosen Codex program at \(chosen.path) can't run, so nothing was started.")
+        }
+        // Under the test runner nothing may reach the real Codex: a test without a stand-in fails here instead of using the person's account.
+        if executableOverride == nil, ProcessInfo.processInfo.environment["BUDDY_TEST_NO_REAL_CODEX"] == "1" {
+            throw BuddyFailure(message: "Tests never start the real Codex; give this test a stand-in.")
+        }
         guard let executable = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             throw BuddyFailure(message: "Install Codex on this Mac to connect your ChatGPT subscription.")
         }

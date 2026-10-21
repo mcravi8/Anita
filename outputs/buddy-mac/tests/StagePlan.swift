@@ -325,6 +325,108 @@ import Foundation
             print("PASS: an authorized stage with no tasks is planned by the supervisor, never sent to its check or marked done (in code or in the database); added tasks name their dependencies by key, id or title, and an unknown one is refused with a clear message")
         }
 
+        // 11. The user's S01 task: Chief gave "execute stages/S01_protocol.md in one Chief-owned coding session" the kind general, so it ran without
+        // a coding tool; and its brief still said "Do not execute now. On user Run S01 only" after the user said "Get stage 1 done". A task whose own
+        // words say it runs code is a coding task however it is added, changed, reassigned or started, and Chief is told why; once the stage is
+        // authorized, the authorization is the go-ahead such wording waited for.
+        do {
+            let s01Title = "S01 protocol intake ONLY AFTER explicit user trigger"
+            let s01Brief = "Do not execute now. On user Run S01 only, execute stages/S01_protocol.md in one Chief-owned coding session. No teammate dependency or next-stage launch. Missing directions and claude_review_2026-10-20 currently block prerequisites. Follow saved stage brief and current user run protocol."
+            for text in [s01Brief, "Run the cleaning script on the raw files.", "Compute the SHA-256 of spec_v1.md and save it.", "Save stages/S01_protocol/spec_v1.sha256", "Write a Python script that parses the logs.",
+                         "python3 build.py --check", "Rerun the pipeline on a copy of the data.", "Execute the S01 protocol."] {
+                require(BuddyTaskNeeds.code(text) != nil, "“\(text)” runs code")
+            }
+            for text in ["Check Forge's rerun against the paper.", "Download the yearly tables.", "Summarize the literature on Python implementations of the model.", "Do not run any code; read the two reports.",
+                         "No coding session is needed.", "Sign off or object.", "Review the classification and the maturity test; sign off or list objections.", "Freeze the S01 protocol."] {
+                require(BuddyTaskNeeds.code(text) == nil, "“\(text)” does not run code: \(BuddyTaskNeeds.code(text) ?? "")")
+            }
+            let held = BuddyTaskNeeds.trigger(s01Title + "\n" + s01Brief)
+            require(held == ["ONLY AFTER explicit user trigger", "Do not execute now", "On user Run S01 only"], "the S01 task's wait-for-the-user wording is found, as written: \(held)")
+            for text in ["Wait for the user's trigger before running anything.", "Do not run until the user says go.", "Await the user's go-ahead.", "Only when the user says Run S02, start it."] {
+                require(!BuddyTaskNeeds.trigger(text).isEmpty, "“\(text)” waits for the user's trigger")
+            }
+            for text in ["Do not run the regression on the holdout data.", "Wait for Forge's table.", "Do not start work for later stages.", "Only after t1 is accepted, merge the tables.", "Follow the current user run protocol."] {
+                require(BuddyTaskNeeds.trigger(text).isEmpty, "“\(text)” does not wait for the user: \(BuddyTaskNeeds.trigger(text))")
+            }
+            let asked = "How should S01 proceed when its required Chief-owned coding-session tool is unavailable in this run?", found = "Tool discovery found no coding_session tool."
+            require(BuddyTaskNeeds.missingCoding(asked) && BuddyTaskNeeds.missingCoding(found) && BuddyTaskNeeds.missingTool(asked) != nil, "the S01 question and its context say a coding tool is missing")
+            require(BuddyTaskNeeds.missingTool("Which table should I check the rerun against?") == nil && BuddyTaskNeeds.missingTool("The data portal wants a sign-in. Can you sign in?") == nil, "an ordinary question or a sign-in is not a missing tool")
+            require(BuddyTaskNeeds.missingTool("The browser tool is not available in this session.") != nil && !BuddyTaskNeeds.missingCoding("The browser tool is not available in this session."), "a missing browser is a missing tool, not a missing coding session")
+
+            let (store11, plans11, directory11) = try fresh(root, "kinds")
+            let s01Stages: [[String: Any]] = [["title": "S01 Protocol and literature freeze", "goal": "Read new inputs and verify literature; freeze four-model pooled, recovery and OOS protocols.",
+                                               "acceptance": ["stages/S01_protocol/spec_v1.sha256 saved", "stages/S01_protocol/requirements_matrix.md and literature_notes.md saved"]], stages[1]]
+            let plain = try plans11.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Freeze the protocol, then extend", stages: s01Stages, tasks: [tasks[0]], members: members, by: chief)
+            require((plain["corrections"] as? [String]) == [], "a proposal with nothing to correct says so: \(plain["corrections"] ?? "none")")
+            let plan11 = try plans11.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Freeze the protocol, then extend", stages: s01Stages, tasks: [
+                ["stage": 1, "key": "s01", "title": s01Title, "assignee": forge, "kind": "general", "brief": s01Brief, "deliverable": "stages/S01_protocol/acceptance.md and frozen protocol"],
+                ["stage": 1, "key": "notes", "title": "Literature notes", "assignee": vera, "kind": "research", "brief": "Verify the literature list against the sources.", "deliverable": "literature_notes.md"],
+            ], members: members, by: chief)
+            let (planID11, stageIDs11, keys11) = ids(plan11)
+            let s01 = keys11["s01"] ?? "", notes = keys11["notes"] ?? "", stageOne11 = stageIDs11.first ?? ""
+            require(row(in: plan11, s01)["kind"] as? String == "coding" && row(in: plan11, notes)["kind"] as? String == "research", "the task that runs code is a coding task; the other keeps its kind: \(row(in: plan11, s01)["kind"] ?? "")")
+            require((plan11["corrections"] as? [String]) == ["Buddy made “\(s01Title)” a coding task: it says “coding session”, and only a coding session runs code."], "the proposal says what Buddy corrected and why: \(plan11["corrections"] ?? "none")")
+
+            // Authorized: the S01 task starts as a coding session, and its brief says the user's request is the go-ahead it was waiting for.
+            _ = try plans11.authorize(planId: planID11, through: 1, quote: "Get stage 1 done", messageId: "m11", viaButton: false, now: Date())
+            require(try step(store11, plans11).count == 2, "both stage 1 tasks start")
+            let s01Job = jobs(store11, s01).first ?? [:], goal11 = s01Job["goal"] as? String ?? ""
+            require(s01Job["kind"] as? String == "coding", "the S01 task runs as a coding session: \(s01Job["kind"] ?? "")")
+            require(goal11.hasPrefix("Authorization: the user asked \"Get stage 1 done\" (") && goal11.contains("for stage 1, \"S01 Protocol and literature freeze\".\nGo-ahead: the user's request above is the trigger this task was waiting for. Wording in it such as “ONLY AFTER explicit user trigger”, “Do not execute now”, “On user Run S01 only” dates from before they authorized this stage and no longer holds: do the task now. The go-ahead approves nothing on the user list (a sign-in, money, anything sent in the user's name); those still go to the user.\nStage goal: "),
+                    "the brief puts the go-ahead right after the authorization:\n\(goal11)")
+            require(!((jobs(store11, notes).first?["goal"] as? String ?? "?").contains("Go-ahead:")), "a brief with nothing waiting for the user gets no go-ahead line")
+
+            // Added by the supervisor (add_tasks): corrected, and the reason is in the decision Chief reads back.
+            let raw11 = try BuddyOperationsDB(directory: directory11, existing: true)
+            let added11 = try plans11.addTasks(stageId: stageOne11, tasks: [
+                ["key": "hash", "title": "Freeze the spec", "assignee": forge, "kind": "general", "brief": "Freeze spec_v1.md and save its SHA-256 next to it.", "deliverable": "spec_v1.sha256"],
+                ["key": "read", "title": "Read the reports", "assignee": vera, "kind": "research", "brief": "Read the two reports.", "deliverable": "notes.md"],
+            ], by: chief, members: members)
+            let plan11c = try plans11.plan(id: planID11) ?? [:]
+            require(added11.count == 2 && row(in: plan11c, added11[0])["kind"] as? String == "coding" && row(in: plan11c, added11[1])["kind"] as? String == "research", "an added task that runs code is a coding task")
+            let addRationale = try raw11.rows("SELECT rationale FROM plan_decisions WHERE kind = 'add_tasks' ORDER BY rowid DESC LIMIT 1").first?[0].string ?? ""
+            require(addRationale == "Buddy made “Freeze the spec” a coding task: it says “SHA-256”, and only a coding session runs code.", "the add_tasks decision says what was corrected: \(addRationale)")
+
+            // Changed in chat (revise): edit_task cannot make it general again, and an added task is corrected too; the reply says so.
+            let revised11 = try plans11.revise(planId: planID11, expectedRevision: nil, ops: [["op": "edit_task", "taskId": added11[0], "kind": "general"],
+                                                                                          ["op": "add_task", "stage": 1, "task": ["title": "Rebuild the tables", "assignee": forge, "kind": "general", "brief": "Run the table script again.", "deliverable": "tables.csv"]]],
+                                               by: chief, userWords: false, members: members)
+            let rebuild = ((revised11["stages"] as? [[String: Any]] ?? []).first?["tasks"] as? [[String: Any]] ?? []).last?["id"] as? String ?? ""
+            require(row(in: revised11, added11[0])["kind"] as? String == "coding" && row(in: revised11, rebuild)["kind"] as? String == "coding", "revise keeps a task that runs code a coding task")
+            require((revised11["corrections"] as? [String]) == ["Buddy made “Freeze the spec” a coding task: it says “SHA-256”, and only a coding session runs code.", "Buddy made “Rebuild the tables” a coding task: it says “Run the table script”, and only a coding session runs code."],
+                    "the revision says what was corrected: \(revised11["corrections"] ?? "none")")
+
+            // Reassigned by the supervisor: with the kind it needs; asking for general on a task that runs code still makes it a coding task.
+            let note = try plans11.reassign(taskId: rebuild, assignee: vera, kind: "general", by: chief, members: members)
+            let rebuilt = try task(plans11, planID11, rebuild)
+            require(note == "Buddy made “Rebuild the tables” a coding task: it says “Run the table script”, and only a coding session runs code." && rebuilt["kind"] as? String == "coding" && rebuilt["assignee"] as? String == vera,
+                    "a reassign keeps a task that runs code a coding task, and says so: \(note ?? "nil")")
+            require(try plans11.reassign(taskId: added11[1], assignee: vera, kind: "coding", by: chief, members: members) == nil && (try task(plans11, planID11, added11[1]))["kind"] as? String == "coding", "the supervisor can give a task the kind it needs")
+            throwsCode("invalid_input", "an unknown kind is refused") { _ = try plans11.reassign(taskId: added11[1], assignee: vera, kind: "banana", by: chief, members: members) }
+            let reassigned = try raw11.rows("SELECT choice, rationale FROM plan_decisions WHERE kind = 'reassign' AND task_id = ? ORDER BY rowid", [.text(added11[1])]).map { [$0[0].string ?? "", $0[1].string ?? ""] }
+            require(reassigned == [[vera, "As a coding task."]], "the reassign is recorded with its kind: \(reassigned)")
+
+            // Sent back with an instruction that runs code: the rework makes it a coding task for the same assignee.
+            let notesJob = jobs(store11, notes).first?["id"] as? String ?? ""
+            try finish(store11, notesJob, result: "Notes written; the hash of the notes is not recorded.")
+            _ = try plans11.reconcile(jobs: store11.jobs)
+            let reworkNote = try plans11.rework(taskId: notes, instruction: "Compute the SHA-256 of literature_notes.md and record it. Do not delegate.", by: chief)
+            let reworkedNotes = try task(plans11, planID11, notes)
+            require(reworkNote == "Buddy made “Literature notes” a coding task: the rework says “SHA-256”, and only a coding session runs code." && reworkedNotes["kind"] as? String == "coding" && reworkedNotes["assignee"] as? String == vera && reworkedNotes["status"] as? String == "pending",
+                    "a rework that runs code makes the task a coding task for its assignee: \(reworkNote ?? "nil") \(reworkedNotes)")
+
+            // A plan an earlier Buddy saved with the kind wrong (the user's): the task starts as a coding session anyway, and Buddy records why.
+            try raw11.run("UPDATE plan_tasks SET kind = 'general' WHERE id = ?", [.text(added11[0])])
+            _ = try step(store11, plans11)
+            let legacy = jobs(store11, added11[0]).first ?? [:]
+            require(jobs(store11, notes).first { $0["requestId"] as? String == "plan:\(notes):2" }?["kind"] as? String == "coding", "the reworked task restarts as a coding session")
+            let legacyRow = try task(plans11, planID11, added11[0])
+            require(legacy["kind"] as? String == "coding" && legacyRow["kind"] as? String == "coding", "a task that runs code starts as a coding session whatever kind was saved: \(legacy["kind"] ?? "not started")")
+            let byBuddy = try raw11.rows("SELECT decided_by, rationale FROM plan_decisions WHERE kind = 'reassign' AND task_id = ?", [.text(added11[0])]).map { [$0[0].string ?? "", $0[1].string ?? ""] }
+            require(byBuddy == [["buddy", "Buddy made “Freeze the spec” a coding task: it says “SHA-256”, and only a coding session runs code."]], "the correction at the start is recorded: \(byBuddy)")
+            print("PASS: a plan task whose words say it runs code (a coding session, a script, a hash, a protocol to execute) is a coding task whether it is proposed, added, revised, reassigned or started from an older plan, and Chief is told why; once its stage is authorized, its brief says the user's request is the go-ahead that “do not execute now” wording waited for")
+        }
+
         // 8. Graceful read.
         let empty = root.appendingPathComponent("empty")
         _ = try BuddyWorkerStore(directory: empty.appendingPathComponent("Worker"))

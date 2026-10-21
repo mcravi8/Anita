@@ -2,13 +2,16 @@
 """Inert stand-in for the supervisor's Claude run. No network, no real keys, no user data.
 
 It reads the lane's start command, records what it was given in fixture-calls.jsonl (next to the run folders), and answers with the
-structured actions the test chose in fixture-mode.txt: auto (accept results, answer questions, resume stops, plan empty stages, finish
-stage checks), forward, bogus, hold, refuse (a rework with no instruction), fail (an error from Claude) or nostart (the process never
+structured actions the test chose in fixture-mode.txt: auto (accept results, answer questions, give a task that lacks a coding tool back
+as a coding task, resume stops, plan empty stages, finish stage checks), forward, bogus, hold, refuse (a rework with no instruction), plainanswer (answer every question), reworkcode (send a result
+back with an instruction that runs code), fail (an error from Claude) or nostart (the process never
 starts, as on the user's Mac at 17:25)."""
 import json, sys
 from pathlib import Path
 
 ANSWER = 'Use Table 2 of the paper; it is the published baseline.'
+# Chief's rework of the user's S01 result.
+REWORK = 'Continue only authorized S01 in the Chief-owned coding session. Generate and independently verify spec_v1.sha256. Do not delegate to Forge.'
 # The tasks Chief sent for the user's Stage 2: no keys, and the second names the first by its title.
 FIRST = 'Freeze stage 2 rules, classify every shock and run the paired p-by-maturity test'
 
@@ -41,6 +44,8 @@ for line in sys.stdin:
         'notes': [i.get('note', '') for i in items], 'askNotHold': 'never hold it' in c['instructions'],
         'commands': [i.get('command') for i in items], 'expectedVerbs': [i.get('expected', '') for i in items],
         'commandText': 'A command review item is a coding command' in c['instructions'] and 'Never approve anything that sends data out' in c['instructions'],
+        'taskKinds': [(i.get('task') or {}).get('kind', '') for i in items],
+        'kindRule': 'coding for anything that runs code' in c['instructions'] and 'never the user' in c['instructions'] and 'is the go-ahead for its tasks' in c['instructions'],
     }
     with (folder / 'fixture-calls.jsonl').open('a') as f:
         f.write(json.dumps(call) + '\n')
@@ -59,12 +64,18 @@ for line in sys.stdin:
         elif mode == 'forward':
             actions.append({'item': key, 'do': 'forward_to_user', 'reason': 'Only the user can sign in.', 'category': 'credential',
                             'text': 'Forge needs you to sign in to the data portal.', 'recommendation': 'Sign in with your university account.'})
+        elif mode == 'plainanswer' and kind == 'question':
+            actions.append({'item': key, 'do': 'answer', 'reason': 'Carry on.', 'text': 'Continue in the Chief-owned coding session.'})
+        elif mode == 'reworkcode' and kind == 'result':
+            actions.append({'item': key, 'do': 'rework', 'reason': 'S01 is partial.', 'text': REWORK})
         elif mode == 'refuse':
             actions.append({'item': key, 'do': 'rework', 'reason': 'Needs another pass.'} if kind == 'result' else {'item': key, 'do': 'hold', 'reason': 'Waiting to see more.'})
         elif mode == 'bogus':
             actions.append({'item': 'no-such-item', 'do': 'accept', 'reason': 'An item nobody presented.'})
             actions.append({'item': key, 'do': 'accept', 'reason': 'Looks done.'})
             actions.append({'item': key, 'do': 'stage_done', 'reason': 'All done.', 'text': 'Done.', 'evidence': ['task:nothing']})
+        elif kind == 'question' and i.get('expected', '') == 'reassign with kind coding':
+            actions.append({'item': key, 'do': 'reassign', 'kind': 'coding', 'reason': 'It runs code, so it needs a coding session.'})
         elif kind == 'question':
             actions.append({'item': key, 'do': 'answer', 'reason': 'The paper names Table 2 as the baseline.', 'text': ANSWER})
         elif kind == 'result':

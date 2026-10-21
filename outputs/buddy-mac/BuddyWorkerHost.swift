@@ -654,7 +654,7 @@ import Darwin
             guard group != nil else { throw BuddyPlanFailure(message: "Choose the group this plan is for.", code: "invalid_input") }
             let out = try plans.propose(workspace: current, groupId: groupID, supervisorId: supervisor ?? manager ?? actor ?? "", objective: args["objective"] as? String ?? "",
                                         stages: args["stages"] as? [[String: Any]] ?? [], tasks: args["tasks"] as? [[String: Any]] ?? [], members: members, by: actor ?? "user")
-            var result = try reply(out["id"] as? String ?? "", ["status": "draft", "revision": out["revision"] ?? 1, "keys": out["keys"] ?? [String: String]()])
+            var result = try reply(out["id"] as? String ?? "", ["status": "draft", "revision": out["revision"] ?? 1, "keys": out["keys"] ?? [String: String](), "corrections": out["corrections"] ?? [String]()])
             result["menu"] = out["menu"] ?? ""
             return result
         case "authorize":
@@ -680,7 +680,7 @@ import Darwin
             // An authorized stage's goal or acceptance changes only on the user's own words.
             let userWords = actor == nil || (BuddyPlanIntent.change(text) != nil && BuddyAgentChanges.quoteAuthorized(args["quote"] as? String ?? "", in: text))
             let out = try plans.revise(planId: id, expectedRevision: Self.integer(args["expectedRevision"]), ops: args["ops"] as? [[String: Any]] ?? [], by: actor ?? "user", userWords: userWords, members: members)
-            return try reply(id, ["revision": out["revision"] ?? NSNull()])
+            return try reply(id, ["revision": out["revision"] ?? NSNull(), "corrections": out["corrections"] ?? [String]()])
         case "answer":
             let plan = try existing(), id = plan["id"] as? String ?? ""
             guard leads(actor) else { throw refused("Only the team's supervisor or the group's manager passes on the user's answer.") }
@@ -1975,7 +1975,8 @@ import Darwin
         return BuddyAutonomy.policy + "\n" + BuddyAutonomy.supervision(agent: job["agentId"] as? String ?? "", supervisor: lead?.id, name: lead?.name) + "\n" + BuddyAutonomy.clock()
     }
     /// A decision the agent may not make (`buddy_request_decision`): saved on the task as its checkpoint for the supervisor (the user when there
-    /// is none, or when the agent is the supervisor itself), and the attempt ends. The task resumes with the answer.
+    /// is none, or when the agent is the supervisor itself, except on plan work: see `BuddySupervisorLane.asksSupervisor`), and the attempt ends.
+    /// The task resumes with the answer.
     private func askForDecision(_ args: [String: Any], job: [String: Any]) throws -> [String: Any] {
         let id = job["id"] as! String
         func text(_ key: String, _ limit: Int) -> String { String((args[key] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).prefix(limit)) }
@@ -1983,7 +1984,8 @@ import Darwin
         guard !question.isEmpty, !recommendation.isEmpty, Self.decisionCategories.contains(category) else {
             throw BuddyWorkerFailure(message: "Give the question, one of the listed categories and your recommendation.", code: "invalid_input")
         }
-        let current = (try? store.job(id)) ?? job, lead = supervisorOf(current, state: try? state()).flatMap { $0.id == current["agentId"] as? String ? nil : $0 }
+        let current = (try? store.job(id)) ?? job, planWork = !(current["planTaskId"] as? String ?? "").isEmpty
+        let lead = supervisorOf(current, state: try? state()).flatMap { BuddySupervisorLane.asksSupervisor(asker: current["agentId"] as? String ?? "", supervisor: $0.id, planWork: planWork, category: category, text: question + "\n" + text("context", 2000)) ? $0 : nil }
         let routed = lead == nil ? "user" : "supervisor", cause = "checkpoint." + routed
         let options = (args["options"] as? [Any] ?? []).compactMap { ($0 as? String).map { String($0.prefix(200)) } }.prefix(4)
         let checkpoint: [String: Any] = ["id": UUID().uuidString, "category": category, "question": question, "options": Array(options), "recommendation": recommendation,

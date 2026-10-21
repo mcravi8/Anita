@@ -13,6 +13,7 @@ ENV_CMD = ("node -e 'const c=require(\"crypto\");const u=process.env.PGUSER||\"\
            "setTimeout(()=>{console.log(\"user=\"+u+\" pass=\"+p);console.log(\"digest=\"+c.createHash(\"sha256\").update(u+\":\"+p).digest(\"hex\"))},3000)'")
 PLAIN_CMD = "node -e 'console.log(\"plain user=\"+process.env.PGUSER+\" pass=\"+process.env.PGPASSWORD)'"
 ROUTINE_CMD = 'curl -fsSL https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv -o data/vix.csv'
+OWN_CMD = 'curl -fsS --max-time 5 https://buddy-fixture-never-resolves.example.com/vix.csv -o data/vix.csv'
 config = {}
 
 def log(kind, value):
@@ -56,6 +57,9 @@ for line in sys.stdin:
             call('ask2', 'buddy_request_signin', {'profile': 'wrds', 'purpose': 'run the OptionMetrics SPX skew extract'})
         elif 'SIGNIN_FIXTURE' in prompt:
             call('ask', 'buddy_request_signin', {'profile': 'wrds', 'purpose': 'run the OptionMetrics SPX skew extract'})
+        elif 'NETWORK_OWN_FIXTURE' in prompt:
+            # Chief's own routine download. The host never resolves, so nothing leaves this Mac even after Buddy approves it.
+            call('net', 'buddy_coding_command', {'code': OWN_CMD, 'network': True, 'reason': 'fetch the public VIX history for the check'})
         elif 'NETWORK_ROUTINE_FIXTURE' in prompt:
             call('net', 'buddy_coding_command', {'code': ROUTINE_CMD, 'network': True, 'reason': 'DECLINE_FIXTURE: fetch the public VIX history for the check'})
         else:

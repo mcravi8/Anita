@@ -287,16 +287,21 @@ import Security
             try require(!FileManager.default.fileExists(atPath: project(id).appendingPathComponent("data/vix.csv").path) && ((done["commands"] as? [[String: Any]]) ?? []).isEmpty && text(done["result"]).contains("declined"), "it did not run: \(done["result"] ?? "")")
             try require(!(try everyDecision(id)).contains { $0.audience == "user" }, "the user was never asked")
         }
-        await section("the supervisor's own routine command goes to its background review too, never to the user (Chief's S01 downloads, 20 Oct 2026)") {
+        await section("the supervisor's own routine command is approved by Buddy at once: no review by itself, nothing for the user, nothing in the chat (Chief's S01 downloads, 20 Oct 2026)") {
             try await clearQueue()
-            let id = try await start("NETWORK_ROUTINE_FIXTURE: fetch the VIX history.", as: chief, request: "routine-own")
+            let seen = fixture("supervisor").count
+            let id = try await start("NETWORK_OWN_FIXTURE: fetch the VIX history.", as: chief, request: "routine-own")
             let done: [String: Any]
-            do { done = try await poll(id, "Chief's own routine command is answered", seconds: 60) { ["completed", "failed", "interrupted", "paused", "waiting_user"].contains($0["status"] as? String ?? "") } }
+            do { done = try await poll(id, "Chief's own routine command runs", seconds: 60) { ["completed", "failed", "interrupted", "paused", "waiting_user"].contains($0["status"] as? String ?? "") } }
             catch { throw Failed(message: "\(error) — lane: \((try? await worker(["operation": "status"]))?["supervisorLane"] ?? "-")") }
             let review = reviews(done).first ?? [:]
             try require(done["supervisorId"] as? String == chief && done["agentId"] as? String == chief, "the task is Chief's own and Chief supervises it: \(done["agentId"] ?? "-") / \(done["supervisorId"] ?? "-")")
-            try require(review["route"] as? String == "supervisor" && review["answeredBy"] as? String == "supervisor" && review["answeredByName"] as? String == "Chief", "Chief's background review answered it: \(review)")
-            try require(!(try everyDecision(id)).contains { $0.audience == "user" }, "the user was never asked")
+            try require(review["route"] as? String == "auto" && review["answeredBy"] as? String == "rule" && review["answeredByName"] as? String == "Buddy" && text(review["answerReason"]).contains("download")
+                        && ["dispatched", "completed"].contains(review["status"] as? String ?? ""), "Buddy approved it itself: \(review)")
+            try require(((done["commands"] as? [[String: Any]]) ?? []).contains { $0["network"] as? Bool == true }, "the command ran with the internet: \(done["commands"] ?? "-")")
+            let asked = try everyDecision(id)
+            try require(asked.isEmpty, "no one was asked, not even Chief: \(asked)")
+            try require(!fixture("supervisor").dropFirst(seen).flatMap { $0["items"] as? [[String: Any]] ?? [] }.contains { $0["workerTaskId"] as? String == id }, "Chief's review never saw it")
         }
         await section("with the supervisor lane offline (its daily limit used up), a routine command review falls back to the user") {
             try await clearQueue()

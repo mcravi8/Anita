@@ -17,7 +17,9 @@
   // A sign-in the person answers in the chat (a password to type, a step to finish and confirm with Done, a service sign-in to save) has a
   // message of its own there (buddy-signin.js); the task's own message would only say it again.
   const signinWait=t=>t?.status==='waiting_review'&&pending(t).length>0&&pending(t).every(r=>r.kind==='authentication')||t?.status==='waiting_user'&&t.stopCause!=='review.parked'&&['signin','captcha','verification','credential'].includes(t.checkpoint?.need);
-  const deliverable=t=>(['completed','failed','interrupted','waiting_review','waiting_user'].includes(t?.status)||systemPause(t))&&t?.quiet!==true&&!signinWait(t);
+  // A coding command waiting on the team supervisor's review is the supervisor's to answer, not the person's: it posts nothing in the chat.
+  const supervisorWait=t=>t?.status==='waiting_review'&&pending(t).length>0&&pending(t).every(r=>r.route==='supervisor');
+  const deliverable=t=>(['completed','failed','interrupted','waiting_review','waiting_user'].includes(t?.status)||systemPause(t))&&t?.quiet!==true&&!signinWait(t)&&!supervisorWait(t);
   const deliveryID=t=>`worker-${t.id}-${Number(t.attempt)||0}-${t.status}${['waiting_review','waiting_user'].includes(t.status)?'-'+encodeURIComponent(t.attentionKey||t.progress||''):''}`;
   const attention=status=>['waiting_review','waiting_user'].includes(status);
   // Background work › Browser sign-in: one Chrome for every agent. `agents` are the workspace's agents, `using` the ids of those with
@@ -165,7 +167,7 @@
     const prior=attention(t.status)?state.messages[t.agentId].find(m=>m.workerTaskID===t.id&&attention(m.workerStatus)&&!m.workerDecision&&(m.workerAttempt===message.workerAttempt||m.id.startsWith(`worker-${t.id}-${message.workerAttempt}-`))):null;
     if(prior){if(prior.workerUpdatedAt&&prior.workerUpdatedAt>t.updatedAt)return false;Object.assign(prior,message);}else state.messages[t.agentId].push(message);return true;
   }
-  const api={labels,canResume,needsAllowance,pending,unconfirmed,authTitle,systemPause,signinWait,deliverable,deliveryID,deliverResult,taskMessage,presentation,isApproval,reviewRequest,requestTitle,plainRequest,recordDecision,reconcile,reviewIds,setupOnce,accountLine,taskReceipts};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
+  const api={labels,canResume,needsAllowance,pending,unconfirmed,authTitle,systemPause,signinWait,deliverable,deliveryID,deliverResult,taskMessage,presentation,isApproval,reviewRequest,requestTitle,plainRequest,supervisorWait,recordDecision,reconcile,reviewIds,setupOnce,accountLine,taskReceipts};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
   let snapshot={online:false,tasks:[],routines:[],paused:false},detail=null,view='list',routine=null,busy=false,error='',last='',preview=null;
   const drafts=new Map();

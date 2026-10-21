@@ -1519,7 +1519,15 @@ import Darwin
         // outside the project, and anything else, stays with the person.
         let verdict=network ? BuddyCommandReview.assess((tool["arguments"] as? [String:Any])?["command"] as? String ?? "",project:directory(job).appendingPathComponent("Files").path) : BuddyCommandReview.sensitive("It writes files outside the project copy.")
         let route=reviewRoute(verdict,job:(try? store.job(id)) ?? job),lead=route=="supervisor" ? ((try? state()).map(Self.names)?[(try? store.job(id))?["supervisorId"] as? String ?? ""] ?? "the supervisor") : ""
-        reviews.append(["id":review,"kind":"coding","status":"pending","tool":tool,"route":route,"assessment":Self.assessment(verdict),"questions":[["id":"command","question":network ? "Allow this command to run outside the project sandbox, with network access?":"Allow writing these files outside the project?","options":[["label":"Accept"],["label":"Decline"]]]]])
+        var entry:[String:Any]=["id":review,"kind":"coding","status":"pending","tool":tool,"route":route,"assessment":Self.assessment(verdict),"questions":[["id":"command","question":network ? "Allow this command to run outside the project sandbox, with network access?":"Allow writing these files outside the project?","options":[["label":"Accept"],["label":"Decline"]]]]]
+        // The supervisor's own routine command: Buddy approves it at once instead of the supervisor reviewing its own request. It is kept on
+        // the task as Buddy's answer and never waits, so nothing reaches the chat.
+        if route=="auto" {
+            entry.merge(Self.answeredBy("rule",name:"Buddy",reason:verdict.reason)) {_,new in new};entry["status"]="answered";reviews.append(entry)
+            guard (try? store.update(id,["reviews":reviews])) != nil,(try? dispatch(review,job:id)) != nil else {codex?.answer(key,approved:false);return}
+            codex?.answer(key,approved:true,review:review);return
+        }
+        reviews.append(entry)
         guard (try? store.update(id,["reviews":reviews,"status":"waiting_review","progress":route=="supervisor" ? "A coding command waits for \(lead)'s review":network ? "A coding command needs network access":"A coding change needs to write outside the project"])) != nil else {codex?.answer(key,approved:false);return}
         reviewDecisions[review]={[weak self] accepted in
             guard let self else {return}
@@ -1582,10 +1590,17 @@ import Darwin
             let tool:[String:Any]=profile.map{p in ["name":"Sign in to \(p.name) and run this command","service":"Buddy coding project","arguments":["sign_in":"This command signs in to \(p.name) with your saved sign-in."+(p.mfa=="duo-push" ? " Approve the Duo push on your phone when it arrives.":""),"command":code,"reason":reason,"project":project]]}
                 ?? ["name":"Run command with network access","service":"Buddy coding project","arguments":["command":code,"reason":reason,"project":project]]
             let question=profile.map{"Allow this command to sign in to \($0.name) with your saved sign-in, with internet access?"} ?? "Allow this command with internet access?"
-            reviews.append(["id":review,"kind":"coding","status":"pending","tool":tool,"route":route,"assessment":Self.assessment(verdict),"questions":[["id":"command","question":question,"options":[["label":"Accept"],["label":"Decline"]]]]])
+            var entry:[String:Any]=["id":review,"kind":"coding","status":"pending","tool":tool,"route":route,"assessment":Self.assessment(verdict),"questions":[["id":"command","question":question,"options":[["label":"Accept"],["label":"Decline"]]]]]
+            // The supervisor's own routine command is approved by Buddy at once (see the Codex path): no waiting, nothing in the chat.
+            if route=="auto" {entry.merge(Self.answeredBy("rule",name:"Buddy",reason:verdict.reason)) {_,new in new};entry["status"]="answered"}
+            reviews.append(entry)
             let lead=route=="supervisor" ? ((try? state()).map(Self.names)?[(try? store.job(id))?["supervisorId"] as? String ?? ""] ?? "the supervisor") : ""
-            try store.update(id,["reviews":reviews,"status":"waiting_review","progress":route=="supervisor" ? "A coding command waits for \(lead)'s review":profile.map{"A command needs your OK to sign in to \($0.name)"} ?? "A coding command needs network access"])
-            let accepted=await withCheckedContinuation{c in reviewDecisions[review]={c.resume(returning:$0)}}
+            let accepted:Bool
+            if route=="auto" {try store.update(id,["reviews":reviews]);accepted=true}
+            else {
+                try store.update(id,["reviews":reviews,"status":"waiting_review","progress":route=="supervisor" ? "A coding command waits for \(lead)'s review":profile.map{"A command needs your OK to sign in to \($0.name)"} ?? "A coding command needs network access"])
+                accepted=await withCheckedContinuation{c in reviewDecisions[review]={c.resume(returning:$0)}}
+            }
             guard accepted,active==id,!stopped,permitted(job,tool:"projectFiles"),permitted(job,tool:"web"),!BuddyAccessDiff.narrows(from:authorization,to:authorizationData(job)) else {
                 // The supervisor's one-line reason goes back to the agent, so it can adapt rather than ask again.
                 let answer=((try? store.job(id))?["reviews"] as? [[String:Any]])?.first{$0["id"] as? String==review}
@@ -2204,9 +2219,11 @@ import Darwin
     /// that supervisor, and its background lane is online now; the person for everything else. The supervisor's own tasks count too: the lane
     /// is a separate review of the exact command, and the person asked to be reached only for what is sensitive. When the lane goes quiet
     /// later, the page shows the waiting item to the person after its usual grace.
+    /// `auto` is the supervisor's own routine command: Buddy approves it itself, since the supervisor reviewing its own request adds nothing.
     private func reviewRoute(_ verdict: BuddyCommandReview.Verdict, job: [String: Any]) -> String {
-        guard verdict.routine, let lead = job["supervisorId"] as? String, !lead.isEmpty,
-              (try? state()).flatMap({ teamSupervisor($0) }) == lead, supervisor.status["online"] as? Bool == true else { return "user" }
+        guard verdict.routine, let lead = job["supervisorId"] as? String, !lead.isEmpty, (try? state()).flatMap({ teamSupervisor($0) }) == lead else { return "user" }
+        if lead == job["agentId"] as? String { return "auto" }
+        guard supervisor.status["online"] as? Bool == true else { return "user" }
         return "supervisor"
     }
     private static func assessment(_ verdict: BuddyCommandReview.Verdict) -> [String: Any] {

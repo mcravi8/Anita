@@ -121,6 +121,16 @@ test('an approval review is answered with Approve or Disapprove, and each sends 
  assert.deepEqual(worker.reviewRequest('task',{id:'q',questions:[{id:'name',question:'Which name?'}]},{name:'Ada'},'approve'),{operation:'review',taskId:'task',id:'q',answers:{name:['Ada']},cancel:false,accept:false},'a plain question is answered as before');
 });
 
+test('a task waiting only on the supervisor\u2019s review posts nothing in the chat; anything waiting on the person still does',()=>{
+ const base={id:'t',agentId:'chief',status:'waiting_review',attempt:1,progress:'A coding command waits for Chief\u2019s review',updatedAt:'2026-10-21T06:00:00Z'};
+ const chief={...base,reviews:[{id:'r1',kind:'coding',status:'pending',route:'supervisor'}]};
+ assert.equal(worker.supervisorWait(chief),true);assert.equal(worker.deliverable(chief),false,'no \u201cI need your approval\u201d for Chief\u2019s review');
+ const mixed={...base,reviews:[{id:'r1',kind:'coding',status:'pending',route:'supervisor'},{id:'r2',kind:'coding',status:'pending',route:'user'}]};
+ assert.equal(worker.deliverable(mixed),true,'one review that is the person\u2019s still shows');
+ assert.equal(worker.deliverable({...base,reviews:[{id:'r2',kind:'coding',status:'pending',route:'user'}]}),true);
+ assert.equal(worker.deliverable({...base,reviews:[{id:'r3',kind:'coding',status:'answered',route:'auto'}],status:'running'}),false,'Buddy\u2019s own approval never waits');
+});
+
 test('a coding command Buddy assessed reads as what it does and why, in everyday words (Chief’s real S01 requests)',()=>{
  const s01=(command,reason,assessment)=>({id:'r',kind:'coding',status:'pending',assessment,tool:{name:'Run command outside the sandbox',service:'Buddy coding project',arguments:{command,reason,project:'/x/Files',access:'Runs outside the project sandbox.'}},questions:[{id:'command',question:'Allow this command to run outside the project sandbox, with network access?',options:[{label:'Accept'},{label:'Decline'}]}]});
  const two=s01("/bin/zsh -lc 'curl -fL --max-time 90 https://download.documentfoundation.org/libreoffice/stable/26.8.1/mac/aarch64/ -o a.html\ncurl -fL --max-time 90 https://arxiv.org/html/2106.07040 -o b.html'",'Allow checking the LibreOffice package URL and an alternate full-text record for the paper?',{routine:true,reason:'2 downloads from download.documentfoundation.org and arxiv.org into the project.',hosts:['download.documentfoundation.org','arxiv.org'],writes:['a.html','b.html']});

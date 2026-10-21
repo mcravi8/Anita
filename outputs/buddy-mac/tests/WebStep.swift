@@ -36,11 +36,13 @@ import Darwin
         defer { try? FileManager.default.removeItem(at: base) }
         let serverLog = logs.appendingPathComponent("server.jsonl"), codingLog = logs.appendingPathComponent("coding.jsonl"), browserLog = logs.appendingPathComponent("browser.jsonl")
         setenv("BUDDY_STEP_SERVER_LOG", serverLog.path, 1); setenv("BUDDY_STEP_CODING_LOG", codingLog.path, 1); setenv("BUDDY_STEP_BROWSER_LOG", browserLog.path, 1)
-        let workspace = UUID().uuidString, chief = UUID().uuidString, ada = UUID().uuidString
+        let workspace = UUID().uuidString, chief = UUID().uuidString, ada = UUID().uuidString, bea = UUID().uuidString
         try JSONSerialization.data(withJSONObject: ["conversationWorkspace": workspace, "agents": [
             ["id": chief, "name": "Chief", "role": "Chief of staff", "description": "Codes and supervises", "tools": ["web": true, "desktop": true, "projectFiles": true]],
-            ["id": ada, "name": "Ada", "role": "Assistant", "description": "Website tasks", "tools": ["web": true, "desktop": true, "projectFiles": true]]]]).write(to: support.appendingPathComponent("workspace.json"))
+            ["id": ada, "name": "Ada", "role": "Assistant", "description": "Website tasks", "tools": ["web": true, "desktop": true, "projectFiles": true]],
+            ["id": bea, "name": "Bea", "role": "Analyst", "description": "Codes offline", "tools": ["web": false, "desktop": true, "projectFiles": true]]]]).write(to: support.appendingPathComponent("workspace.json"))
         try BuddyAgentModels(support: support).set(workspace: workspace, agent: chief, selection: .init(provider: "claude", model: "claude-fixture"))
+        try BuddyAgentModels(support: support).set(workspace: workspace, agent: bea, selection: .init(provider: "claude", model: "claude-fixture"))
         try chrome(support.appendingPathComponent("Worker/Browsers/Shared", isDirectory: true), chrome: personal, accounts: [personal, usc])
         // The person's connected folder, where a coding task's blocked download is saved.
         let research = base.appendingPathComponent("Directed Research", isDirectory: true)
@@ -82,8 +84,8 @@ import Darwin
             return (try await worker(["operation": "computer", "agentId": ada, "actorId": ada, "requestId": request, "authorizedText": said, "arguments": ["action": "start", "title": "Get the article", "goal": goal]]))["task"] as? [String: Any] ?? [:]
         }
         /// A coding task Chief starts, its brief asking the stand-in to make `calls` until one is not refused.
-        func coding(_ calls: [[Any]], request: String) async throws -> String {
-            let reply = try await worker(["operation": "coding", "agentId": chief, "requestId": request, "arguments": ["action": "start", "title": "Get the Sethna article", "goal": "Download the article PDF into the project. CALLS:" + json(calls)]])
+        func coding(_ calls: [[Any]], as agent: String? = nil, request: String) async throws -> String {
+            let reply = try await worker(["operation": "coding", "agentId": agent ?? chief, "requestId": request, "arguments": ["action": "start", "title": "Get the Sethna article", "goal": "Download the article PDF into the project. CALLS:" + json(calls)]])
             return (reply["task"] as? [String: Any])?["id"] as? String ?? ""
         }
         func detail(_ id: String) async throws -> [String: Any] { (try await worker(["operation": "detail", "taskId": id]))["task"] as? [String: Any] ?? [:] }
@@ -234,6 +236,66 @@ import Darwin
             try require(resumed.contains("[Buddy]") && resumed.contains("Directed Research/stages/S01_protocol/sources/sethna-2022.pdf") && resumed.contains(folder) && resumed.contains("buddy_copy_into_project") && resumed.contains("Buddy sees a file there"),
                         "the session is told where the file should be, that Buddy sees it, and to check it with its file tools: \(resumed.suffix(800))")
             try require((try await status())["privateBrowser"] is NSNull, "Chrome is closed")
+        }
+
+        // MARK: Buddy downloads the file itself
+
+        // Chief's S01 stop (21 Oct): the person signed in on the publisher's site in Buddy's Chrome and asked the agent to download the paper,
+        // but nothing could use that sign-in, so they were asked to save the PDF by hand. Now Done fetches it with their sign-in.
+        func resumedPrompt() -> String { lines(codingLog).filter { $0["kind"] as? String == "start" }.compactMap { ($0["value"] as? [String: Any])?["prompt"] as? String }.last ?? "" }
+        await section("Done on a file step with nothing saved yet: Buddy downloads it with the person's sign-in in its Chrome, saves it into the folder, and the session is told") {
+            let path = "stages/S01_protocol/source_retry/ac498c.pdf", pdf = article + "/pdf"
+            let id = try await coding([["buddy_checkpoint", ["need": "file", "reason": "Save the published PDF.", "url": pdf, "folderId": folder, "path": path]]], request: "file-download")
+            let waiting = try await poll(id, "the coding task waits for the file") { $0["status"] as? String == "waiting_user" }
+            let question = (waiting["checkpoint"] as? [String: Any])?["question"] as? String ?? ""
+            try require(question.contains("Buddy downloads it") && question.contains("sign in"), "the step says Done downloads it with their sign-in: \(question)")
+            _ = try await worker(["operation": "browser", "taskId": id, "url": pdf])   // The person opens the page and signs in there.
+            let done = try await page(["action": "done", "taskId": id])
+            try require(done["done"] as? Bool == true && done["downloaded"] as? Bool == true, "Done downloads it and continues: \(done)")
+            let fetched = browser(id).filter { $0["command"] as? String == "download" }
+            let staged = fetched.first?["to"] as? String ?? ""
+            try require(fetched.count == 1 && fetched[0]["url"] as? String == pdf && fetched[0]["expect"] as? String == "pdf" && staged.hasPrefix(support.appendingPathComponent("Worker/Tasks/\(id)").path) && staged.hasSuffix(".part"),
+                        "through Buddy's Chrome in the task's own session, into the task's own folder first: \(fetched)")
+            let order = browser(id).compactMap { $0["command"] as? String }
+            try require((order.firstIndex(of: "finishManual") ?? Int.max) < (order.firstIndex(of: "download") ?? -1) || !order.contains("finishManual"), "the person's window closes before Buddy's Chrome downloads: \(order)")
+            let saved = try Data(contentsOf: research.appendingPathComponent(path))
+            try require(String(decoding: saved, as: UTF8.self) == "%PDF-1.7 fixture downloaded\n", "the PDF is in the connected folder: \(saved.count) bytes")
+            try require(!FileManager.default.fileExists(atPath: staged), "and nothing is left in the task's folder")
+            _ = try await poll(id, "the coding task continues") { $0["status"] as? String == "completed" }
+            let resumed = resumedPrompt()
+            try require(resumed.contains("Buddy downloaded") && resumed.contains("Directed Research/" + path) && resumed.contains("Buddy sees a file there") && resumed.contains("buddy_copy_into_project"),
+                        "the session is told Buddy downloaded it and where: \(resumed.suffix(700))")
+            let versions = try BuddyProjectFiles(support: support).versions(BuddyFileScope(workspace: workspace, folderId: folder), path: path)
+            try require(versions.count == 1, "it is a new file with its own receipt: \(versions)")
+        }
+        await section("a download that brings back a web page saves nothing, keeps the step and opens the page again; the person can still save it themselves") {
+            let path = "stages/S01_protocol/source_retry/blocked.pdf", blocked = "https://iopscience.iop.org/captcha/ac498c.pdf"
+            let id = try await coding([["buddy_checkpoint", ["need": "file", "reason": "Save the published PDF.", "url": blocked, "folderId": folder, "path": path]]], request: "file-blocked")
+            _ = try await poll(id, "the coding task waits for the file") { $0["status"] as? String == "waiting_user" }
+            let refused = try await page(["action": "done", "taskId": id])
+            let note = refused["note"] as? String ?? ""
+            try require(refused["done"] as? Bool == false && refused["reopened"] as? Bool == true && note.contains("web page") && note.contains("Chrome is open again"), "Done says why and keeps the step: \(refused)")
+            try require(!FileManager.default.fileExists(atPath: research.appendingPathComponent(path).path), "nothing is saved")
+            try require((try await detail(id))["status"] as? String == "waiting_user", "the task still waits")
+            let manual = browser(id).filter { $0["command"] as? String == "manual" }
+            try require(manual.last?["page"] as? String == blocked, "Chrome opens again at the page: \(manual)")
+            // The person saves it by hand: Done sees it and downloads nothing.
+            try Data("%PDF-1.4 saved by hand".utf8).write(to: research.appendingPathComponent(path))
+            let done = try await page(["action": "done", "taskId": id])
+            try require(done["done"] as? Bool == true && done["downloaded"] as? Bool != true, "Done continues with their file: \(done)")
+            try require(browser(id).filter { $0["command"] as? String == "download" }.count == 1, "no second download")
+            _ = try await poll(id, "the coding task continues") { $0["status"] as? String == "completed" }
+            try require(String(decoding: try Data(contentsOf: research.appendingPathComponent(path)), as: UTF8.self) == "%PDF-1.4 saved by hand", "their file is kept as it is")
+        }
+        await section("an agent without internet access gets no download: Done continues as before and says Buddy doesn't see the file") {
+            let path = "stages/S01_protocol/source_retry/offline.pdf"
+            let id = try await coding([["buddy_checkpoint", ["need": "file", "reason": "Save the PDF.", "url": article + "/pdf", "folderId": folder, "path": path]]], as: bea, request: "file-offline")
+            let waiting = try await poll(id, "the coding task waits for the file") { $0["status"] as? String == "waiting_user" }
+            try require(!((waiting["checkpoint"] as? [String: Any])?["question"] as? String ?? "").contains("Buddy downloads it"), "its step doesn't promise a download")
+            let done = try await page(["action": "done", "taskId": id])
+            try require(done["done"] as? Bool == true && browser(id).filter { $0["command"] as? String == "download" }.isEmpty, "nothing is downloaded: \(done)")
+            _ = try await poll(id, "the coding task continues") { $0["status"] as? String == "completed" }
+            try require(resumedPrompt().contains("Buddy doesn't see a file at that exact path"), "the session is told the file isn't there")
         }
 
         // MARK: a step saved before steps named their page

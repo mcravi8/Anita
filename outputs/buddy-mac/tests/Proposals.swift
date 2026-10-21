@@ -30,6 +30,8 @@ import Foundation
   check((try store.propose(scope,executionRunId:run,callId:"call-1",arguments:config)["proposal"] as? [String:Any])?["id"] as? String == id,"Duplicate tool call created a new suggestion")
   let reloaded=BuddyAgentProposals(support:root)
   check(try reloaded.list(workspace).count == 1,"Pending suggestion did not survive restart")
+  // A ChatGPT thread is sent this text again only when it changes (BuddyThreadConfiguration), so the same team must read the same each time.
+  check(try store.context(scope) == "Actual Buddy team and suggestion decisions (context only): {\"registeredAgents\":[{\"id\":\"chief\",\"name\":\"Chief\",\"role\":\"Chief of Staff\"}],\"suggestions\":[{\"name\":\"Sage\",\"status\":\"pending\"}]}","The team context is not written in one fixed order")
   let invalidScope=BuddyProposalScope(workspace:workspace,chat:"chief",actorId:"missing",replyRunId:run)
   rejects({try store.propose(invalidScope,executionRunId:run,callId:"bad",arguments:config)},"Unregistered actor proposed")
   rejects({try store.list(UUID().uuidString)},"Cross-workspace access accepted")

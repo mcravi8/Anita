@@ -70,7 +70,7 @@ import AppKit
             }
         }
         conversations.extraToolHandler = { [weak self] tool, args, context in
-            guard let self, ["buddy_start_background_task","buddy_computer_task","buddy_manage_routine","buddy_coding_session","buddy_team","buddy_agent_settings","buddy_agent_rules","buddy_plan"].contains(tool), let id = context["agentId"] as? String else { throw BuddyWorkerFailure(message: "Background work is unavailable for this turn.") }
+            guard let self, ["buddy_start_background_task","buddy_computer_task","buddy_manage_routine","buddy_coding_session","buddy_team","buddy_agent_settings","buddy_agent_rules","buddy_plan","buddy_resolve_waiting"].contains(tool), let id = context["agentId"] as? String else { throw BuddyWorkerFailure(message: "Background work is unavailable for this turn.") }
             let workspace = try self.workspaceContext()
             guard workspace.agents.contains(id) else { throw BuddyWorkerFailure(message: "This agent is no longer available.") }
             _ = try await BuddyWorkerClient.start(support: self.supportURL, workspace: workspace.workspace)
@@ -80,6 +80,8 @@ import AppKit
                 return result
             }
             if tool=="buddy_team" {return try await BuddyWorkerClient.call(support:self.supportURL,payload:["operation":"team","workspace":workspace.workspace,"actorId":id,"authorizedText":context["authorizedUserText"] ?? "","arguments":args])}
+            // The user supplied what a waiting task asked for: the agent hands it over, as itself, with the user's message of this turn.
+            if tool=="buddy_resolve_waiting" {return try await BuddyWorkerClient.call(support:self.supportURL,payload:BuddyWorkerClient.resolveWaitingRequest(arguments:args,context:context,workspace:workspace.workspace))}
             if tool=="buddy_plan" {
                 // The agent acts as itself; the worker checks what it may do, and an authorization against the person's words in this turn.
                 let state=try self.workspaceState()
@@ -134,6 +136,11 @@ import AppKit
             let note=self.planTurnNotes.removeValue(forKey:id).flatMap{note in self.teamwork.snapshots().contains(where:{$0["runId"] as? String==note.run && ["starting","answering","stopping"].contains($0["status"] as? String ?? "")}) ? note.text:nil} ?? ""
             text+=self.planInstructions(plans:BuddyPlanStore.readOnlySummary(support:self.supportURL,workspace:workspace),agent:id,state:s,note:note)
             return text}
+        // Around each turn of a group round: a member's latest direct chat; for the coordinator, the team's current state.
+        teamwork.groupContext={ [weak self] workspace,group,agent in
+            guard let self,let s=try? self.workspaceState(),s["conversationWorkspace"] as? String==workspace else{return ""}
+            if let agent {return BuddyLiveState.elsewhere(state:s,agent:agent,chat:group)}
+            return BuddyLiveState.coordinator(plans:BuddyPlanStore.readOnlySummary(support:self.supportURL,workspace:workspace),jobs:self.liveJobs(),state:s,group:group)}
         Task {if let context=try? workspaceContext(){_ = try? await BuddyWorkerClient.start(support:supportURL,workspace:context.workspace)}}
     }
 
@@ -275,15 +282,18 @@ import AppKit
             return (through, "")
         } catch { return (nil, error.localizedDescription) }
     }
-    /// What one agent's chat turn is told about the plans it works in, and what the app did with the person's stage request, as text to append.
-    private func planInstructions(plans: [[String: Any]], agent: String, state: [String: Any], note: String) -> String {
-        let names = BuddyPlanChat.names(state: state), plan = BuddyPlanChat.context(plans: plans, agent: agent, names: names, members: BuddyPlanChat.members(state: state))
+    /// The worker's task records, read-only, as a chat turn reads them.
+    private func liveJobs() -> [[String: Any]] { ((try? BuddyOperationsDB.snapshot(directory: supportURL.appendingPathComponent("Worker"))) ?? nil)?.tasks ?? [] }
+    /// What one agent's chat turn is told about the plans it works in, the work running now and the waits solved lately (the same block in its
+    /// direct chat and in a group), and what the app did with the person's stage request, as text to append. In its direct chat (`direct`) it
+    /// also gets the latest exchange of the groups it is in; a group turn gets its latest direct chat through the team service.
+    private func planInstructions(plans: [[String: Any]], agent: String, state: [String: Any], note: String, direct: Bool = false) -> String {
         // What is running right now, read-only from the worker's records, so "how is it going?" is answered from the live session, not guessed.
         let workspace = state["conversationWorkspace"] as? String ?? ""
-        let jobs = ((try? BuddyOperationsDB.snapshot(directory: supportURL.appendingPathComponent("Worker"))) ?? nil)?.tasks ?? []
         let supervises = BuddyAutonomy.supervisor(support: supportURL, workspace: workspace, state: state, agent: agent)?.id == agent
-        let live = BuddyLiveWork.context(jobs: jobs, workspace: workspace, agent: agent, supervises: supervises, names: names)
-        return (plan.isEmpty ? "" : "\n" + plan) + (live.isEmpty ? "" : "\n" + live) + (note.isEmpty ? "" : "\n" + note)
+        let block = BuddyLiveState.block(plans: plans, jobs: liveJobs(), state: state, agent: agent, supervises: supervises)
+        let elsewhere = direct ? BuddyLiveState.elsewhere(state: state, agent: agent, chat: agent) : ""
+        return (block.isEmpty ? "" : "\n" + block) + (elsewhere.isEmpty ? "" : "\n" + elsewhere) + (note.isEmpty ? "" : "\n" + note)
     }
     private var adopting = false
     /// Role and instructions are kept in the agent’s saved profile, so the app itself carries a change to them there, then confirms it to the worker.
@@ -508,12 +518,12 @@ import AppKit
                 // "get stage 1 done" to the plan's supervisor is recorded by the app itself; the turn then hears that it was (or why not).
                 let state=try workspaceState(), plans=BuddyPlanStore.readOnlySummary(support:supportURL,workspace:context.workspace)
                 let stages=BuddyPlanChat.intercept(scope:BuddyPlanIntent.scope(options.authorizedUserText).map{($0.through,$0.remainder)},plans:plans,chat:agent,agent:agent,isGroup:false)
-                guard let stages else { options.instructions+=planInstructions(plans:plans,agent:agent,state:state,note:""); replyHandler(try ai.send(routed, options: options), nil); return }
+                guard let stages else { options.instructions+=planInstructions(plans:plans,agent:agent,state:state,note:"",direct:true); replyHandler(try ai.send(routed, options: options), nil); return }
                 let base=options, message=routed
                 Task {
                     let outcome=await self.authorizeStages(stages,workspace:context.workspace,text:base.authorizedUserText,runId:payload["runId"] as? String ?? "",state:state)
                     var turn=base
-                    turn.instructions+=self.planInstructions(plans:BuddyPlanStore.readOnlySummary(support:self.supportURL,workspace:context.workspace),agent:agent,state:state,note:outcome.through.map{BuddyPlanChat.authorizedNote(through:$0,supervisor:true)} ?? BuddyPlanChat.authorizeFailed(outcome.error))
+                    turn.instructions+=self.planInstructions(plans:BuddyPlanStore.readOnlySummary(support:self.supportURL,workspace:context.workspace),agent:agent,state:state,note:outcome.through.map{BuddyPlanChat.authorizedNote(through:$0,supervisor:true)} ?? BuddyPlanChat.authorizeFailed(outcome.error),direct:true)
                     do { replyHandler(try self.ai.send(message, options: turn), nil) } catch { replyHandler(nil, error.localizedDescription) }
                 }
             } catch { replyHandler(nil, error.localizedDescription) }

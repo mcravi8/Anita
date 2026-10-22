@@ -4,8 +4,9 @@
 It reads the lane's start command, records what it was given in fixture-calls.jsonl (next to the run folders), and answers with the
 structured actions the test chose in fixture-mode.txt: auto (accept results, answer questions, give a task that lacks a coding tool back
 as a coding task, resume stops, start a cancelled run's task again with its assignee, plan empty stages, finish stage checks), forward, bogus, hold, refuse (a rework with no instruction), plainanswer (answer every question), resumeall (resume every item), reworkcode (send a result
-back with an instruction that runs code), fail (an error from Claude) or nostart (the process never
-starts, as on the user's Mac at 17:25)."""
+back with an instruction that runs code), holdresume (hold until the user says "Resume S01", the window having expired),
+forwardresume (ask the user for a file and to say "Resume S01"), forwardfile (ask the user for a file at a path), reworkwindow (a rework
+that sets an eight-hour ceiling), fail (an error from Claude) or nostart (the process never starts, as on the user's Mac at 17:25)."""
 import json, re, sys
 from pathlib import Path
 
@@ -48,6 +49,10 @@ for line in sys.stdin:
         'kindRule': 'coding for anything that runs code' in c['instructions'] and 'never the user' in c['instructions'] and 'is the go-ahead for its tasks' in c['instructions'],
         'cancelled': [i.get('cancelled', '') for i in items],
         'cancelRule': 'A cancelled item is a plan task whose run was cancelled outside your actions' in c['instructions'],
+        'lasts': 'stays authorized until it is done or the user stops the plan' in c['instructions'] and 'never set or enforce a time window' in c['instructions'],
+        'lastsData': (brief.get('authorization') or {}).get('lasts', '') if isinstance(brief.get('authorization'), dict) else '',
+        'userAnswers': [i.get('userAnswer', '') for i in items],
+        'pathField': 'path' in schema['properties']['actions']['items']['properties'],
     }
     with (folder / 'fixture-calls.jsonl').open('a') as f:
         f.write(json.dumps(call) + '\n')
@@ -63,6 +68,19 @@ for line in sys.stdin:
         key, kind = i['key'], i['kind']
         if mode == 'hold':
             actions.append({'item': key, 'do': 'hold', 'reason': 'Waiting to see more.'})
+        elif mode == 'holdresume':
+            # Chief's hold on the user's S01: a trigger it waits for, and a time window it set itself.
+            actions.append({'item': key, 'do': 'hold', 'reason': 'S01 stays PARTIAL until the user explicitly says “Resume S01”; the original eight-hour window has expired.'})
+        elif mode == 'forwardresume':
+            actions.append({'item': key, 'do': 'forward_to_user', 'category': 'credential', 'reason': 'The expired run cannot restart automatically.',
+                            'text': 'Please save the published PDF in Research/stages/S01_protocol/source_retry/. Then say “Resume S01.”', 'recommendation': 'Provide the PDF and trigger Resume S01.'})
+        elif mode == 'forwardfile':
+            actions.append({'item': key, 'do': 'forward_to_user', 'category': 'credential', 'reason': 'Only the user can get the published PDF.',
+                            'text': 'Please save the published PDF in Research/stages/S01_protocol/source_retry/.', 'recommendation': 'Use your USC library access.',
+                            'path': 'Research/stages/S01_protocol/source_retry/'})
+        elif mode == 'reworkwindow' and kind == 'result':
+            actions.append({'item': key, 'do': 'rework', 'reason': 'S01 is partial.',
+                            'text': 'Resume S01 from its saved checkpoint. Enforce a fresh eight-hour elapsed ceiling and record the start. Verify Figure 1 against the published PDF.'})
         elif mode == 'forward':
             actions.append({'item': key, 'do': 'forward_to_user', 'reason': 'Only the user can sign in.', 'category': 'credential',
                             'text': 'Forge needs you to sign in to the data portal.', 'recommendation': 'Sign in with your university account.'})

@@ -722,18 +722,19 @@ import Foundation
         require((call15["kinds"] as? [String]) == ["question"] && (call15["taskKinds"] as? [String]) == ["general"] && (call15["expected"] as? [String]) == ["reassign with kind coding"] && call15["kindRule"] as? Bool == true,
                 "the lane is shown the question, the task's kind and what it needs, and told how kinds work: \(call15)")
         let retooled = try planTask(s01World, "s01")
-        require(retooled["kind"] as? String == "coding" && retooled["status"] as? String == "pending" && retooled["assignee"] as? String == chief, "the lane gives the task back to Chief as a coding task: \(retooled)")
+        require(retooled["kind"] as? String == "coding" && retooled["status"] as? String == "pending" && retooled["assignee"] as? String == forge, "the lane gives the task back as a coding task, and since Chief directs, to the engineer (Forge): \(retooled)")
         require(try s01World.store.job(generalID)["status"] as? String == "cancelled", "the general run is retired")
         require(try count(s01World, "SELECT COUNT(*) FROM plan_decisions WHERE kind = 'reassign' AND decided_by = ? AND task_id = ?", [.text(chief), .text(s01World.keys["s01"] ?? "")]) == 1, "the reassign is Chief's recorded decision")
         _ = try step(s01World)
         let codingRun = jobs(s01World, "s01").first { $0["requestId"] as? String == "plan:\(s01World.keys["s01"] ?? ""):2" } ?? [:]
-        require(codingRun["kind"] as? String == "coding" && codingRun["agentId"] as? String == chief && (codingRun["goal"] as? String ?? "").contains("\nGo-ahead: the user's request above is the trigger this task was waiting for. Wording in it such as “ONLY AFTER explicit user trigger”, “Do not execute now”, “On user Run S01 only”"),
+        require(codingRun["kind"] as? String == "coding" && codingRun["agentId"] as? String == forge && (codingRun["goal"] as? String ?? "").contains("\nGo-ahead: the user's request above is the trigger this task was waiting for. Wording in it such as “ONLY AFTER explicit user trigger”, “Do not execute now”, “On user Run S01 only”"),
                 "Buddy starts it again as a coding session, with the go-ahead: \(codingRun["kind"] ?? "not started") \(codingRun["goal"] ?? "")")
         let forUser15 = try s01World.store.openDecisions(workspace: w).filter { $0["audience"] as? String == "user" && $0["taskId"] as? String != signinID }, escalations15 = try notices(s01World, "escalation"), stuck15 = try notices(s01World, "stuck")
         require(forUser15.isEmpty && escalations15.isEmpty && stuck15.isEmpty, "nothing reached the user: \(forUser15) \(escalations15) \(stuck15)")
         let signin15 = try s01World.store.job(signinID), signinOpen = try s01World.store.openDecisions(workspace: w).filter { $0["taskId"] as? String == signinID }
         require((signin15["checkpoint"] as? [String: Any])?["routedTo"] as? String == "user" && signinOpen.count == 1 && signinOpen.first?["audience"] as? String == "user", "the sign-in stays with the user: \(signinOpen)")
-        print("PASS: the supervisor's own question about a missing tool on plan work goes to its background supervision, not the user (one already waiting is moved there when the lane starts; a sign-in stays the user's); an answer cannot add the tool and is refused; the lane reassigns the task with kind coding and Buddy starts it again as a coding session whose brief says the user's request is its go-ahead")
+        require((codingRun["goal"] as? String ?? "").contains("“Chief-owned” in it means Chief supervises and reviews this task; you do the work."), "and its brief reads “Chief-owned” as Chief supervising")
+        print("PASS: the supervisor's own question about a missing tool on plan work goes to its background supervision, not the user (one already waiting is moved there when the lane starts; a sign-in stays the user's); an answer cannot add the tool and is refused; the lane reassigns the task with kind coding, to the engineer since Chief directs, and Buddy starts it again as a coding session whose brief says the user's request is its go-ahead")
 
         // 16. The same loop through a rework (the user's next S01 run): Chief's general run finished PARTIAL, without spec_v1.sha256, and Chief sent
         // it back with "Continue only authorized S01 in the Chief-owned coding session. Generate and independently verify spec_v1.sha256. Do not
@@ -807,5 +808,77 @@ import Foundation
         let forUser17 = try cancelled.store.openDecisions(workspace: w).filter { $0["audience"] as? String == "user" }, escalations17 = try notices(cancelled, "escalation")
         require(forUser17.isEmpty && escalations17.isEmpty, "nothing reaches the user: \(forUser17) \(escalations17)")
         print("PASS: a plan task whose run the user (or a teammate) cancelled is a supervisor item that says who cancelled it; a cancelled run cannot be resumed, so the lane starts the task again with its assignee and Buddy makes exactly one new worker task for the next dispatch; nothing reaches the user")
+
+        // 18. The user's S01 after "Get stage 1 done": the task's brief carried "an eight-hour elapsed ceiling"; it ended PARTIAL "because the window
+        // expired", and Chief held it, then forwarded it, "until the user explicitly says “Resume S01”". An authorization lasts until the stage is done
+        // or the user stops it: the dispatched brief carries no time limit, and a hold or a forward that waits for a new trigger or a self-imposed
+        // window is refused with the reason Chief sees next time. A plain hold, and a forward for what only the user has, still work.
+        let lasting = try world(base, "lasting")
+        let ceilingBrief = "Verify Figure 1 against the published PDF. Enforce an eight-hour elapsed ceiling and record the start."
+        let lastingPlan = try lasting.plans.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Freeze the S01 protocol, then extend", stages: [s01Stage, stages[1]],
+                                                    tasks: [["stage": 1, "key": "s01", "title": "S01 caption verification", "assignee": chief, "kind": "coding", "brief": ceilingBrief, "deliverable": "stages/S01_protocol/acceptance.md"]],
+                                                    members: [chief, forge, vera], by: chief)
+        lasting.planID = lastingPlan["id"] as? String ?? ""; lasting.keys = lastingPlan["keys"] as? [String: String] ?? [:]
+        _ = try lasting.plans.authorize(planId: lasting.planID, through: 1, quote: "Get stage 1 done", messageId: "m-lasting", viaButton: false, now: Date())
+        _ = try step(lasting)
+        let firstRun = jobs(lasting, "s01").first ?? [:], firstGoal = firstRun["goal"] as? String ?? ""
+        require(firstGoal.contains("Your task (S01 caption verification): Verify Figure 1 against the published PDF.\n") && firstGoal.contains("\nNo time limit: ") && !firstGoal.contains("Verify Figure 1 against the published PDF. Enforce"),
+                "the dispatched brief no longer carries the eight-hour ceiling as an instruction, and says there is no time limit:\n\(firstGoal)")
+        try finish(lasting.store, firstRun["id"] as? String ?? "", result: "S01 PARTIAL: the eight-hour window expired before the published Figure 1 caption was verified.")
+        _ = try step(lasting)
+        let s01Key = "result:\(lasting.keys["s01"] ?? ""):1"
+        try mode(lasting, "holdresume")
+        await tick(lasting)
+        let held18 = try itemState(lasting, s01Key)
+        require(calls(lasting).last?["lasts"] as? Bool == true && (calls(lasting).last?["lastsData"] as? String ?? "").contains("until the stage is done or the user stops the plan"),
+                "the supervisor is told an authorization lasts and that it sets no time window of its own: \(calls(lasting).last ?? [:])")
+        require(held18.state == "open" && held18.refusal.contains("Resume S01") && held18.refusal.contains("lasts until the stage is done or the user stops it") && held18.refusal.contains("only daily spending limits"),
+                "a hold until the user says “Resume S01”, for an expired window, is refused with the reason: \(held18)")
+        try mode(lasting, "forwardresume")
+        await tick(lasting)
+        require((calls(lasting).last?["refused"] as? [String])?.first?.contains("Your last action on this item was refused") == true, "the next briefing says why: \(calls(lasting).last?["refused"] ?? "")")
+        let forwarded18 = try itemState(lasting, s01Key), escalations18 = try notices(lasting, "escalation"), open18 = try lasting.store.openDecisions(workspace: w)
+        require(forwarded18.state == "open" && forwarded18.refusal.contains("Resume S01") && escalations18.isEmpty && !open18.contains { $0["kind"] as? String == "escalation" },
+                "a forward that asks the user to say “Resume S01” is refused and reaches nobody: \(forwarded18)")
+        // A rework that sets a fresh ceiling is applied, and the restarted brief carries no limit.
+        try mode(lasting, "reworkwindow")
+        await tick(lasting)
+        require(try planTask(lasting, "s01")["status"] as? String == "pending", "the rework is applied")
+        _ = try step(lasting)
+        let reworkRun = jobs(lasting, "s01").first { $0["requestId"] as? String == "plan:\(lasting.keys["s01"] ?? ""):2" } ?? [:], reworkGoal = reworkRun["goal"] as? String ?? ""
+        require(reworkGoal.contains("Rework requested by Chief: Resume S01 from its saved checkpoint. Verify Figure 1 against the published PDF.") && !reworkGoal.contains("Rework requested by Chief: Resume S01 from its saved checkpoint. Enforce")
+                && reworkGoal.contains("\nNo time limit: "), "the restarted brief has the rework without its ceiling:\n\(reworkGoal)")
+        print("PASS: an authorized stage's task carries no self-imposed time limit; a supervisor hold or forward that waits for the user to say “Resume” or for an expired window is refused with the reason, and a rework's ceiling is taken out of the restarted brief")
+
+        // 19. A PARTIAL plan task that waits for a file only the user has (the published PDF) continues by itself once the file is where it was asked
+        // for: the supervisor forwards with the path, the user saves it there in Finder, and on its next pass the lane hands it over; nobody says “resume”.
+        let arrival = try world(base, "arrival")
+        let research = arrival.root.appendingPathComponent("Research", isDirectory: true), retry = research.appendingPathComponent("stages/S01_protocol/source_retry", isDirectory: true)
+        try FileManager.default.createDirectory(at: retry, withIntermediateDirectories: true)
+        try Data("%PDF-1.4 preprint".utf8).write(to: retry.appendingPathComponent("preprint.pdf"))
+        _ = try BuddyProjectFiles(support: arrival.root).addFolder(w, to: research)
+        try propose(arrival); _ = try step(arrival)
+        let arrivalRun = jobs(arrival, "t1").first?["id"] as? String ?? ""
+        try finish(arrival.store, arrivalRun, result: "S01 PARTIAL: the published PDF is behind the publisher's sign-in; Figure 1 is unverified.")
+        _ = try step(arrival)
+        try mode(arrival, "forwardfile")
+        await tick(arrival)
+        let fileNotice = try notices(arrival, "escalation")
+        require(calls(arrival).last?["pathField"] as? Bool == true && fileNotice.count == 1 && (fileNotice.first?["refs"] as? [String: Any])?["file"] as? String == "Research/stages/S01_protocol/source_retry/",
+                "the forward names where the file goes: \(fileNotice)")
+        try mode(arrival, "auto")
+        await tick(arrival); await tick(arrival)
+        require(try planTask(arrival, "t1")["status"] as? String == "review" && (try notices(arrival, "escalation")).first?["status"] as? String == "open", "the file that was already there is not the one asked for: the task waits")
+        try Data("%PDF-1.7 published J. Stat. Mech. 023403".utf8).write(to: retry.appendingPathComponent("Marcaccioli_2022_published.pdf"))
+        await tick(arrival)
+        require(try planTask(arrival, "t1")["status"] as? String == "pending", "the PARTIAL task is sent back to work with the file: \(try planTask(arrival, "t1"))")
+        let arrivedNotice = try notices(arrival, "escalation").first ?? [:]
+        require(arrivedNotice["status"] as? String == "answered" && ((arrivedNotice["refs"] as? [String: Any])?["answer"] as? String ?? "").contains("Research/stages/S01_protocol/source_retry/Marcaccioli_2022_published.pdf"),
+                "the question is answered with the file's place: \(arrivedNotice)")
+        _ = try step(arrival)
+        let arrivedRun = jobs(arrival, "t1").first { $0["requestId"] as? String == "plan:\(arrival.keys["t1"] ?? ""):2" } ?? [:]
+        require((arrivedRun["goal"] as? String ?? "").contains("Marcaccioli_2022_published.pdf"), "the task starts again, told where the file is: \(arrivedRun["goal"] ?? "not started")")
+        require(!(try arrival.store.openDecisions(workspace: w)).contains { $0["audience"] as? String == "user" }, "nothing waits for the user")
+        print("PASS: a PARTIAL plan task waiting for a file the user must get continues by itself once the file appears where the supervisor asked for it; a file that was already there does not count")
     }
 }

@@ -37,9 +37,19 @@ import AppKit
     /// running work wherever they happen to be talking, and an agent that answers "do that in my direct chat" has failed the request. The same checks
     /// apply as anywhere: a change needs the person's own words from this message, and who may change what is decided by the settings engine.
     static var groupTools: [[String: Any]] { tools }
-    /// What a chat turn, direct or in a group, is offered: every tool above plus the team plan. Background tasks never get the plan tool;
-    /// the worker starts plan work from the plan itself.
-    static var chatTools: [[String: Any]] { tools + [planTool] }
+    /// What a chat turn, direct or in a group, is offered: every tool above plus the team plan and handing the user's input to waiting work.
+    /// Background tasks never get these; the worker starts plan work from the plan itself.
+    static var chatTools: [[String: Any]] { tools + [planTool, resolveWaitingTool] }
+    /// The user supplied, in a chat, what a waiting task asked for (on the user's S01, the published PDF arrived in Chief's chat and Chief
+    /// confirmed it, but nothing told the task): the agent hands it over and the work continues by itself.
+    static let resolveWaitingTool: [String: Any] = ["type": "function", "name": "buddy_resolve_waiting", "description": "Hand what the user just supplied to the task that waits for it, so the work continues by itself. When the user provides what a waiting task asked for (an answer to its question, a file they added or saved in a connected folder, a step they finished), call this right away, before you reply, then say in one line that the work is continuing; never ask the user to say “resume” or “run”. Name the task by taskId (from the live work or the plan) or itemId (the id of what waits: a question forwarded to the user, or a card such as waiting:… or result:…). note: what the user supplied, in a sentence, with what they said that matters. files: where each file they added is (the connected folder's name first, for example Research/paper.pdf). A task waiting for them resumes with it; a plan task whose result stopped PARTIAL for it starts again with it. A sign-in is never passed this way (the user types it in Buddy's sign-in field), and a task the user paused stays paused until they resume it.", "inputSchema": ["type": "object", "additionalProperties": false, "properties": ["taskId": ["type": "string"], "itemId": ["type": "string"], "note": ["type": "string", "maxLength": 4000], "files": ["type": "array", "maxItems": 10, "items": ["type": "string"]]], "required": ["note"]]]
+    /// The worker request for a buddy_resolve_waiting call, from its chat turn: the agent acts as itself, with the user's current message, from
+    /// a direct chat or a group (the turn's key says which).
+    static func resolveWaitingRequest(arguments: [String: Any], context: [String: Any], workspace: String) -> [String: Any] {
+        let chat = BuddyPlanChat.chat(scope: nil, key: context["key"] as? String ?? "", workspace: workspace) ?? ""
+        return ["operation": "resolve_waiting", "workspace": workspace, "actorId": context["agentId"] as? String ?? "", "authorizedText": context["authorizedUserText"] as? String ?? "", "chat": chat,
+                "requestId": (context["runId"] as? String ?? "") + ":" + (context["callId"] as? String ?? ""), "arguments": arguments]
+    }
     static let planTool: [String: Any] = {
         let stage: [String: Any] = ["type": "object", "additionalProperties": false, "required": ["title", "goal", "acceptance"], "properties": [
             "title": ["type": "string", "maxLength": 80], "goal": ["type": "string", "maxLength": 600],
@@ -56,7 +66,7 @@ import AppKit
             "through": ["type": "integer", "minimum": 1, "maximum": 6], "quote": ["type": "string", "maxLength": 300],
             "ops": ["type": "array", "maxItems": 12, "items": ["type": "object"]], "expectedRevision": ["type": "integer"],
             "escalationId": ["type": "string"], "answer": ["type": "string", "maxLength": 2000]]
-        let description = "The team's work plan: one objective split into stages, each with tasks assigned to agents. It is the only plan Buddy follows; plans written in chat or files are not followed. (1) When the user gives or changes an objective, call propose with 2–6 stages (each with a goal and 1–5 checkable acceptance criteria naming a deliverable: a file, a number, or a teammate's sign-off) and the tasks of at least the first stage; then show the stages and end your reply with the menu Buddy returns: always ask which stage to get done or what to change. (2) The user authorizes stages themselves, by tapping “Get stage N done” or writing it (for example “get stage 1 done”); Buddy records that natively. Call authorize only if the user's current message says it, passing their exact words as quote. Give each task the kind it needs: coding for anything that runs code (a coding session, a script, a hash, executing a protocol file); Buddy makes such a task a coding task itself and says so under corrections. A task starts only once the user authorizes its stage, so a brief never says to wait for the user's trigger or not to execute yet. (3) Inside an authorized stage you may add, reassign, rewrite or waive tasks with revise. Buddy starts each task when the tasks it depends on are accepted, sends results to the supervisor, and stops when the authorized stages are done. Changing an authorized stage's goal or acceptance criteria needs the user's words. (4) answer passes the user's reply to a question you forwarded (escalationId from the plan). get returns the plan with live status; queued or running is not done. Never say a stage is authorized or that work has started unless Buddy recorded it (this turn's instructions say so, or authorize returned the plan with that stage authorized); if authorizing is refused, ask the user to tap “Get stage N done” on the plan."
+        let description = "The team's work plan: one objective split into stages, each with tasks assigned to agents. It is the only plan Buddy follows; plans written in chat or files are not followed. (1) When the user gives or changes an objective, call propose with 2–6 stages (each with a goal and 1–5 checkable acceptance criteria naming a deliverable: a file, a number, or a teammate's sign-off) and the tasks of at least the first stage; then show the stages and end your reply with the menu Buddy returns: always ask which stage to get done or what to change. (2) The user authorizes stages themselves, by tapping “Get stage N done” or writing it (for example “get stage 1 done”); Buddy records that natively. Call authorize only if the user's current message says it, passing their exact words as quote. Give each task the kind it needs: coding for anything that runs code (a coding session, a script, a hash, executing a protocol file); Buddy makes such a task a coding task itself and says so under corrections. Give each task to the member who does that work (coding to the engineer, checking to the validator, writing to the writer); the plan's supervisor judges, directs and reviews, so a task given to it goes to the best-fitting member (Buddy does this itself and says so under corrections) unless nobody else in the group can do it. A task starts only once the user authorizes its stage, so a brief never says to wait for the user's trigger or not to execute yet. (3) Inside an authorized stage you may add, reassign, rewrite or waive tasks with revise. Buddy starts each task when the tasks it depends on are accepted, sends results to the supervisor, and stops when the authorized stages are done. Changing an authorized stage's goal or acceptance criteria needs the user's words. (4) answer passes the user's reply to a question you forwarded (escalationId from the plan). get returns the plan with live status; queued or running is not done. Never say a stage is authorized or that work has started unless Buddy recorded it (this turn's instructions say so, or authorize returned the plan with that stage authorized); if authorizing is refused, ask the user to tap “Get stage N done” on the plan."
         return ["type": "function", "name": "buddy_plan", "description": description, "inputSchema": ["type": "object", "additionalProperties": false, "required": ["action"], "properties": properties] as [String: Any]]
     }()
     static var tools: [[String: Any]] { [["type": "function", "name": "buddy_start_background_task", "description": "Carry out an authorized longer task using this agent's selected provider/model, persistent private browser and files on this Mac. Choose this tool yourself when useful; the user need not request background work or know about workers. Include the full relevant brief/context. Ordinary capability questions and hypothetical examples are not task requests. Use actual accepted ID/state internally, never premature completion. Keep the chat acknowledgement to one short sentence; do not expose task IDs or a technical plan. Results and blockers return to this agent's DM. For website interactions prefer buddy_computer_task; software builds use buddy_coding_session and recurring work uses buddy_manage_routine. Existing permissions, private sign-in, native action reviews and any daily limit apply.", "inputSchema": ["type": "object", "additionalProperties": false, "properties": ["title": ["type": "string"], "goal": ["type": "string"], "kind": ["type": "string", "enum": ["research", "applications", "email", "general"]], "account": accountProperty], "required": ["title", "goal", "kind"]]], computerTool, routineTool, codingTool, teamTool, settingsTool, rulesTool] }
@@ -114,15 +124,18 @@ enum BuddyAutonomy {
     Decisions: decide by default. The user has told this team to stop waiting for them. When a choice is yours (method, framing within the agreed objective, data and sources, file names and folders, order of work, retries and re-runs, which teammate to involve, accepting or reworking a teammate's draft, model usage within the daily limit), pick what a careful expert on this team would pick, act on it, and state the choice and its reason in one line of your result. Do not ask anyone to confirm a choice you can make and can undo. Lines in your saved configuration that say to ask or check first apply only to the user list below.
     Only these go to the user: (1) credentials and identity: sign-in, passwords, verification codes, CAPTCHA, new accounts; (2) money: paying, buying or subscribing to anything, or changing a daily limit; (3) anything irreversible toward other people or organisations in the user's name (sending, submitting, publishing, purchasing) or deleting the user's own files; (4) changing the objective, a stage's goal or acceptance criteria, or starting a stage the user has not authorized; (5) a fact about the user that no file, message or tool has.
     Anything else you cannot decide alone goes to your supervisor, never to the user. Native reviews (browser steps, connected-service writes, network commands, sign-in) reach the user by themselves; never ask in chat for what a review already covers. Deciding under this policy is not inventing a decision; never say the user decided or approved something they did not. Model usage is not "spending money".
+    Work the user authorized (a stage they asked to get done, a task they started) stays authorized until it is done or they stop it: it continues by itself, never waits for them to say "resume" or "run" again, and has no time window, cutoff or attempt ceiling unless they set one (their daily spending limits are the only limits; never invent one). When what work waited for arrives, it continues; say so in one line.
     """
+    /// What every chat turn is told about input that solves a wait.
+    static let resolving = "When the user provides what a waiting task asked for (an answer, a file they added or saved, a step they finished), in this message, hand it over with buddy_resolve_waiting right away and say in one line that the work is continuing; never ask the user to say \"resume\"."
     /// The line that tells an agent whom it turns to: nobody, itself (it supervises), or the named supervisor.
     static func supervision(agent: String, supervisor: String?, name: String?) -> String {
         guard let supervisor, !supervisor.isEmpty else { return "No supervisor is set for this team: decide what you can; put user-list items to the user in one short question with your recommendation." }
-        if supervisor == agent { return "You supervise this team. Teammates' questions and results come to you; Buddy runs your supervision in the background between the user's messages. Decide everything outside the user list yourself and record why; forward only user-list items, with your recommendation, while other work continues. A teammate writing \"needs the user's OK\" does not make something a user item." }
+        if supervisor == agent { return "You supervise this team. Teammates' questions and results come to you; Buddy runs your supervision in the background between the user's messages. Decide everything outside the user list yourself and record why; forward only user-list items, with your recommendation, while other work continues. A teammate writing \"needs the user's OK\" does not make something a user item. Work the user authorized keeps going until it is done or they stop it: ask them only for what they must provide, never to say \"resume\" or \"run\" again, and set no time window or attempt ceiling of your own. You judge and direct on the team's most expensive model: give the heavy lifting (coding, research, writing, checking) to teammates whose roles fit, and keep reviewing, deciding and integrating for yourself." }
         let who = name.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } ?? "the agent who oversees this team"
         return "Your supervisor is \(who). Questions you cannot decide go to them (buddy_request_decision in background work; by name in chat). Never end a reply or result with a question to the user unless it is on the user list."
     }
-    static func chatGuidance(agent: String, supervisor: String?, name: String?) -> String { policy + "\n" + supervision(agent: agent, supervisor: supervisor, name: name) + "\n" + clock() }
+    static func chatGuidance(agent: String, supervisor: String?, name: String?) -> String { policy + "\n" + supervision(agent: agent, supervisor: supervisor, name: name) + "\n" + clock() + "\n" + resolving }
     /// The person's own clock. Buddy's records are stamped in UTC (they end in Z); without this line an agent told the person a task had been
     /// "running since 03:10 UTC". The zone is this Mac's, so it follows the person if they travel.
     static func clock(now: Date = Date(), zone: TimeZone = .current) -> String {
@@ -167,7 +180,7 @@ enum BuddyAutonomy {
 /// reads before a turn. An agent sees its own work; the supervisor sees everyone's. Times are the person's own.
 enum BuddyLiveWork {
     static let live: Set<String> = ["running", "queued", "waiting_review", "waiting_user", "paused", "interrupted"]
-    static let recentWindow: TimeInterval = 3 * 3600
+    static let recentWindow: TimeInterval = 3 * 3600, solvedWindow: TimeInterval = 12 * 3600
     static func context(jobs: [[String: Any]], workspace: String, agent: String, supervises: Bool, names: [String: String], now: Date = Date(), zone: TimeZone = .current) -> String {
         let stamps = ISO8601DateFormatter(), fractional = ISO8601DateFormatter(), clock = DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -192,7 +205,10 @@ enum BuddyLiveWork {
             .sorted { (order[$0["status"] as? String ?? ""] ?? 9, date($0["createdAt"]) ?? now) < (order[$1["status"] as? String ?? ""] ?? 9, date($1["createdAt"]) ?? now) }
         let recent = mine.filter { ["completed", "failed", "cancelled"].contains($0["status"] as? String ?? "") && now.timeIntervalSince(date($0["updatedAt"]) ?? .distantPast) <= recentWindow }
             .sorted { (date($0["updatedAt"]) ?? now) > (date($1["updatedAt"]) ?? now) }
-        guard !current.isEmpty || !recent.isEmpty else { return "" }
+        // Waits the user's input solved lately (`lastResolved`, set when it was handed over), newest first: what every chat must not bring up again.
+        func solvedAt(_ job: [String: Any]) -> Date? { date((job["lastResolved"] as? [String: Any])?["at"]) }
+        let solved = mine.filter { solvedAt($0).map { now.timeIntervalSince($0) <= solvedWindow } ?? false }.sorted { (solvedAt($0) ?? now) > (solvedAt($1) ?? now) }
+        guard !current.isEmpty || !recent.isEmpty || !solved.isEmpty else { return "" }
         func who(_ job: [String: Any]) -> String { names[job["agentId"] as? String ?? ""] ?? "An agent" }
         func line(_ job: [String: Any]) -> String {
             let status = job["status"] as? String ?? "", title = short(job["title"] as? String ?? "Background task", 120)
@@ -220,15 +236,77 @@ enum BuddyLiveWork {
         func finished(_ job: [String: Any]) -> String {
             let status = job["status"] as? String ?? "", result = short(job["result"] as? String ?? job["progress"] as? String ?? "", 240)
             return "- \(who(job)): “\(short(job["title"] as? String ?? "Background task", 120))” — \(status == "completed" ? "finished" : status)" + (date(job["updatedAt"]).map { " \(time($0))" } ?? "") + (result.isEmpty ? "" : ": " + result)
+                + (solvedAt(job) == nil ? "" : " (since then it got what it waited for: see below)")
+        }
+        func resolved(_ job: [String: Any]) -> String {
+            let record = job["lastResolved"] as? [String: Any] ?? [:], via = record["via"] as? String ?? "", note = short(record["note"] as? String ?? "", 240)
+            return "- \(who(job)): “\(short(job["title"] as? String ?? "Background task", 120))” got what it waited for" + (solvedAt(job).map { " at \(time($0))" } ?? "")
+                + " (passed on by \(via.isEmpty ? "an agent" : via)" + (note.isEmpty ? "" : ": " + note) + "); it continues."
         }
         var lines = ["Live background work, read from Buddy's worker at \(clock.string(from: now)):"]
         lines += current.prefix(10).map(line)
         if current.count > 10 { lines.append("- (\(current.count - 10) more not shown)") }
         if !recent.isEmpty { lines.append("Finished in the last 3 hours:"); lines += recent.prefix(5).map(finished); if recent.count > 5 { lines.append("- (\(recent.count - 5) more not shown)") } }
+        if !solved.isEmpty { lines.append("Solved recently (do not bring these up as blockers again):"); lines += solved.prefix(5).map(resolved) }
         lines.append("Answer questions about progress from this, not from the plan alone. For time left, use how long the running and recent commands take and what is still to do; give it as an estimate and say what it depends on. Never say you cannot see progress when it is listed here.")
         var text = lines.joined(separator: "\n")
         if text.count > 6000 { text = String(text.prefix(5960)) + "\n- (more not shown)" }
         return text
+    }
+}
+
+/// The work as it stands, told the same way to an agent's direct chat and to its turn in a group. At 19:48 Chief confirmed in its direct chat
+/// that the user's upload was the published PDF; at 19:49, answering "Working?" in the group, it said S01 was blocked until the user said
+/// “Resume S01”: the group round's coordinator had written that state into its assignment from older group messages, and its group turn never
+/// saw its own direct chat. Pure: it reads the plan summaries, the worker's task records and the saved chats the app reads before a turn.
+enum BuddyLiveState {
+    /// The plans the agent works in and the live background work (with the waits solved lately), as one block. The same in every chat.
+    static func block(plans: [[String: Any]], jobs: [[String: Any]], state: [String: Any], agent: String, supervises: Bool, now: Date = Date(), zone: TimeZone = .current) -> String {
+        let names = BuddyPlanChat.names(state: state), workspace = state["conversationWorkspace"] as? String ?? ""
+        let plan = BuddyPlanChat.context(plans: plans, agent: agent, names: names, members: BuddyPlanChat.members(state: state), now: now)
+        let live = BuddyLiveWork.context(jobs: jobs, workspace: workspace, agent: agent, supervises: supervises, names: names, now: now, zone: zone)
+        return [plan, live].filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+    /// The whole team's state for the coordinator of a group round, as the group's lead sees it (the plan's supervisor, else the group's
+    /// manager), so assignments are written from it and not from the group's older messages.
+    static func coordinator(plans: [[String: Any]], jobs: [[String: Any]], state: [String: Any], group: String, now: Date = Date(), zone: TimeZone = .current) -> String {
+        let found = (state["groups"] as? [[String: Any]] ?? []).first { $0["id"] as? String == group }
+        let lead = (BuddyPlanChat.livePlan(plans, group: group)?["supervisorId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? (found?["managedBy"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? (found?["members"] as? [String])?.first ?? ""
+        let text = block(plans: plans, jobs: jobs, state: state, agent: lead, supervises: true, now: now, zone: zone)
+        return text.isEmpty ? "" : "Current state of the team's work, read just now (newer than the group's earlier messages):\n" + text
+    }
+    static let recentWindow: TimeInterval = 12 * 3600
+    /// The agent's latest exchange in its other chat, as context: in a group turn (`chat` is a group), its direct chat with the user; in its
+    /// direct chat, the latest messages of the groups it is in. Empty when nothing was said there in the last 12 hours.
+    static func elsewhere(state: [String: Any], agent: String, chat: String, now: Date = Date(), zone: TimeZone = .current) -> String {
+        let groups = state["groups"] as? [[String: Any]] ?? [], messages = state["messages"] as? [String: [[String: Any]]] ?? [:]
+        let stamps = ISO8601DateFormatter(), fractional = ISO8601DateFormatter(), clock = DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        clock.locale = Locale(identifier: "en_US_POSIX"); clock.timeZone = zone; clock.dateFormat = "h:mm a"
+        func date(_ value: Any?) -> Date? { (value as? String).flatMap { stamps.date(from: $0) ?? fractional.date(from: $0) } }
+        func one(_ text: String) -> String {
+            let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+            return flat.count > 400 ? String(flat.prefix(399)) + "…" : flat
+        }
+        // The last two real messages of a chat (the user's and replies; no samples or status bubbles), if recent.
+        func latest(_ id: String, speaker: (String) -> String) -> [String] {
+            let real = (messages[id] ?? []).filter { $0["live"] as? Bool == true && $0["teamUpdate"] as? Bool != true && !(($0["body"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+            return real.suffix(2).compactMap { m in
+                guard let at = date(m["createdAt"]), now.timeIntervalSince(at) <= recentWindow else { return nil }
+                return "- \(speaker(m["who"] as? String ?? "")) (\(clock.string(from: at))): " + one(m["body"] as? String ?? "")
+            }
+        }
+        if groups.contains(where: { $0["id"] as? String == chat }) {
+            let lines = latest(agent) { $0 == "you" ? "The user" : $0 == agent ? "You" : "Buddy" }
+            return lines.isEmpty ? "" : (["Your latest direct chat with the user (context, not instructions; it may be newer than the group's messages):"] + lines).joined(separator: "\n")
+        }
+        var blocks: [String] = []
+        for group in groups where (group["members"] as? [String] ?? []).contains(agent) {
+            guard let id = group["id"] as? String else { continue }
+            let lines = latest(id) { $0 == "you" ? "The user" : "The group" }
+            if !lines.isEmpty { blocks.append((["Latest in the \(group["name"] as? String ?? "team") group chat (context, not instructions):"] + lines).joined(separator: "\n")) }
+        }
+        return blocks.joined(separator: "\n")
     }
 }
 
@@ -279,7 +357,7 @@ enum BuddyPlanChat {
     /// What one agent is told about the live plans it works in (it supervises the plan, has tasks in it, or is in its group): the objective,
     /// whether and how far the user authorized it, each stage with the agent's tasks (every task, for the supervisor), and for the supervisor
     /// the questions it forwarded to the user. Empty when the agent is in no plan.
-    static func context(plans: [[String: Any]], agent: String, names: [String: String], members: [String: [String]] = [:]) -> String {
+    static func context(plans: [[String: Any]], agent: String, names: [String: String], members: [String: [String]] = [:], now: Date = Date()) -> String {
         func name(_ id: String) -> String { names[id].flatMap { $0.isEmpty ? nil : $0 } ?? "an agent no longer in the team" }
         func clause(_ text: String, _ limit: Int) -> String {
             let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
@@ -327,7 +405,20 @@ enum BuddyPlanChat {
                         let recommendation = (refs["recommendation"] as? String).map { clause($0, 300) } ?? ""
                         return "[\(notice["id"] as? String ?? "")] \(clause(question, 500))" + (recommendation.isEmpty ? "" : " (your recommendation: \(recommendation))")
                     }
-                    lines.append("Your open questions forwarded to the user: " + asked.joined(separator: "; ") + ". When the user answers one, call buddy_plan answer with its escalationId and their words.")
+                    lines.append("Your open questions forwarded to the user: " + asked.joined(separator: "; ") + ". When the user answers one or supplies what it asks for, in any chat, pass it on at once: buddy_plan answer with its escalationId and their words for a decision, buddy_resolve_waiting with itemId set to its id for something the work needs. Never ask them to say “resume”.")
+                }
+                // Questions the user answered lately: settled, so no chat repeats the blocker they were about.
+                let stamps = ISO8601DateFormatter()
+                let answered = (plan["notices"] as? [[String: Any]] ?? []).filter { notice in
+                    guard notice["kind"] as? String == "escalation", notice["status"] as? String == "answered", let at = ((notice["refs"] as? [String: Any])?["answeredAt"] as? String).flatMap(stamps.date(from:)) else { return false }
+                    return now.timeIntervalSince(at) <= BuddyLiveWork.solvedWindow
+                }
+                if !answered.isEmpty {
+                    let settled = answered.suffix(5).map { notice -> String in
+                        let refs = notice["refs"] as? [String: Any] ?? [:], question = (refs["question"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? notice["text"] as? String ?? ""
+                        return "[\(notice["id"] as? String ?? "")] \(clause(question, 300)) → \(clause(refs["answer"] as? String ?? "", 300))"
+                    }
+                    lines.append("Questions the user answered recently (settled; never ask again): " + settled.joined(separator: "; ") + ".")
                 }
             }
             if status == "active" { lines.append(supervises ? supervisorWorkFromPlan : workFromPlan) }

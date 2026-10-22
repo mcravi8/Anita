@@ -93,7 +93,7 @@ import Foundation
         let actions = ((schema["properties"] as? [String: Any])?["action"] as? [String: Any])?["enum"] as? [String]
         require(actions == ["get", "propose", "authorize", "revise", "answer"], "an agent can get, propose, authorize, revise and answer, never stop: \(actions ?? [])")
         let chatNames = BuddyWorkerClient.chatTools.compactMap { $0["name"] as? String }, toolNames = BuddyWorkerClient.tools.compactMap { $0["name"] as? String }
-        require(chatNames == toolNames + ["buddy_plan"], "chat turns, direct and group, are offered every tool plus the plan: \(chatNames)")
+        require(chatNames == toolNames + ["buddy_plan", "buddy_resolve_waiting"], "chat turns, direct and group, are offered every tool plus the plan and handing the user's input to a waiting task: \(chatNames)")
         for phrase in ["per-task", "per-run budget", "task spending limit", "remaining budget", "Existing budgets", "necessary user decision"] { require(!description.contains(phrase), "the plan tool does not say \(phrase)") }
 
         // 7. One supervisor for a group round: the saved team supervisor (whom the prompts name), else the plan's, else the manager, whoever

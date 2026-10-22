@@ -127,6 +127,8 @@ import Darwin
                                                               guard let self else { throw BuddyWorkerFailure(message: "Worker stopped.") }
                                                               try self.supervisorAnswer(id, review: review, accept: accept, supervisor: lead, name: name, reason: reason) }))
             try listen()
+            // Programs a coding session left running before this worker started are told to the task that carries that work on.
+            noteLeftovers(closing: false)
             if FileManager.default.fileExists(atPath:privateMarker.path){
                 guard let saved=try JSONSerialization.jsonObject(with:Data(contentsOf:privateMarker)) as? [String:Any] else{throw BuddyWorkerFailure(message:"Restore the private sign-in marker before restarting Buddy’s worker.")}
                 if saved["shared"] as? Bool==true {
@@ -152,6 +154,8 @@ import Darwin
         // What is under way stays as it was saved: the next worker finds it interrupted by the restart and continues it by itself. Closing the
         // model bridges below must not be recorded as the connection failing.
         terminated = true; stopped = true
+        // A program a coding session started that is still running is recorded on its task before anything closes, so its next attempt knows.
+        if store != nil { noteLeftovers(closing: true) }
         timer?.invalidate(); supervisor?.shutdown(); holdAwake(false); monitor?.shutdown(); service?.shutdown(); browser?.close(); claude?.close(); codingShell?.close()
         if serverFD >= 0 { Darwin.close(serverFD); unlink(BuddyWorkerWire.socketURL(support).path); serverFD = -1 }; if lockFD >= 0 { Darwin.close(lockFD); lockFD = -1 }
     }
@@ -159,6 +163,32 @@ import Darwin
     private func taskFiles(_ id: String) -> [String] {
         guard let job = try? store.job(id), let workspace = job["workspace"] as? String, let scope = try? files(job).scope(workspace), let listed = try? files(job).list(scope) else { return [] }
         return (listed["files"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }
+    }
+    /// Programs running in a task's folder (a coding session's pipeline left running, or a command still going when the worker closes): each is
+    /// recorded once on the task that works in that folder now, and, while that task has not ended, told to it in its updates, so its next attempt
+    /// waits for it or reads its outputs instead of starting it again or asking the user to recover the session.
+    private func noteLeftovers(closing: Bool) {
+        let found = BuddyLeftovers.scan(tasks: root.appendingPathComponent("Tasks", isDirectory: true))
+        guard !found.isEmpty else { return }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        for program in found {
+            // The newest task working in that folder (in the store's order when two were made in the same second).
+            let owners = store.jobs.enumerated().filter { Self.projectOwner($0.element) == program.task }
+            guard let job = owners.max(by: { ($0.element["createdAt"] as? String ?? "", $0.offset) < ($1.element["createdAt"] as? String ?? "", $1.offset) })?.element, let id = job["id"] as? String else { continue }
+            var list = job["leftovers"] as? [[String: Any]] ?? []
+            guard !list.contains(where: { $0["pid"] as? Int == Int(program.pid) }) else { continue }
+            let command = program.command.count > 300 ? String(program.command.prefix(299)) + "…" : program.command
+            list.append(["pid": Int(program.pid), "command": command, "seenAt": stamp, "when": closing ? "closing" : "start"])
+            var fields: [String: Any] = ["leftovers": Array(list.suffix(10))]
+            if !BuddyWorkerStore.terminal.contains(job["status"] as? String ?? "") {
+                let line = closing
+                    ? "[Buddy] Buddy was closing while a program this task started was still running: pid \(program.pid), `\(command)`. It may still be running, or may have stopped with Buddy: when you continue, check it with a look at running processes (ps -p \(program.pid)) and read its outputs in your project before starting it again."
+                    : "[Buddy] After Buddy restarted, a program from an earlier attempt of this task is still running in its project: pid \(program.pid), `\(command)`. Wait for it to finish or read the outputs it writes in your project (check it with a look at running processes, ps -p \(program.pid)); do not start it again, and do not ask the user to restore the earlier session."
+                let updates = (job["updates"] as? [String] ?? []) + [line]
+                if updates.joined().count <= 30000 { fields["updates"] = updates }
+            }
+            _ = try? store.update(id, fields)
+        }
     }
     /// Keeps the Mac from idle sleep while `on` (work is running, or an authorized stage has live work), and lets it sleep again after.
     private func holdAwake(_ on: Bool) {
@@ -243,12 +273,41 @@ import Darwin
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: log.path)
     }
     private func directory(_ job: [String: Any]) -> URL { root.appendingPathComponent("Tasks/" + (job["id"] as! String), isDirectory: true) }
+    /// The project a task works in: its own, or for a re-dispatch of a plan task the one its earlier attempt worked in (see `projectFolder`).
+    private func project(_ job: [String: Any]) -> URL { Self.projectFolder(job, root: root) }
     /// The home folder agents' file tools may ask for (BuddyFolderAccess): the person's own, or a fake one in tests.
     var filesHome: URL?
     private func files(_ job: [String: Any]) -> BuddyProjectFiles {
-        let files = BuddyProjectFiles(support: support, privateRoot: directory(job).appendingPathComponent("Files", isDirectory: true), privateFolderID: job["id"] as? String)
+        let files = BuddyProjectFiles(support: support, privateRoot: project(job), privateFolderID: job["id"] as? String)
         if let filesHome { files.home = filesHome }
         return files
+    }
+    /// Whose folder a task's project is: the task itself, or the earlier attempt of its plan task whose project it carries on (`projectOf`).
+    static func projectOwner(_ job: [String: Any]) -> String { (job["projectOf"] as? String).flatMap { UUID(uuidString: $0) != nil ? $0 : nil } ?? (job["id"] as? String ?? "") }
+    /// A task's project folder. A re-dispatch of a plan task works in its earlier attempt's folder, so the scripts and outputs there, and any
+    /// program still writing into it, carry over (on 21 Oct a rework of S02a started with a blank copy while the first run's pipeline still ran).
+    static func projectFolder(_ job: [String: Any], root: URL) -> URL { root.appendingPathComponent("Tasks/" + projectOwner(job) + "/Files", isDirectory: true) }
+    /// What a re-dispatch of a plan task carries over from its previous attempt (`previous`, that worker task): its project, when there are files
+    /// in it, as the new task's `projectOf`, and a note for the new task saying what is there and what was still running. Nil when there is nothing.
+    static func carryOver(previous: String, store: BuddyWorkerStore, root: URL) -> (fields: [String: Any], note: String)? {
+        guard UUID(uuidString: previous) != nil, let job = try? store.job(previous) else { return nil }
+        let folder = projectFolder(job, root: root)
+        var found: [String] = []
+        if let walk = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+            for case let url as URL in walk {
+                guard found.count < 20000, (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
+                found.append(String(url.standardizedFileURL.path.dropFirst(folder.standardizedFileURL.path.count + 1)))
+            }
+        }
+        guard !found.isEmpty else { return nil }
+        // Scripts first, so the note names what produced the outputs.
+        let scripts = Set(["py", "r", "sh", "jl", "m", "do", "ipynb", "js", "mjs", "sql"])
+        let shown = found.sorted { (scripts.contains(($0 as NSString).pathExtension.lowercased()) ? 0 : 1, $0) < (scripts.contains(($1 as NSString).pathExtension.lowercased()) ? 0 : 1, $1) }.prefix(8)
+        let running = (job["leftovers"] as? [[String: Any]] ?? []).filter { ($0["pid"] as? Int).map { kill(pid_t($0), 0) == 0 } ?? false }
+            .map { "pid \($0["pid"] as? Int ?? 0) (`\($0["command"] as? String ?? "")`)" }
+        let note = "[Buddy] This task carries on the earlier attempt of the same plan task (task \(previous)): you work in that attempt's project folder, with its \(found.count) file\(found.count == 1 ? "" : "s"), such as \(shown.joined(separator: ", ")). Check what is there, its saved outputs and its last result first, and do not redo work that is already done."
+            + (running.isEmpty ? "" : " Still running there from that attempt: " + running.joined(separator: "; ") + "; wait for it or read what it writes, and do not start it again.")
+        return (["projectOf": projectOwner(job), "carriedFrom": previous], note)
     }
     func handle(_ request: [String: Any]) async throws -> [String: Any] {
         let current = workspace
@@ -262,6 +321,7 @@ import Darwin
             return reply
         }
         if operation=="plan" {return try await planOperation(request,workspace:current)}
+        if operation=="resolve_waiting" {return try await resolveWaiting(request,workspace:current)}
         if operation=="computer" {
             let agentID=request["agentId"] as? String ?? "",a=try agent(agentID,workspace:current),args=request["arguments"] as? [String:Any] ?? [:],action=args["action"] as? String ?? ""
             if action=="status" {
@@ -727,7 +787,7 @@ import Darwin
             guard leads(actor) else { throw refused("Only the team's supervisor or the group's manager proposes its plan.") }
             guard group != nil else { throw BuddyPlanFailure(message: "Choose the group this plan is for.", code: "invalid_input") }
             let out = try plans.propose(workspace: current, groupId: groupID, supervisorId: supervisor ?? manager ?? actor ?? "", objective: args["objective"] as? String ?? "",
-                                        stages: args["stages"] as? [[String: Any]] ?? [], tasks: args["tasks"] as? [[String: Any]] ?? [], members: members, by: actor ?? "user")
+                                        stages: args["stages"] as? [[String: Any]] ?? [], tasks: args["tasks"] as? [[String: Any]] ?? [], members: members, by: actor ?? "user", team: state["agents"] as? [[String: Any]] ?? [])
             var result = try reply(out["id"] as? String ?? "", ["status": "draft", "revision": out["revision"] ?? 1, "keys": out["keys"] ?? [String: String](), "corrections": out["corrections"] ?? [String]()])
             result["menu"] = out["menu"] ?? ""
             return result
@@ -755,7 +815,7 @@ import Darwin
             guard leads(actor) else { throw refused("Only the team's supervisor or the group's manager revises its plan.") }
             // An authorized stage's goal or acceptance changes only on the user's own words.
             let userWords = actor == nil || (BuddyPlanIntent.change(text) != nil && BuddyAgentChanges.quoteAuthorized(args["quote"] as? String ?? "", in: text))
-            let out = try plans.revise(planId: id, expectedRevision: Self.integer(args["expectedRevision"]), ops: args["ops"] as? [[String: Any]] ?? [], by: actor ?? "user", userWords: userWords, members: members)
+            let out = try plans.revise(planId: id, expectedRevision: Self.integer(args["expectedRevision"]), ops: args["ops"] as? [[String: Any]] ?? [], by: actor ?? "user", userWords: userWords, members: members, team: state["agents"] as? [[String: Any]] ?? [])
             return try reply(id, ["revision": out["revision"] ?? NSNull(), "corrections": out["corrections"] ?? [String]()])
         case "answer":
             let plan = try existing(), id = plan["id"] as? String ?? ""
@@ -776,6 +836,87 @@ import Darwin
         default:
             throw BuddyPlanFailure(message: "Choose get, propose, authorize, revise, answer or stop.", code: "invalid_input")
         }
+    }
+    // MARK: what the user supplied in a chat (buddy_resolve_waiting)
+
+    /// The user supplied, in a chat, what a waiting task asked for, and the chat's agent hands it over: the task continues by itself, with
+    /// nobody saying “resume”. The agent acts as itself on the user's current message (the app adds it, never the model): the task's own agent,
+    /// the team's supervisor or the owner's manager may. Files the user added are named by their place in a connected folder and must be there.
+    /// A step on a web page or a file to save is finished as the user's Done would; a saved sign-in, a run the user paused and a pending review
+    /// stay theirs (BuddyWaits).
+    private func resolveWaiting(_ request: [String: Any], workspace current: String) async throws -> [String: Any] {
+        guard let actor = (request["actorId"] as? String).flatMap({ $0.isEmpty ? nil : $0 }) else {
+            throw BuddyWorkerFailure(message: "An agent hands over what the user said in its chat; on screen the user answers on the task's card.", code: "not_authorized")
+        }
+        let said = (request["authorizedText"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !said.isEmpty else { throw BuddyWorkerFailure(message: "Hand over only what the user supplied in their current message; this turn has none.", code: "not_authorized") }
+        let args = request["arguments"] as? [String: Any] ?? [:], state = try self.state()
+        let job = try BuddyWaits.find(store: store, plans: plans, workspace: current, taskId: args["taskId"] as? String, itemId: args["itemId"] as? String)
+        try authorize(actor, on: job)
+        var note = (args["note"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if note.isEmpty { note = said }
+        var added: [String] = []
+        for raw in (args["files"] as? [String] ?? []).prefix(10) {
+            guard let place = BuddyArrivals.locate(raw, workspace: current, support: support), FileManager.default.fileExists(atPath: place.url.path) else {
+                throw BuddyWorkerFailure(message: "There is no file at \(raw) in a connected folder. Look for where the user put it with buddy_list_folders and buddy_list_files, then name it with the folder's name first.", code: "not_found")
+            }
+            added.append(place.shown)
+        }
+        let input = note + (added.isEmpty ? "" : "\nFiles the user added: " + added.joined(separator: ", "))
+        let who = Self.names(state)[actor].flatMap { $0.isEmpty ? nil : $0 } ?? "an agent"
+        let id = job["id"] as? String ?? "", point = job["checkpoint"] as? [String: Any] ?? [:]
+        if job["status"] as? String == "waiting_user", let need = point["need"] as? String, BuddyWebStep.needs.contains(need) {
+            // A step on a web page, or a file to save: what the user's Done does, with what they said added for the task.
+            let updates = (job["updates"] as? [String] ?? []) + ["[From the user, passed on by \(who)] " + input]
+            guard updates.joined().count <= 30000 else { throw BuddyWorkerFailure(message: "This task has too much follow-up context; start new work with what the user gave.") }
+            try store.update(id, ["updates": updates, "lastResolved": ["at": ISO8601DateFormatter().string(from: Date()), "via": who, "note": String(input.prefix(600))]])
+            let done = try await stepDone(id, workspace: current)
+            return ["resumed": done["done"] as? Bool ?? false, "taskId": id, "title": job["title"] ?? "", "how": done["note"] as? String ?? "It continues with what the user gave."]
+        }
+        return try BuddyWaits.resolve(store: store, plans: plans, job: job, input: input, quote: said, via: who)
+    }
+    /// What was at a file step's place when the worker first looked, by checkpoint, so a file the user saves there later is told apart.
+    private var fileStepBaselines: [String: [String]] = [:]
+    /// When the worker first saw a file step's file arrive, by checkpoint.
+    private var fileStepArrivals: [String: Date] = [:]
+    private var fileStepsCheckedAt = Date.distantPast
+    /// A task waiting for a file the user saves into a connected folder (a file step) continues once the file is there, without anyone pressing
+    /// Done: the user may have saved it in Finder. A file already there when the worker first looks counts only if it was saved after the step
+    /// was asked. Every 3 seconds at most.
+    private func resumeArrivedFiles(workspace: String, now: Date) async {
+        guard abs(now.timeIntervalSince(fileStepsCheckedAt)) >= 3 else { return }
+        fileStepsCheckedAt = now
+        var seen: Set<String> = []
+        for job in store.jobs where job["workspace"] as? String == workspace && job["status"] as? String == "waiting_user" {
+            guard let id = job["id"] as? String, id != active, let point = job["checkpoint"] as? [String: Any], point["need"] as? String == "file", let pointID = point["id"] as? String,
+                  let folder = point["folderId"] as? String, let path = BuddyWebStep.path(point["path"] as? String),
+                  let root = try? BuddyProjectFiles(support: support).location(BuddyFileScope(workspace: workspace, folderId: folder)) else { continue }
+            seen.insert(pointID)
+            let url = root.appendingPathComponent(path), present = BuddyArrivals.signature(url)
+            let arrived: Bool
+            if let baseline = fileStepBaselines[pointID] { arrived = !present.isEmpty && present != baseline }
+            else {
+                // First look: a file saved after the step was asked has arrived (and stays arrived); anything else there is the baseline.
+                var info = stat()
+                let changed = lstat(url.path, &info) == 0 ? Date(timeIntervalSince1970: TimeInterval(max(info.st_ctimespec.tv_sec, info.st_mtimespec.tv_sec))) : .distantPast
+                arrived = !present.isEmpty && changed >= ((point["at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) } ?? .distantFuture)
+                fileStepBaselines[pointID] = arrived ? [] : present
+            }
+            guard arrived else { fileStepArrivals.removeValue(forKey: pointID); continue }
+            // The user may press Done right after saving it: that comes first. Only a file that has been there a while (a minute while Buddy's
+            // Chrome is open for this step) is handed over by Buddy itself.
+            let since = fileStepArrivals[pointID] ?? now
+            fileStepArrivals[pointID] = since
+            guard abs(now.timeIntervalSince(since)) >= (privateOpen && privateTask == id ? 60 : 5) else { continue }
+            if privateOpen && privateTask == id { do { try await closeSharedChrome() } catch { continue } }
+            let target = point["target"] as? String ?? path
+            let note = "[Buddy] The file this task asked the user for is there now: \(target) (folderId \(folder), path \(path)). The user saved it themselves; nobody pressed Done. Check it with buddy_list_files"
+                + (job["kind"] as? String == "coding" ? " and bring it into the project with buddy_copy_into_project" : "") + " before using it, then continue."
+            guard (try? store.job(id))?["status"] as? String == "waiting_user", (try? await handle(["operation": "resume", "workspace": workspace, "taskId": id, "message": note, "fromAgent": true])) != nil else { continue }
+            fileStepBaselines.removeValue(forKey: pointID); fileStepArrivals.removeValue(forKey: pointID)
+            _ = try? store.update(id, ["lastResolved": ["at": ISO8601DateFormatter().string(from: Date()), "via": "Buddy", "note": "The user saved \(target)."]])
+        }
+        fileStepBaselines = fileStepBaselines.filter { seen.contains($0.key) }; fileStepArrivals = fileStepArrivals.filter { seen.contains($0.key) }
     }
     /// Passes the user's answer to a question the supervisor forwarded to them. The plan store's `answerEscalation` (the supervisor lane's unit)
     /// records it, closes the question and resumes what waited on it; until that is part of this build the answer is refused, so nothing is half applied.
@@ -1871,6 +2012,8 @@ import Darwin
         if !store.paused { do { try routines.enqueueDue(store:store,workspace:space,supervisor:current.flatMap { teamSupervisor($0) });try? FileManager.default.removeItem(at:root.appendingPathComponent("schedule-error.txt")) } catch { try? Data(error.localizedDescription.utf8).write(to:root.appendingPathComponent("schedule-error.txt"),options:.atomic) } }
         await watchActive(now:now)
         recover(workspace:space,now:now)
+        // A file step whose file the user saved where it was asked for continues without their Done.
+        if !space.isEmpty { await resumeArrivedFiles(workspace:space,now:now) }
         if now.timeIntervalSince(lastLimitPass)>=BuddyRecovery.limitPassInterval {lastLimitPass=now;resumeWithinLimit(workspace:space)}
         // The stage loop, every two seconds: it dispatches each ready task of the authorized stage exactly once, as an ordinary task.
         if !space.isEmpty, now.timeIntervalSince(lastLoopAt) >= 2 { lastLoopAt = now; runStageLoop(workspace: space, state: current) }
@@ -1906,7 +2049,7 @@ import Darwin
         do {
             guard !store.paused else { _ = try plans.reconcile(jobs: store.jobs); return }
             var leads: [String: String] = [:]
-            _ = try BuddyStageLoop.step(plans: plans, workspace: workspace, jobs: store.jobs, names: state.map(Self.names) ?? [:]) { ref, brief, requestID in
+            _ = try BuddyStageLoop.step(plans: plans, workspace: workspace, jobs: store.jobs, names: state.map(Self.names) ?? [:], state: state) { ref, brief, requestID in
                 let kind = ref.kind == "coding" ? "coding" : ref.kind == "research" ? "research" : "general"
                 // A coding task runs on its assignee's own provider (createTask picks Codex or Claude Code), so nothing is pinned here.
                 let request: [String: Any] = ["workspace": workspace, "agentId": ref.assignee, "requestId": requestID, "title": ref.title, "goal": brief, "kind": kind]
@@ -1914,6 +2057,12 @@ import Darwin
                 if leads[ref.planId] == nil { leads[ref.planId] = (try plans.plan(id: ref.planId))?["supervisorId"] as? String ?? "" }
                 var fields: [String: Any] = ["planId": ref.planId, "planTaskId": ref.taskId, "stageId": ref.stageId]
                 if let lead = leads[ref.planId], !lead.isEmpty { fields["reportsTo"] = lead; fields["supervisorId"] = lead }
+                // A re-dispatch works in its previous attempt's project and is told what is there, never on a blank copy.
+                if let carried = Self.carryOver(previous: ref.previousWorkerTaskId, store: store, root: root) {
+                    fields.merge(carried.fields) { $1 }
+                    let updates = (try? store.job(id))?["updates"] as? [String] ?? []
+                    if !updates.contains(carried.note) { fields["updates"] = updates + [carried.note] }
+                }
                 return try store.update(id, fields)
             }
             try? FileManager.default.removeItem(at: root.appendingPathComponent("plan-error.txt"))
@@ -2062,7 +2211,7 @@ import Darwin
         }
         active = id; providerRevision = try providerSettings.current(workspace).revision(job["provider"] as? String ?? ""); authorization = authorizationData(job); stopped = false; startedAt = Date(); runID = UUID().uuidString
         lastActivityAt=startedAt
-        let folder = directory(job); try FileManager.default.createDirectory(at: folder.appendingPathComponent("Files"), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let folder = directory(job); try FileManager.default.createDirectory(at: project(job), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         // The model is settled once, at the start: a scheduled run takes its agent's current model, and that is what the attempt records and uses.
         let claudeModel: String? = job["provider"] as? String == "claude" ? modelForRun(job, agentID: agentID, workspace: workspace) : nil
         // The reason it last stopped no longer applies once a new attempt starts; a retry that was waiting is now under way.
@@ -2136,7 +2285,7 @@ import Darwin
             let home = folder.appendingPathComponent("Claude", isDirectory: true); try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             var tools = Self.tools + [BuddyInboxReview.tool,BuddyInboxReview.finishTool] + ConversationService.directServiceTools
             if permitted(job, tool: "projectFiles") { tools += BuddyProjectFiles.tools }
-            try p.send(["command": "start", "runId":runID!, "model":claudeModel ?? modelForRun(job,agentID:agentID,workspace:workspace), "apiKey": key, "budget": BuddyRunLimit.bridge(budget, room: BuddyBudget.headroom(support: support, workspace: workspace, agent: agentID)?.room), "cwd": folder.appendingPathComponent("Files").path, "home": home.path, "prompt": prompt, "instructions": instructions, "tools": tools])
+            try p.send(["command": "start", "runId":runID!, "model":claudeModel ?? modelForRun(job,agentID:agentID,workspace:workspace), "apiKey": key, "budget": BuddyRunLimit.bridge(budget, room: BuddyBudget.headroom(support: support, workspace: workspace, agent: agentID)?.room), "cwd": project(job).path, "home": home.path, "prompt": prompt, "instructions": instructions, "tools": tools])
         } else {
             var options = BuddyTurnOptions();options.selectedModel=job["model"] as? String; options.proposalsEnabled = false; options.fileScope = scope; options.actorId = agentID; options.instructions = instructions; options.extraTools = Self.tools.filter { $0["name"] as? String != "buddy_connected_services" };options.inboxEvidence=inboxEvidence;options.inboxRoutine=((job["routineSeriesID"] ?? job["routineID"]) as? String).map{$0+":"+(job["inboxQuery"] as? String ?? "")+":"+(job["goal"] as? String ?? "")}
             options.proposalScope = BuddyProposalScope(workspace: workspace, chat: id, actorId: agentID, replyRunId: runID!)
@@ -2147,7 +2296,7 @@ import Darwin
         let workspace=job["workspace"] as! String,id=job["id"] as! String,folder=directory(job)
         guard permitted(job,tool:"projectFiles"),let key=keyReader(workspace),let runID else {throw BuddyWorkerFailure(message:"Reconnect Claude and enable file access for this coding session.")}
         let budget=BuddyRunLimit.allowance(provider:"claude",stored:job["remainingBudgetUSD"] as? Double ?? job["budgetUSD"] as? Double ?? 0)
-        let home=folder.appendingPathComponent("Claude",isDirectory:true),project=folder.appendingPathComponent("Files",isDirectory:true)
+        let home=folder.appendingPathComponent("Claude",isDirectory:true),project=self.project(job)
         try FileManager.default.createDirectory(at:home,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         codingNeedsInput=false;attemptText=""
         try store.update(id,["remainingBudgetUSD":0,"reservedBudgetUSD":budget,"codingProject":project.path,"progress":"Starting coding session"]);attemptHeard=false
@@ -2176,7 +2325,7 @@ import Darwin
     private var codex: BuddyCodexCodingSession?
     /// A coding attempt on ChatGPT: Codex on this task's own app-server connection, with the Claude path's brief, receipts, reviews, results and stops.
     private func executeCodexCoding(_ job:[String:Any],agent a:[String:Any]) throws {
-        let id=job["id"] as! String,folder=directory(job),project=folder.appendingPathComponent("Files",isDirectory:true)
+        let id=job["id"] as! String,folder=directory(job),project=self.project(job)
         guard permitted(job,tool:"projectFiles"),let runID else {throw BuddyWorkerFailure(message:"Reconnect ChatGPT and enable file access for this coding session.")}
         codingNeedsInput=false;attemptText="";attemptHeard=false
         let current=try store.update(id,["codingProject":project.path,"progress":"Starting coding session"])
@@ -2204,7 +2353,7 @@ import Darwin
         // A command Buddy can read word for word as routine (a public download, a project install) goes to the team's supervisor, and so does
         // one that runs project scripts Buddy read (the supervisor reads them in full); writing files outside the project, and anything else,
         // stays with the person.
-        let arguments=tool["arguments"] as? [String:Any] ?? [:],projectPath=directory(job).appendingPathComponent("Files").path
+        let arguments=tool["arguments"] as? [String:Any] ?? [:],projectPath=project(job).path
         let verdict=network ? BuddyCommandReview.assess(arguments["command"] as? String ?? "",project:projectPath,cwd:arguments["cwd"] as? String) : BuddyCommandReview.sensitive("It writes files outside the project copy.")
         let route=reviewRoute(verdict,job:(try? store.job(id)) ?? job),lead=route=="supervisor" ? ((try? state()).map(Self.names)?[(try? store.job(id))?["supervisorId"] as? String ?? ""] ?? "the supervisor") : ""
         var entry:[String:Any]=["id":review,"kind":"coding","status":"pending","tool":tool,"route":route,"assessment":Self.assessment(verdict),"questions":[["id":"command","question":network ? "Allow this command to run outside the project sandbox, with network access?":"Allow writing these files outside the project?","options":[["label":"Accept"],["label":"Decline"]]]]]
@@ -2267,7 +2416,7 @@ import Darwin
         let id=job["id"] as! String
         guard active==id,!stopped,permitted(job,tool:"projectFiles"),!BuddyAccessDiff.narrows(from:authorization,to:authorizationData(job)),!codingCommandBusy,let code=args["code"] as? String,!code.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,code.count<=10000,!code.contains("\0") else {throw BuddyWorkerFailure(message:"This command is unavailable, another command is running, or file access changed.")}
         codingCommandBusy=true;defer{codingCommandBusy=false}
-        let workspace=job["workspace"] as? String ?? "",project=directory(job).appendingPathComponent("Files").path
+        let workspace=job["workspace"] as? String ?? "",project=self.project(job).path
         // A command that signs in with one of the person's saved sign-ins. Codex runs every other command in its own shell.
         let named=(args["credential"] as? String).flatMap{$0.isEmpty ? nil:$0},profile=named.flatMap{BuddyCredentials.profile($0)}
         if named != nil && profile == nil {throw BuddyWorkerFailure(message:"Choose a saved sign-in Buddy supports: "+BuddyCredentials.profileIDs.joined(separator:", ")+".",code:"invalid_input")}
@@ -3204,5 +3353,54 @@ enum BuddyAccessDiff {
         if value == nil || value is NSNull { return [:] }
         guard let saved = value as? [String: Any], saved["version"] as? Int == 2, let blocked = saved["blocked"] as? [String: [String]] else { return nil }
         return blocked
+    }
+}
+
+/// Programs running inside a task's folder under Worker/Tasks: the user's own processes whose working directory, or a path on whose command line,
+/// is in one. A coding session's pipeline left running when the worker restarted is one; this worker itself is not.
+enum BuddyLeftovers {
+    struct Program { let pid: Int32; let task: String; let command: String }
+    static func scan(tasks: URL) -> [Program] {
+        // The kernel names /var and /tmp as /private/var and /private/tmp, which Foundation's standard form leaves out: both are matched.
+        let forms = [tasks.path, tasks.standardizedFileURL.path, tasks.resolvingSymlinksInPath().path]
+        let roots = Set(forms.flatMap { [$0, $0.hasPrefix("/private/") ? String($0.dropFirst(8)) : "/private" + $0] }).map { $0 + "/" }
+        func task(in path: String) -> String? {
+            for root in roots where path.hasPrefix(root) {
+                let id = String(path.dropFirst(root.count).prefix { $0 != "/" })
+                if UUID(uuidString: id) != nil { return id }
+            }
+            return nil
+        }
+        let ps = Process(), out = Pipe()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps"); ps.arguments = ["-axww", "-o", "pid=,uid=,command="]
+        ps.standardOutput = out; ps.standardError = FileHandle.nullDevice
+        guard (try? ps.run()) != nil else { return [] }
+        let data = out.fileHandleForReading.readDataToEndOfFile(); ps.waitUntilExit()
+        let me = getpid(), uid = getuid()
+        var found: [Program] = []
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+            // "  pid   uid command with its arguments"
+            func field(_ text: Substring) -> (Substring, Substring) {
+                let trimmed = text.drop { $0 == " " }
+                let end = trimmed.firstIndex(of: " ") ?? trimmed.endIndex
+                return (trimmed[..<end], trimmed[end...].drop { $0 == " " })
+            }
+            let (pidText, rest) = field(line), (uidText, commandText) = field(rest)
+            guard let pid = Int32(pidText), let owner = UInt32(uidText), owner == uid, pid != me, pid != ps.processIdentifier, !commandText.isEmpty else { continue }
+            let command = String(commandText)
+            // A path on the command line, or the working directory.
+            var id: String?
+            for root in roots { if let range = command.range(of: root) { id = task(in: String(command[range.lowerBound...])); if id != nil { break } } }
+            if id == nil, let cwd = workingDirectory(pid) { id = task(in: cwd + "/") }
+            if let id { found.append(Program(pid: pid, task: id, command: command)) }
+        }
+        return found
+    }
+    /// A process's working directory, if this user may read it.
+    static func workingDirectory(_ pid: Int32) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.stride)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+        return withUnsafeBytes(of: &info.pvi_cdir.vip_path) { raw in raw.bindMemory(to: CChar.self).baseAddress.map { String(cString: $0) } }
     }
 }

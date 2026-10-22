@@ -372,7 +372,7 @@ import Foundation
             require(try step(store11, plans11).count == 2, "both stage 1 tasks start")
             let s01Job = jobs(store11, s01).first ?? [:], goal11 = s01Job["goal"] as? String ?? ""
             require(s01Job["kind"] as? String == "coding", "the S01 task runs as a coding session: \(s01Job["kind"] ?? "")")
-            require(goal11.hasPrefix("Authorization: the user asked \"Get stage 1 done\" (") && goal11.contains("for stage 1, \"S01 Protocol and literature freeze\".\nGo-ahead: the user's request above is the trigger this task was waiting for. Wording in it such as “ONLY AFTER explicit user trigger”, “Do not execute now”, “On user Run S01 only” dates from before they authorized this stage and no longer holds: do the task now. The go-ahead approves nothing on the user list (a sign-in, money, anything sent in the user's name); those still go to the user.\nStage goal: "),
+            require(goal11.hasPrefix("Authorization: the user asked \"Get stage 1 done\" (") && goal11.contains("for stage 1, \"S01 Protocol and literature freeze\".\nGo-ahead: the user's request above is the trigger this task was waiting for. Wording in it such as “ONLY AFTER explicit user trigger”, “Do not execute now”, “On user Run S01 only” dates from before they authorized this stage and no longer holds: do the task now. The authorization holds until the stage is done or the user stops it, so nothing in it waits for them to say “resume” or “run” again, also after a blocker is solved, and it has no time or attempt limit. The go-ahead approves nothing on the user list (a sign-in, money, anything sent in the user's name); those still go to the user.\nStage goal: "),
                     "the brief puts the go-ahead right after the authorization:\n\(goal11)")
             require(!((jobs(store11, notes).first?["goal"] as? String ?? "?").contains("Go-ahead:")), "a brief with nothing waiting for the user gets no go-ahead line")
 
@@ -551,6 +551,187 @@ import Foundation
             require(try task(plans14, planID14, p1)["status"] as? String == "dispatched" && jobs(store14, p1).count == 1, "the task goes on with its run")
             require(try plans14.stoppedRuns(planId: planID14, jobs: store14.jobs).isEmpty, "once going, nothing more to resume")
             print("PASS: authorizing a stage again after the person stopped the plan lets the runs the stop paused go on, with no second worker task; a run the person paused by itself, one with an unconfirmed action, and anything while the plan is stopped stay paused")
+        }
+
+        // 15. An authorization lasts until the stage is done or the user stops it (the user's S01, "Get stage 1 done"). Chief wrote "an eight-hour
+        // elapsed ceiling" into its briefs and, once the blocker was solved, kept waiting for the user to say “Resume S01”. Wording that sets a time
+        // or attempt limit is taken out of a dispatched brief; what the user supplies starts the work again by itself, past the dispatch and rework
+        // bounds; and a waiting task continues when the user's input is handed to it.
+        do {
+            for text in ["Enforce a fresh eight-hour elapsed ceiling and record the start.", "The original eight-hour window has expired.", "the expired runtime ceiling prohibits automatic continuation",
+                         "It is now 9:43 AM, past the original 3:34 AM cutoff.", "Stop PARTIAL if blocked or time expires.", "Stop after 3 attempts.", "the expired eight-hour run cannot restart automatically",
+                         "for a new run capped at eight hours", "Resume S01 only, with a new eight-hour ceiling."] {
+                require(!BuddyTaskNeeds.ceilings(text).isEmpty, "“\(text)” sets a time or attempt limit")
+            }
+            for text in ["Use a 30-minute window around each jump.", "Respect the daily spending limit.", "Measure the time elapsed since the shock.", "The WRDS session expired; sign in again.",
+                         "Use an estimation window of 250 days.", "Freeze the data at the 2019 cutoff.", "Fit the model for at most 3 regimes."] {
+                require(BuddyTaskNeeds.ceilings(text).isEmpty, "“\(text)” sets no limit: \(BuddyTaskNeeds.ceilings(text))")
+            }
+            for text in ["Then say “Resume S01.”", "explicitly trigger “Resume S01” before further verification", "Supplying a PDF path does not explicitly restart the expired eight-hour run.",
+                         "The expired run cannot restart automatically.", "Please say “Resume S01” to restart caption verification.", "S01 waits for the user's explicit trigger."] {
+                require(!BuddyTaskNeeds.waitWording(text).isEmpty, "“\(text)” waits for the user to say go again, or for a time limit")
+            }
+            for text in ["S01 cannot continue without the published PDF.", "Say which table to use.", "Save the PDF in source_retry/, then press Done.", "Say “get stage 2 done” to continue.",
+                         "Buy the dataset only with the user's explicit approval.", "Waiting for Forge's table."] {
+                require(BuddyTaskNeeds.waitWording(text).isEmpty, "“\(text)” is no self-imposed wait: \(BuddyTaskNeeds.waitWording(text))")
+            }
+            // A forward may still wait for the user's approval of something on their list; only asking them to say go again is a re-trigger.
+            require(BuddyTaskNeeds.retriggers("The dataset costs $40; waiting for your approval to buy it.").isEmpty && BuddyTaskNeeds.retriggers("Please explicitly say whether to send the email.").isEmpty,
+                    "approving a purchase or a message in the user's name is not a re-trigger")
+            require(!BuddyTaskNeeds.retriggers("Then say “Resume S01.”").isEmpty && !BuddyTaskNeeds.retriggers("The expired run cannot restart automatically.").isEmpty, "asking the user to say go again is")
+            // Chief's own reassign text for S01, as it wrote it.
+            let chiefText = "Resume S01 only in the Chief-owned coding session from its saved checkpoint. The user's explicit restart supersedes the expired prior-run cutoff; enforce a fresh eight-hour elapsed ceiling and record the start. Read current S01 instructions and acceptance.md, reconcile prior retrieval state, and pursue published Figure 1 verification. Stop PARTIAL if blocked or time expires; do not start another stage."
+            let cut = BuddyTaskNeeds.withoutCeilings(chiefText)
+            require(cut.text == "Resume S01 only in the Chief-owned coding session from its saved checkpoint. Read current S01 instructions and acceptance.md, reconcile prior retrieval state, and pursue published Figure 1 verification. do not start another stage.",
+                    "the sentences that set a limit are taken out and the rest is kept as written: \(cut.text)")
+            require(cut.removed == ["The user's explicit restart supersedes the expired prior-run cutoff;", "enforce a fresh eight-hour elapsed ceiling and record the start.", "Stop PARTIAL if blocked or time expires;"], "and they are named: \(cut.removed)")
+            require(BuddyTaskNeeds.withoutCeilings("Rerun the pipeline on a copy of the data.").removed.isEmpty, "a brief with no limit is left as it is")
+
+            // A dispatched brief carries no time limit, and says so.
+            let (store15, plans15, directory15) = try fresh(root, "keep-going")
+            let tasks15: [[String: Any]] = [["stage": 1, "key": "s01", "title": "S01 caption verification", "assignee": forge, "kind": "coding",
+                                             "brief": "Verify Figure 1 against the published PDF. Enforce an eight-hour elapsed ceiling and record the start.", "deliverable": "stages/S01_protocol/acceptance.md"],
+                                            ["stage": 1, "key": "ask", "title": "Collect the sources", "assignee": vera, "kind": "research", "brief": "Collect the sources.", "deliverable": "sources.md"]]
+            let plan15 = try plans15.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Freeze the S01 protocol", stages: stages, tasks: tasks15, members: members, by: chief)
+            let (planID15, _, keys15) = ids(plan15)
+            let s01 = keys15["s01"] ?? "", ask = keys15["ask"] ?? ""
+            _ = try plans15.authorize(planId: planID15, through: 1, quote: "Get stage 1 done", messageId: "m15", viaButton: false, now: Date())
+            require(try step(store15, plans15).count == 2, "both stage 1 tasks start")
+            let first15 = jobs(store15, s01).first ?? [:], goal15 = first15["goal"] as? String ?? ""
+            require(goal15.contains("Your task (S01 caption verification): Verify Figure 1 against the published PDF.\n") && goal15.contains("\nNo time limit: Buddy took out wording that set one (“Enforce an eight-hour elapsed ceiling and record the start.”).")
+                    && goal15.contains("only the user's daily spending limits apply") && goal15.contains("Never stop, or report PARTIAL, because time passed"), "the dispatched brief has no time limit, and says so:\n\(goal15)")
+            require(!((jobs(store15, ask).first?["goal"] as? String ?? "?").contains("No time limit:")), "a brief that set no limit gets no such line")
+
+            // The S01 result ends PARTIAL for a file only the user has; the supervisor forwards it (as the lane does), and the bounds are used up.
+            let run15 = first15["id"] as? String ?? ""
+            try finish(store15, run15, result: "S01 PARTIAL: the published PDF is not available to this session; Figure 1 is unverified.")
+            _ = try step(store15, plans15)
+            require(try task(plans15, planID15, s01)["status"] as? String == "review", "the PARTIAL result waits for review")
+            let raw15 = try BuddyOperationsDB(directory: directory15, existing: true)
+            try raw15.run("UPDATE plan_tasks SET dispatches = 6, reworks = 3 WHERE id = ?", [.text(s01)])
+            let itemKey = "result:\(s01):1", decision15 = "escalation:run15:\(itemKey)"
+            try store15.openDecision(workspace: w, id: decision15, agent: chief, kind: "escalation", title: "Chief needs your decision", question: "Save the published PDF in Research/stages/S01_protocol/source_retry/.", label: "Answer", payload: ["itemKey": itemKey], audience: "user")
+            let notice15 = try plans15.addNotice(planId: planID15, kind: "escalation", text: "Save the published PDF in Research/stages/S01_protocol/source_retry/. The team keeps working on the rest meanwhile.", chat: true,
+                                                 refs: ["itemKey": itemKey, "itemKind": "result", "decisionId": decision15, "taskId": s01, "workerTaskId": run15, "category": "credential", "question": "Save the published PDF in Research/stages/S01_protocol/source_retry/."])
+            // The user's answer on the card starts the task again with it, with no one saying “resume”, although it was started 6 times and sent back 3.
+            _ = try plans15.answerEscalation(planId: planID15, escalationId: notice15, answer: "I saved the published PDF as Research/paper_published.pdf.", quote: "I saved the published PDF as Research/paper_published.pdf.", store: store15)
+            let continued = try task(plans15, planID15, s01)
+            require(continued["status"] as? String == "pending" && continued["reworks"] as? Int == 3, "the user's answer to a PARTIAL result's question sends the task back with it, as no rework: \(continued)")
+            require(!(try store15.openDecisions(workspace: w)).contains { $0["id"] as? String == "result:\(run15):1" || $0["id"] as? String == decision15 }, "the result and the question are settled")
+            let restarted15 = try step(store15, plans15)
+            let again15 = store15.jobs.first { $0["id"] as? String == restarted15.first } ?? [:]
+            require(restarted15.count == 1 && again15["requestId"] as? String == "plan:\(s01):7", "it starts again although it was started six times: the user's input allows one more start: \(restarted15) \(try task(plans15, planID15, s01))")
+            let goal15b = again15["goal"] as? String ?? ""
+            require(goal15b.contains("\nFrom the user, what this task was waiting for (newest last):\n- I saved the published PDF as Research/paper_published.pdf.") , "the restarted brief carries what the user supplied:\n\(goal15b)")
+            // Once more PARTIAL: one rework more than the bound is allowed for the user's input, and no more.
+            try finish(store15, restarted15.first ?? "", result: "S01 PARTIAL: acceptance.md not yet re-hashed.")
+            _ = try step(store15, plans15)
+            require(try plans15.rework(taskId: s01, instruction: "Re-hash acceptance.md against the published caption.", by: chief) == nil, "a rework past the bound is allowed once after the user's input")
+            require(try task(plans15, planID15, s01)["reworks"] as? Int == 4, "and counted")
+
+            // A waiting task: the user's input, handed over from a chat, continues it with no one saying “resume”.
+            let askRun = jobs(store15, ask).first?["id"] as? String ?? ""
+            try store15.update(askRun, ["status": "running", "attempt": 1, "executionRunID": "r15"])
+            try store15.update(askRun, ["status": "waiting_user", "stopCause": "checkpoint.user", "progress": "Waiting for you: Which reading list should I use?",
+                                        "checkpoint": ["id": UUID().uuidString, "category": "personal_fact", "question": "Which reading list should I use?", "routedTo": "user", "at": "2026-10-21T10:00:00Z"]])
+            let waitingJob = try BuddyWaits.find(store: store15, plans: plans15, workspace: w, taskId: nil, itemId: "waiting:\(askRun):1")
+            require(waitingJob["id"] as? String == askRun, "the wait is found by its card's id: \(waitingJob["id"] ?? "")")
+            require((try BuddyWaits.find(store: store15, plans: plans15, workspace: w, taskId: ask, itemId: nil))["id"] as? String == askRun, "and by its plan task")
+            let handed = try BuddyWaits.resolve(store: store15, plans: plans15, job: waitingJob, input: "Use the reading list in Research/reading.md.", quote: "use my reading list, it's in Research", via: "Chief")
+            let resumed15 = try store15.job(askRun)
+            require(handed["resumed"] as? Bool == true && resumed15["status"] as? String == "queued" && resumed15["checkpoint"] as? [String: Any] == nil
+                    && (resumed15["updates"] as? [String] ?? []).last == "[From the user, passed on by Chief] Use the reading list in Research/reading.md.", "the waiting task continues with the user's input: \(resumed15["status"] ?? "") \(resumed15["updates"] ?? "")")
+            require((resumed15["lastResolved"] as? [String: Any])?["via"] as? String == "Chief", "and it records that its wait was solved, for every chat to see")
+            require(try raw15.rows("SELECT COUNT(*) FROM plan_decisions WHERE kind = 'user_answer' AND decided_by = 'user' AND task_id = ?", [.text(ask)]).first?[0].int == 1, "the input is the user's own decision in the plan")
+            // A completed PARTIAL result handed its input from a chat starts again the same way.
+            try finish(store15, askRun, result: "PARTIAL: the reading list has no 2021 section.")
+            _ = try step(store15, plans15)
+            _ = try BuddyWaits.resolve(store: store15, plans: plans15, job: try store15.job(askRun), input: "The 2021 section is in Research/reading-2021.md.", quote: "the 2021 part is in a separate file", via: "Chief")
+            require(try task(plans15, planID15, ask)["status"] as? String == "pending", "a PARTIAL result handed its input starts again")
+            // What Buddy does not hand over from a chat: a run the user paused themselves, and a saved sign-in.
+            let restartedAsk = try step(store15, plans15).first ?? ""
+            try store15.update(restartedAsk, ["status": "running", "attempt": 1, "executionRunID": "r15b"])
+            try store15.update(restartedAsk, ["status": "paused", "stopCause": "user.pause", "progress": "Paused."])
+            let pausedRefusal = throwsAny("a run the user paused is theirs to resume") { _ = try BuddyWaits.resolve(store: store15, plans: plans15, job: try store15.job(restartedAsk), input: "here it is", quote: "here it is", via: "Chief") }
+            require(pausedRefusal.contains("paused"), "the refusal says the user paused it: \(pausedRefusal)")
+            try store15.update(restartedAsk, ["status": "waiting_user", "stopCause": "checkpoint.user", "checkpoint": ["id": UUID().uuidString, "question": "Sign in to WRDS.", "need": "credential", "profile": "wrds", "service": "WRDS", "routedTo": "user"]])
+            let credentialRefusal = throwsAny("a saved sign-in is never handed over in a message") { _ = try BuddyWaits.resolve(store: store15, plans: plans15, job: try store15.job(restartedAsk), input: "my password is hunter2", quote: "my password is hunter2", via: "Chief") }
+            require(credentialRefusal.contains("sign-in field"), "the refusal points to the sign-in field: \(credentialRefusal)")
+            print("PASS: an authorization lasts until the stage is done: a dispatched brief carries no self-imposed time limit; the user's answer to a PARTIAL result's question, or input handed over from a chat, starts the work again by itself, past the dispatch and rework bounds, and a waiting task continues; a run the user paused and a saved sign-in stay the user's")
+        }
+
+        // 16. A re-dispatch keeps the work (S02a, 21 Oct): the rework of Chief's S02a started a new worker task with a blank project, so the 661
+        // files of the first run, and the pipeline still running in its folder, were invisible to it. Each dispatch names the worker task of the
+        // previous attempt, so the worker can give the new one that project.
+        do {
+            let (store16, plans16, _) = try fresh(root, "redispatch")
+            let plan16 = try plans16.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Reproduce the Omori results", stages: stages, tasks: [tasks[0]], members: members, by: chief)
+            let (planID16, _, keys16) = ids(plan16)
+            let p1 = keys16["t1"] ?? ""
+            _ = try plans16.authorize(planId: planID16, through: 1, quote: "get stage 1 done", messageId: "m16", viaButton: false, now: Date())
+            let first16 = try plans16.ready(workspace: w)
+            require(first16.count == 1 && first16[0].previousWorkerTaskId.isEmpty, "a first dispatch has no previous attempt")
+            let run16 = try step(store16, plans16).first ?? ""
+            try finish(store16, run16, result: "PARTIAL: the pilot is still running.")
+            _ = try step(store16, plans16)
+            try plans16.rework(taskId: p1, instruction: "Finish the pilot from its saved outputs.", by: chief)
+            let again16 = try plans16.ready(workspace: w)
+            require(again16.first?.previousWorkerTaskId == run16, "a re-dispatch names the previous attempt's worker task: \(again16.map(\.previousWorkerTaskId))")
+            require(try plans16.settleKind(again16[0]).previousWorkerTaskId == run16, "and keeps naming it when its kind is settled")
+            print("PASS: each re-dispatch of a plan task names the worker task of its previous attempt, so the worker can carry that attempt's project over")
+        }
+
+        // 17. Chief directs, cheaper agents do the work. The supervisor runs on the team's most expensive model: a task given to it goes to the
+        // member whose role and tools fit (coding → the engineer, checking → the validator, writing → the research lead), and the plan says so;
+        // with nobody else able to do it, it stays, with the reason. An older plan's task already on the supervisor moves when it is next started.
+        do {
+            let lyra = "66666666-6666-4666-8666-666666666666"
+            let all: [String: Bool] = ["web": true, "projectFiles": true, "desktop": true]
+            let team: [[String: Any]] = [["id": chief, "name": "Chief", "role": "Chief of Staff & Agent Operations Lead", "tools": all],
+                                         ["id": forge, "name": "Forge", "role": "Quant Engineer (pipeline & reproducibility)", "tools": all],
+                                         ["id": vera, "name": "Vera", "role": "Validator (skeptic & findings log)", "tools": all],
+                                         ["id": lyra, "name": "Lyra", "role": "Research Lead (question, literature, framing)", "tools": all]]
+            let everyone = [chief, forge, vera, lyra]
+            let (store17, plans17, directory17) = try fresh(root, "delegation")
+            let onChief: [[String: Any]] = [
+                ["stage": 1, "key": "pipe", "title": "S02a pooled diagnostics and benchmark allocation", "assignee": chief, "kind": "coding", "brief": "Run the pooled pipeline in one Chief-owned coding session.", "deliverable": "stages/S02a_pooled/report.md"],
+                ["stage": 1, "key": "check", "title": "Check S02a against the paper", "assignee": chief, "kind": "research", "brief": "Reproduce Table 2 and sign off or object.", "deliverable": "A sign-off note", "dependsOn": ["pipe"]],
+                ["stage": 1, "key": "write", "title": "Write the S02a findings section", "assignee": chief, "kind": "general", "brief": "Draft the findings section from the accepted results.", "deliverable": "findings.md", "dependsOn": ["check"]]]
+            let plan17 = try plans17.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Stage 2: one Chief-owned coding session per explicit Run SXX", stages: stages, tasks: onChief, members: everyone, by: chief, team: team)
+            let (planID17, stageIDs17, keys17) = ids(plan17)
+            require(row(in: plan17, keys17["pipe"] ?? "")["assignee"] as? String == forge && row(in: plan17, keys17["check"] ?? "")["assignee"] as? String == vera && row(in: plan17, keys17["write"] ?? "")["assignee"] as? String == lyra,
+                    "every task given to the supervisor goes to the member whose role fits: \(["pipe", "check", "write"].map { row(in: plan17, keys17[$0] ?? "")["assignee"] ?? "" })")
+            let corrections17 = plan17["corrections"] as? [String] ?? []
+            require(corrections17.count == 3 && corrections17.allSatisfy({ $0.contains("Chief directs and reviews") }) && corrections17.first?.contains("Buddy gave “S02a pooled diagnostics and benchmark allocation” to Forge") == true,
+                    "the plan says what Buddy changed and why: \(corrections17)")
+            // add_tasks giving coding to the supervisor is corrected, and the decision says so.
+            let added17 = try plans17.addTasks(stageId: stageIDs17.first ?? "", tasks: [["key": "rerun", "title": "Rerun the pilot", "assignee": chief, "kind": "coding", "brief": "Rerun the OU pilot.", "deliverable": "pilot.csv"]], by: chief, members: everyone, team: team)
+            let plan17b = try plans17.plan(id: planID17) ?? [:]
+            require(row(in: plan17b, added17.first ?? "")["assignee"] as? String == forge, "added coding work for the supervisor goes to the engineer")
+            let raw17 = try BuddyOperationsDB(directory: directory17, existing: true)
+            require((try raw17.rows("SELECT rationale FROM plan_decisions WHERE kind = 'add_tasks' ORDER BY rowid DESC LIMIT 1").first?[0].string ?? "").contains("Buddy gave “Rerun the pilot” to Forge"), "and the decision says so")
+            // A reassign to the supervisor is corrected too.
+            let note17 = try plans17.reassign(taskId: keys17["write"] ?? "", assignee: chief, by: chief, members: everyone, team: team)
+            let plan17r = try plans17.plan(id: planID17) ?? [:]
+            require(row(in: plan17r, keys17["write"] ?? "")["assignee"] as? String == lyra && (note17 ?? "").contains("to Lyra"), "a reassign to the supervisor goes to the writer instead: \(note17 ?? "")")
+            // A team with only the supervisor keeps the task, and says why.
+            let (_, plansAlone, _) = try fresh(root, "delegation-alone")
+            let alone = try plansAlone.propose(workspace: w, groupId: group, supervisorId: chief, objective: "Stage 2", stages: stages, tasks: [onChief[0]], members: [chief], by: chief, team: team)
+            let (_, _, keysAlone) = ids(alone)
+            require(row(in: alone, keysAlone["pipe"] ?? "")["assignee"] as? String == chief && (alone["corrections"] as? [String] ?? []).contains { $0.contains("stays with Chief") && $0.contains("no other member") },
+                    "with nobody else in the group the supervisor keeps it, and the plan says why: \(alone["corrections"] ?? "")")
+            // The live plan's S02a task, already on Chief, moves to the engineer when it is next started, and its brief reads “Chief-owned” as Chief supervising.
+            let state17: [String: Any] = ["conversationWorkspace": w, "agents": team, "groups": [["id": group, "name": "Omori", "members": everyone, "managedBy": chief]]]
+            try raw17.run("UPDATE plan_tasks SET assignee = ? WHERE id = ?", [.text(chief), .text(keys17["pipe"] ?? "")])
+            _ = try plans17.authorize(planId: planID17, through: 1, quote: "get stage 1 done", messageId: "m17", viaButton: false, now: Date())
+            let started17 = try BuddyStageLoop.step(plans: plans17, workspace: w, jobs: store17.jobs, names: names, state: state17, dispatch: dispatcher(store17))
+            let pipeJob = store17.jobs.first { $0["id"] as? String == started17.first } ?? [:], plan17c = try plans17.plan(id: planID17) ?? [:]
+            require(started17.count == 2 && pipeJob["agentId"] as? String == forge && row(in: plan17c, keys17["pipe"] ?? "")["assignee"] as? String == forge,
+                    "the task already on the supervisor starts with the engineer: \(pipeJob["agentId"] ?? "") \(started17)")
+            require((try raw17.rows("SELECT decided_by, rationale FROM plan_decisions WHERE kind = 'reassign' AND task_id = ? ORDER BY rowid DESC LIMIT 1", [.text(keys17["pipe"] ?? "")]).first).map { $0[0].string == "buddy" && ($0[1].string ?? "").contains("to Forge") } == true,
+                    "Buddy records why it moved it")
+            require((pipeJob["goal"] as? String ?? "").contains("“Chief-owned” in it means Chief supervises and reviews this task; you do the work."), "the brief reads “Chief-owned” as Chief supervising: \(pipeJob["goal"] ?? "")")
+            print("PASS: Chief directs and cheaper agents do the work: tasks proposed, added or reassigned to the supervisor go to the member whose role and tools fit, with the reason in the plan; a team with only the supervisor keeps them; a task already on the supervisor moves when it is next started, and “Chief-owned” reads as Chief supervising")
         }
 
         // 8. Graceful read.

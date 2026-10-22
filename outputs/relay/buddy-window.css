@@ -1,0 +1,13 @@
+/* In the Mac app the window has no title bar: the page reaches the top edge and the window buttons sit over the sidebar. The top strip
+   (--titlebar-inset, set by the app) is where the window is dragged, so each column starts its content below it while the column's own
+   background still fills the strip.
+   - The sidebar moves its first row down. A border or padding on the sidebar itself would put the figure layer, which measures from the
+     sidebar's outer edge, out of line with the names it sits beside.
+   - The other columns take a transparent top border, which also moves their floating headers (positioned inside the border) below it. */
+.buddy-native-window .sidebar-header{margin-top:var(--titlebar-inset,0px)}
+/* The collapsed sidebar places its header icons from the sidebar's own top (buddy-sidebar-motion.css), so they move down by the same strip. */
+.buddy-native-window .shell.sidebar-compact .sidebar-header .icon-button,
+.buddy-native-window .shell.sidebar-compact .compact-chat-search{margin-top:var(--titlebar-inset,0px)}
+.buddy-native-window .main-shell,
+.buddy-native-window .project-dock,
+.buddy-native-window .modal.drawer{border-top:var(--titlebar-inset,0px) solid transparent}

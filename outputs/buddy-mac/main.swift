@@ -4,6 +4,7 @@ import AppKit
 @MainActor final class BuddyApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply {
     private var window: NSWindow?
     private var webView: WKWebView?
+    private var titleObservers: [NSObjectProtocol] = []
     private let filePreviews = BuddyFilePreview()
     private let supportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Buddy", isDirectory: true)
     private var stateURL: URL { supportURL.appendingPathComponent("workspace.json") }
@@ -138,8 +139,11 @@ import AppKit
 
     private func showWindow() {
         if let window { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        // Edge to edge: no title bar strip. The page reaches the top of the window and the window buttons sit over the sidebar; the page
+        // keeps its controls below the strip the buttons occupy (--titlebar-inset), and that strip drags the window (BuddyTitleStrip).
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1120, height: 780), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Buddy"
+        window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.backgroundColor = Self.pageBackground
         window.minSize = NSSize(width: 760, height: 660)
@@ -152,6 +156,8 @@ import AppKit
         let controller = WKUserContentController()
         controller.addScriptMessageHandler(self, contentWorld: .page, name: "buddy")
         installBridge(on: controller)
+        let inset = max(0, window.frame.height - window.contentLayoutRect.height)
+        controller.addUserScript(WKUserScript(source: "document.documentElement.classList.add('buddy-native-window');document.documentElement.style.setProperty('--titlebar-inset','\(Int(inset.rounded()))px')", injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = controller
         configuration.websiteDataStore = .default()
@@ -160,7 +166,23 @@ import AppKit
         webView.uiDelegate = self
         webView.autoresizingMask = [.width, .height]
         webView.underPageBackgroundColor = Self.resolvedPageBackground()
-        window.contentView = webView
+        let root = NSView(frame: NSRect(origin: .zero, size: window.frame.size))
+        root.autoresizesSubviews = true
+        webView.frame = root.bounds
+        root.addSubview(webView)
+        let strip = BuddyTitleStrip(frame: NSRect(x: 0, y: root.bounds.height - inset, width: root.bounds.width, height: inset))
+        strip.autoresizingMask = [.width, .minYMargin]
+        root.addSubview(strip)
+        window.contentView = root
+        // Full screen has no window buttons: the page uses the whole height and nothing drags.
+        let fullScreen = { [weak webView, weak strip] (on: Bool) in
+            strip?.isHidden = on
+            webView?.evaluateJavaScript("document.documentElement.style.setProperty('--titlebar-inset','\(on ? 0 : Int(inset.rounded()))px')")
+        }
+        titleObservers = [
+            NotificationCenter.default.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { _ in fullScreen(true) },
+            NotificationCenter.default.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { _ in fullScreen(false) },
+        ]
         self.webView = webView
         guard let resources = Bundle.main.resourceURL?.appendingPathComponent("Web", isDirectory: true) else { showFailure("Buddy’s interface is missing."); return }
         let entry = resources.appendingPathComponent("index.html")
@@ -769,5 +791,24 @@ MainActor.assumeIsolated {
     } else {
         let delegate = BuddyApp(); app.setActivationPolicy(.regular); app.delegate = delegate
         withExtendedLifetime(delegate) { app.run() }
+    }
+}
+
+/// The strip along the top of the edge-to-edge window, where a title bar used to be: dragging it moves the window and a double click does what
+/// the person chose in System Settings (zoom by default, minimise, or nothing). The window buttons sit above it and keep their own clicks.
+final class BuddyTitleStrip: NSView {
+    override var mouseDownCanMoveWindow: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        if event.clickCount == 2 {
+            switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+            case "Minimize": window.miniaturize(nil)
+            case "None": break
+            default: window.zoom(nil)
+            }
+            return
+        }
+        window.performDrag(with: event)
     }
 }

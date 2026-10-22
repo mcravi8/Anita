@@ -55,7 +55,8 @@
       if(editing===p.id)out+=`<div class="signin-holder signin-holder-pair worker-saved-holder" data-saved-holder="${id}">${field(id,'username',`${name} username`,'text',200)}${field(id,'password',`${name} password`,'password',1000)}<div class="worker-toolbar">${press('data-saved-cancel',id,'Cancel',false,off)}${press('data-saved-save',id,busy===p.id?'Saving…':'Save',true,off)}</div></div><small class="signin-assurance">What you type goes straight to your Mac’s Keychain and ${p.saved?`replaces the saved ${name} sign-in`:`becomes your saved ${name} sign-in`}. It isn’t kept on this page, and agents never see it.</small>`;
       if(removing===p.id)out+=`<div class="worker-saved-confirm" role="alert"><p>Remove the saved ${name} sign-in? Commands that sign in to ${name} will ask you to sign in again.</p><div class="worker-toolbar">${press('data-saved-cancel',id,'Cancel',false,off)}${press('data-saved-confirm-remove',id,busy===p.id?'Removing…':'Remove',true,off)}</div></div>`;
     }
-    return out+(note?`<p class="worker-caption" role="status">${html(note)}</p>`:'')+'</section>';
+    // Website passwords the person chose to remember in a chat's private field list themselves here (buddy-website-signins.js fills it in).
+    return out+(note?`<p class="worker-caption" role="status">${html(note)}</p>`:'')+(root.BuddyWebsiteSignIns?.section?.()||'')+'</section>';
   }
   // The account a task must use (the person named it), as the task's details and the reply that started it say it.
   const accountLine=t=>typeof t?.account==='string'&&t.account?`Uses ${t.account}`:'';

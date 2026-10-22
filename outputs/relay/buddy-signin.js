@@ -52,8 +52,9 @@
   /** Brings the chats up to date with what the app says is waiting: a message for each new request, an updated one for a changed request,
    *  and a closed one for a request that has ended. Returns whether anything changed. */
   // `pins`: requests whose next try the page already knows from the app's answer (key → reviewId), so a status read just before that
-  // answer cannot send the person's next try to the one that ended.
-  function sync(state,snapshot,pins=new Map()){
+  // answer cannot send the person's next try to the one that ended. `posted` hears each new request once, when its message is first put
+  // in its agent's chat (the desktop drop, buddy-drop-events.js).
+  function sync(state,snapshot,pins=new Map(),posted){
     if(!snapshot||snapshot.workspace!==state.conversationWorkspace||!Array.isArray(snapshot.signinRequests))return false;
     let changed=false;const open=new Set();
     for(const request of snapshot.signinRequests){
@@ -63,7 +64,7 @@
       for(const chat of chatsFor(state,snapshot,request)){
         state.messages[chat]||=[];
         const m=state.messages[chat].find(x=>x?.kind==='signin-request'&&x.request?.key===request.key);
-        if(!m){state.messages[chat].push({id:`signin-${request.key}${chat===request.agentId?'':'@'+chat}`,kind:'signin-request',who:request.agentId,chat,request:next,status:'open',body:summary(next,nameOf(state,request.agentId)),time:stamp(),createdAt:new Date().toISOString()});changed=true;continue;}
+        if(!m){state.messages[chat].push({id:`signin-${request.key}${chat===request.agentId?'':'@'+chat}`,kind:'signin-request',who:request.agentId,chat,request:next,status:'open',body:summary(next,nameOf(state,request.agentId)),time:stamp(),createdAt:new Date().toISOString()});changed=true;if(chat===request.agentId)posted?.(next);continue;}
         if(m.status==='closed'||m.status==='done')continue;
         if(JSON.stringify(m.request)!==JSON.stringify(next)){
           // A new try of the same request (a fresh field after a wrong password, a code step): the last outcome stays until it is answered.
@@ -271,7 +272,7 @@
   });
   window.addEventListener('buddy-worker-snapshot',()=>{
     const snapshot=window.BuddyWorkerUI?.snapshot?.();if(!snapshot)return;
-    if(sync(state,snapshot,pins))redraw();
+    if(sync(state,snapshot,pins,r=>window.BuddyDrop?.signin?.(state,r)))redraw();
     // A field being typed into for a request that has ended is let go, with what was typed in it.
     if(Array.isArray(snapshot.signinRequests)){const open=new Set(snapshot.signinRequests.map(r=>r?.key));for(const [id,input] of typing)if(!open.has(id.slice(0,id.lastIndexOf('|')))){input.value='';typing.delete(id);}}
   });

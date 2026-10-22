@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Buddy</title>
+    <!-- The desktop drop (buddy-drop.js): drawn in the Mac app's transparent panel at the top-left of the screen while Buddy is in the background. -->
+    <style>
+      @font-face{font-family:Geist;src:url(assets/fonts/Geist-Variable.woff2) format("woff2");font-weight:100 900;font-style:normal;font-display:swap}
+      :root{--card:#ffffff;--name:#141414;--text:#66655f;--focus:#141414;--label-shadow:0 8px 24px rgba(20,20,20,.12),0 1px 2px rgba(20,20,20,.06);--label-line:transparent;color-scheme:light dark}
+      @media (prefers-color-scheme:dark){:root{--card:#1f1f1d;--name:#f2f0ea;--text:#a3a29c;--focus:#f2f0ea;--label-shadow:0 8px 24px rgba(0,0,0,.45),0 1px 2px rgba(0,0,0,.3);--label-line:rgba(255,255,255,.09)}}
+      html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;font-family:Geist,-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;-webkit-font-smoothing:antialiased;-webkit-user-select:none;user-select:none;cursor:default}
+      *{box-sizing:border-box}
+      .drop-canvas{position:absolute;left:0;top:0;width:340px;height:100%;pointer-events:none;z-index:5}
+      .drop-notes{position:absolute;inset:0;z-index:6;pointer-events:none}
+      .drop-note{position:absolute;left:0;top:0;display:flex;align-items:center;gap:8px;pointer-events:none;visibility:hidden;will-change:transform}
+      .drop-holder{pointer-events:auto;flex:none;width:76px;height:76px;margin:0 0 0 12px;padding:0;border:0;border-radius:50%;background:transparent;cursor:pointer;font:inherit;color:inherit}
+      .drop-holder:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+      .drop-label{pointer-events:none;cursor:pointer;display:flex;flex-direction:column;gap:2px;max-width:296px;padding:8px 14px 9px;border-radius:14px;background:var(--card);box-shadow:var(--label-shadow),0 0 0 1px var(--label-line);white-space:nowrap;opacity:0;transform:translateX(-10px);transition:opacity .28s ease,transform .38s cubic-bezier(.2,.8,.2,1)}
+      .drop-label.shown{opacity:1;transform:none;pointer-events:auto}
+      .drop-name,.drop-text{overflow:hidden;text-overflow:ellipsis}
+      .drop-name{font:600 13.5px/1.3 Geist,-apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:var(--name)}
+      .drop-text{font:400 12.5px/1.3 Geist,-apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:var(--text)}
+      @media (prefers-reduced-motion:reduce){.drop-label{transform:none;transition:opacity .2s ease}}
+    </style>
+  </head>
+  <body>
+    <canvas class="drop-canvas" aria-hidden="true"></canvas>
+    <div class="drop-notes" role="status" aria-live="polite"></div>
+    <script src="buddy-drop.js"></script>
+  </body>
+</html>

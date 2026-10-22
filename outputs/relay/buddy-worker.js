@@ -254,7 +254,8 @@
     let changed=false;
     for(const id of [...examined.keys()])if(!snapshot.tasks.some(t=>t.id===id&&deliverable(t)))examined.delete(id);
     for(const t of snapshot.tasks.filter(t=>deliverable(t)&&findAgent(t.agentId)&&examined.get(t.id)!==outcome(t)&&!(state.messages[t.agentId]||[]).some(m=>m.id===deliveryID(t))).slice(0,10)){
-      const value=(await request({operation:'detail',taskId:t.id})).task;examined.set(t.id,outcome(t));if(reconcile(state,value))changed=true;if(deliverResult(state,value)){changed=true;}
+      // A result or request newly in the chat may also put its agent on the screen while the person is in another app (buddy-drop-events.js).
+      const value=(await request({operation:'detail',taskId:t.id})).task;examined.set(t.id,outcome(t));if(reconcile(state,value))changed=true;if(deliverResult(state,value)){changed=true;root.BuddyDrop?.task?.(state,value);}
     }
     // An approval answered without this page (the team's supervisor answering for the person) is read from the task once it stops waiting on it,
     // so the chat's message says who answered. Each waiting message is looked up at most a few times.

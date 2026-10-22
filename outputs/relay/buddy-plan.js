@@ -161,9 +161,10 @@
     }
     return out;
   }
-  function deliverNotices(state,plans){
+  // `each` hears every notice as it is posted (the desktop drop, buddy-drop-events.js).
+  function deliverNotices(state,plans,each){
     const items=noticesToDeliver(state,plans);state.messages||={};
-    for(const i of items)(state.messages[i.target]||=[]).push(i.message);
+    for(const i of items){(state.messages[i.target]||=[]).push(i.message);each?.(i);}
     return items.map(i=>i.target);
   }
 
@@ -247,7 +248,7 @@
   }
   function deliver(){
     const {plans}=current();if(!plans.length)return;
-    const targets=deliverNotices(state,plans);if(!targets.length)return;
+    const targets=deliverNotices(state,plans,item=>root.BuddyDrop?.notice?.(state,item));if(!targets.length)return;
     save();for(const target of new Set(targets))refreshLiveChat(target);
   }
   function change(n){

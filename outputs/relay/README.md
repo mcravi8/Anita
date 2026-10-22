@@ -58,6 +58,8 @@ The native Mac integration exposes only pending suggestion creation to model tur
 - `buddy-connections.test.js`: unavailable-service gating, independent grants, and revocation checks.
 - `buddy-proposals.js` / `.test.js`: live native suggestion discovery, reply cards, reviewed decisions, and verified agent registration.
 - `buddy-files.js` / `.css` / `.test.js`: native shared-file interface and receipt/conflict checks.
+- `buddy-drop-events.js` / `.test.js`: the desktop drop's events: which delivered task results, plan notices and sign-in requests put an agent on the screen while Buddy is in the background, once each; Settings → Desktop drop; opening the chat a clicked holder was for.
+- `buddy-drop.html` / `buddy-drop.js`: the desktop drop itself, drawn in the Mac app's transparent panel: the holder built from dots, the figure, the label, stacking, and the Reduce Motion path.
 - `buddy-signin.js` / `.css` / `.test.js`: sign-ins asked in the chats (the agent's, and the team's group chat for team-plan work): a private field for a website's password or code, or a service sign-in, sent only to the app's sign-in bridge and never kept on the page; Done for a step done elsewhere.
 - `buddy-onboarding.js` / `.css` / `.test.js`: empty initial workspace, migration, resumable setup, and atomic first-agent registration.
 - `buddy-agent-setup.js` / `.test.js`: immediate first question, native interview snapshots, retry/stop, profile updates and manual edits.

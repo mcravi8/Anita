@@ -31,6 +31,12 @@ import AppKit
     private lazy var ai = BuddyAIRouter(support: supportURL, chatgpt: conversations)
     private lazy var agentSetup = BuddyAgentSetup(support:supportURL)
     private lazy var teamwork = BuddyTeamService(conversations: ai)
+    /// An agent that finishes or needs the person while Buddy is in the background appears at the top-left of the screen (BuddyDesktopDrop.swift).
+    private lazy var desktopDrop: BuddyDesktopDrop = {
+        let drop = BuddyDesktopDrop(web: Bundle.main.resourceURL?.appendingPathComponent("Web", isDirectory: true))
+        drop.onOpen = { [weak self] chat in self?.openChat(chat) }
+        return drop
+    }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyAppearance(UserDefaults.standard.string(forKey: Self.appearanceKey) ?? "light")
@@ -208,7 +214,8 @@ import AppKit
           showProjectFolder: folderId => window.webkit.messageHandlers.buddy.postMessage({kind: 'showProjectFolder', folderId: folderId || null}),
           computerStatus: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'computerStatus'}),
           setComputerAccess: enabled => window.webkit.messageHandlers.buddy.postMessage({kind: 'setComputerAccess', enabled}),
-          openChatGPT: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'openChatGPT'})
+          openChatGPT: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'openChatGPT'}),
+          drop: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'desktopDrop', payload})
         });
         """
         controller.addUserScript(WKUserScript(source: bridge, injectionTime: .atDocumentStart, forMainFrameOnly: true))
@@ -275,6 +282,14 @@ import AppKit
         guard let task = result["task"] as? [String: Any], let id = task["id"] as? String, let account = task["account"] as? String, !account.isEmpty else { return }
         let replyRun = (context["replyRunId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? (context["proposalScope"] as? BuddyProposalScope)?.replyRunId ?? context["runId"] as? String ?? ""
         deliver(["type": "task", "runId": replyRun, "task": ["id": id, "title": task["title"] ?? "", "account": account, "agentId": task["agentId"] ?? actor], "delegatedBy": actor])
+    }
+    /// A holder of the desktop drop was clicked: Buddy comes to the front on that agent's or team's chat.
+    private func openChat(_ chat: String) {
+        if NSApp.isHidden { NSApp.unhide(nil) }
+        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
+        showWindow()
+        guard let data = try? JSONSerialization.data(withJSONObject: [chat]), let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("window.BuddyDrop?.open(\(json)[0])", completionHandler: nil)
     }
     private func deliver(_ event: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: event), let json = String(data: data, encoding: .utf8) else { return }
@@ -588,6 +603,18 @@ import AppKit
         case "openChatGPT":
             NSWorkspace.shared.open(URL(string: "https://chatgpt.com")!)
             replyHandler(["opened": true], nil)
+        case "desktopDrop":
+            // Only Buddy's own window asks for a drop; the drop's panel has a page of its own, with no way to this bridge. The app shows it
+            // only while Buddy is in the background, for an agent and a chat of this workspace.
+            guard BuddyDrop.accepts(sender: message.webView, main: webView, isMainFrame: message.frameInfo.isMainFrame, page: message.frameInfo.request.url,
+                                    entry: Bundle.main.resourceURL?.appendingPathComponent("Web/index.html")) else { replyHandler(nil, "Unsupported request."); return }
+            let payload = body["payload"] as? [String: Any] ?? [:]
+            if payload["clear"] as? Bool == true { desktopDrop.clear(); replyHandler(["cleared": true], nil); return }
+            let state = try? workspaceState()
+            let agents = Set((state?["agents"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
+            let chats = agents.union((state?["groups"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
+            guard let item = BuddyDrop.item(payload, agents: agents, chats: chats) else { replyHandler(nil, "Unsupported drop."); return }
+            replyHandler(["shown": desktopDrop.show(item)], nil)
         case "saveState":
             guard let value = body["value"] as? String, let data = value.data(using: .utf8), data.count < 50_000_000,
                   let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any], state["agents"] is [Any], state["version"] as? Int == 1 else { replyHandler(nil, "Invalid workspace."); return }

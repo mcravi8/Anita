@@ -821,7 +821,8 @@ import Foundation
             case "resume":
                 guard ["stopped", "paused"].contains(item.kind), !store.paused, let job = try? store.job(item.workerTaskId), ["paused", "failed", "interrupted"].contains(job["status"] as? String ?? ""),
                       Self.resumable.contains(job["stopCause"] as? String ?? ""), !Self.unsure(job) else {
-                    throw refused("resume is only for work that stopped for a technical reason and has nothing unsure, while the user has not paused everything")
+                    throw refused("resume is only for work that stopped for a technical reason and has nothing unsure, while the user has not paused everything"
+                                  + (item.planTaskId.isEmpty ? "" : "; to start this plan task again, reassign it (the same assignee is fine)"))
                 }
                 // A resume continues the same session: a task that is not a coding session cannot be resumed into running code.
                 if let task = planTask(item), task["kind"] as? String != "coding", let need = BuddyTaskNeeds.code(text) ?? (BuddyTaskNeeds.missingCoding(job["progress"] as? String ?? "") ? "a coding session" : nil) {

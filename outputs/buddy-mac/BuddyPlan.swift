@@ -22,7 +22,7 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
 /// check or without any tasks, and a scope or objective decision made by anyone but the user.
 @MainActor final class BuddyPlanStore {
     static let live: Set<String> = ["draft", "active", "holding"]
-    static let maxStages = 6, maxTasks = 24, maxCriteria = 5, maxDispatches = 6, maxReworks = 3, maxAddedPerStage = 12
+    static let maxStages = 6, maxTasks = 24, maxCriteria = 5, maxReworks = 3, maxAddedPerStage = 12
     /// A worker task's brief may be 30,000 characters; a plan task's own brief leaves room for the authorization, the stage and its inputs.
     static let goalLimit = 30000, briefLimit = 20000
     static let tables = ["plans", "plan_stages", "plan_tasks", "plan_task_deps", "plan_scopes", "plan_decisions", "plan_notices"]
@@ -682,11 +682,11 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
     func userInputs(_ taskId: String) throws -> Int {
         Self.n(try db.rows("SELECT COUNT(*) FROM plan_decisions WHERE task_id = ? AND kind = 'user_answer'", [.text(taskId)]).first ?? [], 0)
     }
-    /// Counts one more dispatch and returns its number, which makes the worker request ID. A task is started at most 6 times, and once more for
-    /// each time the user supplied what it was waiting for.
+    /// Counts one more dispatch and returns its number, which makes the worker request ID. No count of starts holds a task back: every start
+    /// after the first follows a decision (the supervisor's rework or reassign, or the user's input), and the user set no attempt ceiling. A cap
+    /// here refused the very decision it asked for: on the user's S02a, Chief reassigned the task 41 times and the stage stood still.
     func markDispatching(taskId: String) throws -> Int {
         guard let task = try taskRow(taskId) else { throw Self.missing("This plan task is no longer available.") }
-        guard task.dispatches < Self.maxDispatches + (try userInputs(taskId)) else { throw Self.conflict("“\(task.title)” was started \(task.dispatches) times without an accepted result; the supervisor has to decide what happens to it.") }
         guard try db.run("UPDATE plan_tasks SET dispatches = dispatches + 1, updated_at = ? WHERE id = ? AND dispatches = ?", [.text(Self.stamp()), .text(taskId), .int(Int64(task.dispatches))]) == 1 else { throw Self.conflict("This task changed; try again.") }
         return task.dispatches + 1
     }

@@ -199,8 +199,8 @@ import Foundation
         require(try task(plans, planID, t3)["status"] as? String == "pending", "t3 is still pending")
 
         // 6. Bounds.
-        for n in 1...6 { require(try plans.markDispatching(taskId: t3) == n, "dispatch \(n) is counted") }
-        throwsCode("conflict", "a seventh dispatch is refused") { _ = try plans.markDispatching(taskId: t3) }
+        // Starts are counted (the count makes each worker request ID) but never capped: each start after the first follows a decision.
+        for n in 1...8 { require(try plans.markDispatching(taskId: t3) == n, "dispatch \(n) is counted") }
         let extra: [[String: Any]] = (1...12).map { ["title": "Extra check \($0)", "assignee": forge, "kind": "general", "brief": "Check \($0).", "deliverable": "A note"] }
         require(try plans.addTasks(stageId: stageIDs[1], tasks: extra, by: chief, members: members).count == 12, "twelve tasks can be added to a stage")
         throwsCode("conflict", "a thirteenth added task is refused") { _ = try plans.addTasks(stageId: stageIDs[1], tasks: [extra[0]], by: chief, members: members) }
@@ -628,6 +628,20 @@ import Foundation
             _ = try step(store15, plans15)
             require(try plans15.rework(taskId: s01, instruction: "Re-hash acceptance.md against the published caption.", by: chief) == nil, "a rework past the bound is allowed once after the user's input")
             require(try task(plans15, planID15, s01)["reworks"] as? Int == 4, "and counted")
+            // No count of starts holds the task back: every start after the first follows a decision (the supervisor's rework or reassign, or
+            // the user's input), and the user set no attempt ceiling. On the user's S02a the task had been started 7 times; Chief cancelled the
+            // run to give it to Forge and reassigned it 41 times, every start was refused, and the stage stood still with Chief looping.
+            let eighth15 = try step(store15, plans15)
+            require(eighth15.count == 1 && store15.jobs.first(where: { $0["id"] as? String == eighth15.first })?["requestId"] as? String == "plan:\(s01):8",
+                    "the rework starts it an eighth time: \(eighth15) \(try task(plans15, planID15, s01))")
+            try store15.update(eighth15.first ?? "", ["status": "cancelled", "stopCause": "supervisor.cancel", "progress": "Cancelled by Chief: Forge is the engineer for this."])
+            _ = try step(store15, plans15)
+            require(try task(plans15, planID15, s01)["status"] as? String == "blocked", "the cancelled run waits on the supervisor")
+            try plans15.reassign(taskId: s01, assignee: forge, by: chief, members: members)
+            let ninth15 = try step(store15, plans15)
+            require(ninth15.count == 1 && store15.jobs.first(where: { $0["id"] as? String == ninth15.first })?["requestId"] as? String == "plan:\(s01):9"
+                    && store15.jobs.first(where: { $0["id"] as? String == ninth15.first })?["agentId"] as? String == forge,
+                    "the supervisor's reassign starts it again, a ninth time, with Forge: \(ninth15) \(try task(plans15, planID15, s01))")
 
             // A waiting task: the user's input, handed over from a chat, continues it with no one saying “resume”.
             let askRun = jobs(store15, ask).first?["id"] as? String ?? ""

@@ -38,3 +38,11 @@
 .website-signin-row>span small{font-size:11.5px;color:var(--text3);overflow-wrap:anywhere}
 .website-signin-row .border-button{display:inline-flex;font-size:12px;padding:7px 10px}
 .website-signin-row .signin-holder{flex:1 1 100%;margin-top:2px}
+/* A password field's eye (show / hide what was typed), and "Never shown to <Agent>. Filled directly to <site>." */
+.signin-secret{position:relative;display:flex;align-items:center}
+.signin-secret input{padding-right:40px}
+.signin-eye{position:absolute;right:4px;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border:0;border-radius:7px;background:transparent;color:var(--text3);cursor:pointer}
+.signin-eye svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8}
+.signin-eye[aria-pressed="true"]{color:var(--text)}
+.signin-eye:focus-visible{outline:2px solid color-mix(in srgb,var(--ink) 35%,transparent);outline-offset:1px}
+.signin-never{color:var(--text2)}

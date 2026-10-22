@@ -11,7 +11,7 @@ import AppKit
         func wait(_ id:String,_ status:String) async throws->[String:Any]{for _ in 0..<120{let t=try await call(["operation":"detail","taskId":id])["task"] as! [String:Any];if t["status"] as? String==status{return t};if t["status"] as? String=="failed"{throw BuddyFailure(message:"Sign-in fixture failed: \(t["progress"] ?? "unknown")")};try await Task.sleep(nanoseconds:100_000_000)};throw BuddyFailure(message:"Sign-in fixture timed out waiting for \(status)")}
         func create(_ request:String,for owner:String?=nil) async throws->String{let value=try await call(["operation":"create","agentId":owner ?? agent,"requestId":request,"title":"Inert account","goal":"Exercise a private sign-in checkpoint only","kind":"general","provider":"chatgpt","budgetUSD":0]);return (value["task"] as! [String:Any])["id"] as! String}
         let declined=try await create("decline"),first=try await wait(declined,"waiting_review"),review=(first["reviews"] as! [[String:Any]])[0]
-        require(review["kind"] as? String=="authentication" && review["mode"] as? String=="signup","new accounts always have a native approval before private Chrome opens")
+        require(review["kind"] as? String=="authentication" && review["mode"] as? String=="signin","a sign-in always has a native choice before private Chrome opens (new accounts ask with their own card: tests/WebsiteAccounts.swift)")
         _ = try await call(["operation":"review","taskId":declined,"id":review["id"]!,"accept":false]);_ = try await wait(declined,"completed")
         require(!FileManager.default.fileExists(atPath:root.appendingPathComponent("Worker/PrivateSignIn.json").path),"declining cannot open a private browser or grant a session")
         let id=try await create("approve"),pending=try await wait(id,"waiting_review"),r=(pending["reviews"] as! [[String:Any]])[0]
@@ -31,6 +31,6 @@ import AppKit
         require(finished,"human finish closes private handoff after the agent pauses")
         _ = try await wait(id,"completed")
         require(!FileManager.default.fileExists(atPath:root.appendingPathComponent("Worker/PrivateSignIn.json").path),"finish removes the private marker and resumes the saved task")
-        print("PASS: native signup approval/decline, the shared Chrome window handed to the person (the queue keeps running for others), protected desktop marker, Done in the chat and task resume without credentials")
+        print("PASS: native sign-in choice/decline, the shared Chrome window handed to the person (the queue keeps running for others), protected desktop marker, Done in the chat and task resume without credentials")
     }
 }

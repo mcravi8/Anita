@@ -263,7 +263,8 @@ enum BuddyAccountPin {
 /// says which site it is on; never "the website". A step saved before steps named their page uses the one page its task's own words name.
 enum BuddyWebStep {
     /// The steps done on a page in Buddy's Chrome, and with the file step every step the person finishes with Done.
-    static let pageNeeds: Set<String> = ["signin", "captcha", "verification"]
+    /// "payment": a sign-up Buddy stopped because it asks for money (Buddy never pays); the person does it themselves, or Skips it.
+    static let pageNeeds: Set<String> = ["signin", "captcha", "verification", "payment"]
     static let needs: Set<String> = pageNeeds.union(["file"])
     /// A real public https page, as given, or nil: no other scheme, no user name or password in it, and no local, private-network or bare
     /// IP host. (The browser checks where the name really leads before it opens anything.)
@@ -314,12 +315,17 @@ enum BuddyWebStep {
         switch need {
         case "captcha": return "Finish the CAPTCHA on \(site)"
         case "verification": return "Finish verifying on \(site)"
+        case "payment": return "\(site) asks for payment"
         case "file": return "Save \(what(target)) from \(site)" + (folder(of: target).map { " into \($0)" } ?? "")
         default: return "Sign in to \(site)" + (account.map { " as \($0)" } ?? "")
         }
     }
     static func title(of job: [String: Any]) -> String {
         let point = job["checkpoint"] as? [String: Any] ?? [:], need = point["need"] as? String ?? ""
+        // A sign-up Buddy stopped for money says which kind: a card, or a trial that becomes paid.
+        if need == "payment", let site = host(page(of: job) ?? site(of: job)) {
+            return point["money"] as? String == "trial" ? "This sign-up on \(site) starts a free trial that becomes paid" : "This sign-up on \(site) asks for payment details"
+        }
         return title(need: need, page: page(of: job) ?? site(of: job), account: need == "signin" ? point["account"] as? String : nil, target: point["target"] as? String)
     }
     static func what(_ target: String?) -> String { (target ?? "").lowercased().hasSuffix(".pdf") ? "the PDF" : "the file" }
@@ -391,6 +397,9 @@ enum BuddyWebStep {
                 ?? "[Buddy] The user says they saved the file from \(where_ ?? "the page") as \(target) (folderId \(folder), path \(path)). "
             return how + seen
                 + "Check it with buddy_list_files" + (coding ? " and bring it into the project with buddy_copy_into_project" : "") + " before using it, then continue. If it isn't there, ask again with buddy_checkpoint need file."
+        }
+        if need == "payment" {
+            return "[Buddy] The user handled the payment step on \(host(where_) ?? "the website") themselves in Buddy’s Chrome (Buddy never pays). Reopen \(where_ ?? "the website") and check its actual state before continuing; never enter payment details or start anything paid yourself."
         }
         if coding {
             return "[Buddy] The user says they finished the step on \(where_ ?? "the website they were asked about"): \(asked) Your coding session's commands can't use what is signed in to Buddy's Chrome, so don't retry the blocked download as it was. If you still need a file from that site, fetch it with buddy_browser_fetch, which uses Buddy's Chrome and the user's sign-ins; only if that says it can't, ask the user to save it into a connected folder with buddy_checkpoint need file (url, folderId, path), or ask for the one fact you need with buddy_request_decision."
@@ -914,7 +923,7 @@ struct BuddyAttempt {
     /// Kinds of review that this app performs itself, recording "sending" before it starts, so for them "approved" really does mean "not sent
     /// yet". A connected-service request is sent by the connection service, whose ordering this app cannot fully vouch for, so an approved one
     /// is treated as possibly sent, like a review of any unknown kind.
-    private static let dispatchRecorded: Set<String> = ["browser", "authentication", "coding"]
+    private static let dispatchRecorded: Set<String> = ["browser", "authentication", "coding", "account"]
     private static func kindOf(_ review: [String: Any]) -> String { review["kind"] as? String ?? "connection" }
 
     private static func canMove(from current: String, to next: String) -> Bool {
@@ -1154,6 +1163,11 @@ struct BuddyAttempt {
             guard let reviewID = review["id"] as? String else { continue }
             let tool = (review["tool"] as? [String: Any])?["name"] as? String ?? "an action", auth = review["kind"] as? String == "authentication"
             switch review["status"] as? String ?? "" {
+            case "pending" where review["kind"] as? String == "account":
+                // An account Buddy would create (or a password it would reset) on one site: answered only in the agent's chat, with a click.
+                let site = (review["origin"] as? String).flatMap { URL(string: $0)?.host } ?? "a website", reset = review["purpose"] as? String == "reset"
+                out.append(DecisionSpec(id: "review:" + reviewID, kind: "signin", title: reset ? "Reset your password on \(site)?" : "Create an account on \(site)?",
+                                        question: reset ? "Answer in the chat: Reset password or Don’t." : "Answer in the chat: Create account or Don’t. Buddy never pays or starts a paid trial.", label: "Open chat", payload: ["taskId": id, "reviewId": reviewID]))
             case "pending":
                 // A coding command Buddy judged routine is the team supervisor's to answer (`command_review`); the page shows it to the person
                 // only when the supervisor lane is not answering.

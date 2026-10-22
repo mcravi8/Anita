@@ -176,6 +176,93 @@ enum BuddyWebsiteSignIns {
     }
 }
 
+/// Accounts Buddy creates on websites for the person, and passwords it resets, always after the person said yes in the chat for that very
+/// site (an agent's or the supervisor's answer never counts, and no yes covers another site). The password is made here, never by a model,
+/// goes to the browser only to be typed into that site's own form, and then into the Keychain (`BuddyWebsiteSignInStore`), where Buddy fills it
+/// in at the next sign-in. Buddy never pays, subscribes or starts a trial that becomes paid: such a sign-up stops before anything is sent.
+enum BuddyWebsiteAccounts {
+    /// A strong random password from the system's secure random source: `length` characters of letters, digits and symbols, at least one of
+    /// each kind, with no characters that are easy to confuse.
+    static func password(length: Int = 20) -> String {
+        let lower = Array("abcdefghijkmnopqrstuvwxyz"), upper = Array("ABCDEFGHJKLMNPQRSTUVWXYZ"), digits = Array("23456789"), symbols = Array("!#$%&*+-=?@^_")
+        let all = lower + upper + digits + symbols
+        func pick(_ set: [Character]) -> Character {
+            var byte: UInt32 = 0
+            let limit = UInt32.max - UInt32.max % UInt32(set.count)
+            repeat { _ = withUnsafeMutableBytes(of: &byte) { SecRandomCopyBytes(kSecRandomDefault, 4, $0.baseAddress!) } } while byte >= limit
+            return set[Int(byte % UInt32(set.count))]
+        }
+        var out = [pick(lower), pick(upper), pick(digits), pick(symbols)]
+        while out.count < max(length, 12) { out.append(pick(all)) }
+        // Shuffled with the same source, so the four kinds are not always first.
+        for i in stride(from: out.count - 1, to: 0, by: -1) {
+            var byte: UInt32 = 0; _ = withUnsafeMutableBytes(of: &byte) { SecRandomCopyBytes(kSecRandomDefault, 4, $0.baseAddress!) }
+            out.swapAt(i, Int(byte % UInt32(i + 1)))
+        }
+        return String(out)
+    }
+    /// Other fields a sign-up form requires, as the agent gives them ([{label, value}], from what the person told it or their own profile):
+    /// plain one-line text, at most twelve, never a password or payment detail.
+    static func details(_ raw: Any?) throws -> [String: String] {
+        guard let list = raw as? [[String: Any]], !list.isEmpty else { return [:] }
+        guard list.count <= 12 else { throw BuddyWorkerFailure(message: "Give at most twelve details. Nothing was created.", code: "invalid_input") }
+        var out: [String: String] = [:]
+        for item in list {
+            let label = (item["label"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines), value = (item["value"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !label.isEmpty, label.count <= 80, !value.isEmpty, value.count <= 200, value.rangeOfCharacter(from: .newlines) == nil, !value.contains("\0") else {
+                throw BuddyWorkerFailure(message: "Each detail is a label and a one-line value (up to 200 characters). Nothing was created.", code: "invalid_input")
+            }
+            if (label + " " + value).range(of: #"password|passcode|\bpin\b|card|cvc|cvv|iban|routing|account number|sort code|social security|\bssn\b|passport"#, options: [.regularExpression, .caseInsensitive]) != nil {
+                throw BuddyWorkerFailure(message: "Buddy never fills passwords, payment or ID numbers from details. Nothing was created.", code: "invalid_input")
+            }
+            out[label] = value
+        }
+        return out
+    }
+    static func host(_ origin: String) -> String { URL(string: origin)?.host ?? origin }
+    /// What the chat card asks, in the person's words.
+    static func ask(agent: String, site: String, email: String, purpose: String) -> String {
+        purpose == "reset" ? "\(agent) wants to reset your password on \(site) through your email — is that fine?" : "\(agent) wants to create an account on \(site) with \(email) — is that fine?"
+    }
+    /// What happens on Create account (or Reset password).
+    static func what(site: String, purpose: String) -> String {
+        purpose == "reset" ? "Buddy asks \(site) for a reset email, opens the link from your Gmail, sets a new strong password and keeps it in your Keychain, then signs in."
+            : "Buddy makes a strong password and keeps it in your Keychain; it agrees to the site’s standard terms; it confirms the email in your Gmail."
+    }
+    static func receipt(site: String, email: String, remembered: Bool) -> String {
+        remembered ? "Created an account on \(site) as \(email) — password saved in your Keychain." : "Created an account on \(site) as \(email), but Buddy couldn’t save the password in your Keychain. Reset it from the site if you need it."
+    }
+    static func resetReceipt(site: String, email: String, remembered: Bool) -> String {
+        remembered ? "Reset your password on \(site) for \(email) — the new one is saved in your Keychain." : "Reset your password on \(site) for \(email), but Buddy couldn’t save the new one in your Keychain."
+    }
+    /// The receipt's details line: Chrome's own Password Manager is not where Buddy keeps it, and why.
+    static let keychainNote = "Chrome’s Password Manager can’t be filled in by automation, so Buddy keeps this password in your Mac’s Keychain and fills it in whenever an agent signs in to the site. You’ll find it in Saved sign-ins."
+    static func moneyTitle(site: String, kind: String) -> String {
+        kind == "trial" ? "This sign-up on \(site) starts a free trial that becomes paid" : "This sign-up on \(site) asks for payment details"
+    }
+    static func moneyInstruction(site: String, kind: String) -> String {
+        moneyTitle(site: site, kind: kind) + ". Buddy stopped. It never enters payment details or starts a paid trial. Open the page to do it yourself in Buddy’s Chrome and press Done, or Skip."
+    }
+    static func confirmInstruction(site: String) -> String { "Confirm the email from \(site) in your inbox, then press Done." }
+    static func smsNote(site: String) -> String { "Enter the code \(site) texted to your phone." }
+    static func emailCodeNote(site: String, email: String) -> String { "Enter the code \(site) emailed to \(email)." }
+    static func missingNote(site: String, missing: [String]) -> String {
+        "The sign-up form on \(site) also needs: \(missing.joined(separator: ", ")). Give them in details only from what the user told you or their own profile; never invent them (a phone number only if their profile has it). Otherwise ask the user with buddy_request_decision (category personal_fact). Nothing was created yet."
+    }
+    static let noEmail = "Buddy doesn’t know which email address the new account should use: this task has no account of its own, and Buddy’s Chrome has more than one (or no) Google account. Give email (the address the user wants to use; ask them with buddy_request_decision if you don’t know). Nothing was created."
+    static func declined(site: String, purpose: String) -> String {
+        purpose == "reset" ? "The user said no to resetting the password on \(site). Buddy asks them for the password in the chat instead."
+            : "The user said no to creating an account on \(site). Don’t create one or ask again for this site in this task; continue without it, and say in your result what you couldn’t do."
+    }
+    static func skipNote(site: String) -> String {
+        "[Buddy] The user chose Skip: Buddy did not sign up on \(site), and nothing was paid or started there. Don’t try again; continue without it, and say in your result what you couldn’t do."
+    }
+    static func paidNote(site: String, page: String) -> String {
+        "[Buddy] The user handled the payment step on \(site) themselves in Buddy’s Chrome (Buddy never pays). Reopen \(page) and check its actual state before continuing; never enter payment details or start anything paid yourself."
+    }
+}
+
+
 /// What the person can type in a chat for a waiting sign-in: the browser's one-use token for one task's page and field, its site and
 /// account. Only the worker holds it, in memory; the page and the model never see the token, and it ends after `lifetime`.
 struct BuddyTypedSignIn {
@@ -209,11 +296,18 @@ struct BuddyTypedSignIn {
             guard let sites = store as? BuddyWebsiteSignInStore else { throw BuddyWorkerFailure(message: "Remembered sign-ins are unavailable.") }
             return try BuddyWebsiteSignIns.handle(action, payload, workspace: workspace, store: sites)
         }
-        if ["secret", "check", "done"].contains(action) {
+        // `account`: the person's ✓ Create account (or Reset password) / ✗ Don't on an agent's request for one site; `skip`: their Skip on a
+        // sign-up Buddy stopped because it asks for money. Only this bridge carries them, so only the person's click answers them.
+        if ["secret", "check", "done", "account", "skip"].contains(action) {
             var arguments: [String: Any] = ["action": action, "taskId": payload["taskId"] as? String ?? ""]
             if let review = payload["reviewId"] as? String { arguments["reviewId"] = review }
+            if action == "account" { arguments["allow"] = payload["allow"] as? Bool == true }
             // "Remember for <site> (<account>)": kept in the Keychain once the site took it, and filled by Buddy next time.
-            if action == "secret" { arguments["value"] = payload["value"] as? String ?? ""; arguments["remember"] = payload["remember"] as? Bool == true }
+            if action == "secret" {
+                arguments["value"] = payload["value"] as? String ?? ""; arguments["remember"] = payload["remember"] as? Bool == true
+                // A sign-in that asks for the email too (both fields in the chat): the account typed with the password.
+                if let user = payload["username"] as? String { arguments["username"] = user }
+            }
             // Typing into a page, and Done (which may close Chrome and look at the page again), take longer than other requests.
             return try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "signin", "arguments": arguments], timeout: 90)
         }

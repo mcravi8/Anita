@@ -343,6 +343,39 @@ struct BuddyFailure: LocalizedError {
         return try BuddyMailVerification.match(messages,origin:origin,recipient:recipient,since:since,excluding:excluding,length:length)
     }
 
+    /// The newest email from a website to the person for an account Buddy is creating or resetting there (after the person's yes in the chat):
+    /// its confirmation or reset link, or its code. The same native, read-only Gmail lookup as `emailVerification`, with no model turn; the
+    /// email itself never leaves this function. nil: nothing yet.
+    func accountMail(_ request: BuddyAccountMailRequest) async throws -> BuddyAccountMailFound? {
+        guard BuddyMailVerification.email(request.recipient), let host = URL(string: request.origin)?.host, host.range(of: #"^[a-zA-Z0-9.-]+$"#, options: .regularExpression) != nil else { throw BuddyFailure(message: "Check the website and email address.") }
+        let key = request.workspace + ":" + request.agent, apps = try await loadCatalog()
+        guard let mail = apps.first(where: { $0.name == "Gmail" && $0.available }), try grants.allowed(for: key, catalog: apps).contains(mail.id), connectionFilter?(mail) != false else { throw BuddyFailure(message: "Gmail isn’t connected for this agent.") }
+        let names = ["get_profile", "search_email_ids", "read_email"]
+        guard names.allSatisfy({ mail.readableTools.contains($0) }) else { throw BuddyFailure(message: "The required Gmail read tools are unavailable.") }
+        var config = restrictions
+        config["apps"] = ["_default": ["enabled": false, "destructive_enabled": false, "open_world_enabled": false], mail.id: ["enabled": true, "default_tools_enabled": false, "destructive_enabled": false, "open_world_enabled": false, "approvals_reviewer": "user", "tools": Dictionary(uniqueKeysWithValues: names.map { ($0, ["enabled": true, "approval_mode": "auto"] as [String: Any]) })]]
+        config["features.apps"] = true
+        let result = try await self.request("thread/start", ["cwd": workingURL.path, "modelProvider": "openai", "approvalPolicy": "on-request", "approvalsReviewer": "user", "sandbox": "read-only", "ephemeral": true, "config": config, "baseInstructions": "Native Gmail lookup for a website account only. No model turn, sending, changes, or other services."])
+        guard let thread = (result["thread"] as? [String: Any])?["id"] as? String else { throw BuddyFailure(message: "Could not start the private email lookup.") }
+        defer { Task { _ = try? await self.request("thread/unsubscribe", ["threadId": thread]) } }
+        func call(_ tool: String, _ args: [String: Any]) async throws -> [String: Any] {
+            guard names.contains(tool), agentPermission?(request.workspace, [key]) == true, try grants.allowed(for: key, catalog: apps).contains(mail.id) else { throw BuddyFailure(message: "Stopped because Gmail access changed.") }
+            return try BuddyMailVerification.object(await self.request("mcpServer/tool/call", ["threadId": thread, "server": "codex_apps", "tool": "gmail." + tool, "arguments": args]))
+        }
+        let profile = try await call("get_profile", [:])
+        guard (profile["emailAddress"] as? String ?? profile["email"] as? String)?.lowercased() == request.recipient.lowercased() else { throw BuddyFailure(message: "The connected Gmail account isn’t \(request.recipient).") }
+        let query = "to:\(request.recipient) from:\(BuddyMailVerification.siteOf(host)) after:\(Int(request.since.addingTimeInterval(-60).timeIntervalSince1970)) -in:spam -in:trash"
+        let search = try await call("search_email_ids", ["query": query, "max_results": 5, "label_ids": NSNull(), "next_page_token": ""])
+        let ids = ((search["message_ids"] as? [String]) ?? (search["messages"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }).filter { !request.excluding.contains($0) }
+        var messages: [[String: Any]] = []
+        for id in ids.prefix(5) { messages.append(try await call("read_email", ["message_id": id, "format": "full"])) }
+        if request.purpose == "code" {
+            guard let match = try? BuddyMailVerification.match(messages, origin: request.origin, recipient: request.recipient, since: request.since, excluding: request.excluding) else { return nil }
+            return BuddyAccountMailFound(messageID: match.messageID, link: nil, code: match.code)
+        }
+        return BuddyMailVerification.link(messages, origin: request.origin, recipient: request.recipient, since: request.since, excluding: request.excluding, purpose: request.purpose).map { BuddyAccountMailFound(messageID: $0.messageID, link: $0.link, code: nil) }
+    }
+
     func setConnectionAccess(key: String, connection: String, allowed: Bool) async throws -> [String: Any] {
         if allowed {
             let apps = try await loadCatalog()

@@ -24,7 +24,7 @@ for line in sys.stdin:
   seq+=1;tid=p['threadId'];turn='turn-'+str(seq);out({'id':rid,'result':{'turn':{'id':turn,'status':'inProgress'}}})
   if Path('signin-stage').exists():done(tid,turn)
   else:
-   call='call-'+str(seq);calls[call]=(tid,turn);out({'id':call,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':call,'tool':'buddy_browser_signin','arguments':{'mode':'signup','reason':'Create the account the user requested at the inert fixture.'}}})
+   call='call-'+str(seq);calls[call]=(tid,turn);out({'id':call,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':call,'tool':'buddy_browser_signin','arguments':{'mode':'signin','reason':'Sign in to the inert fixture the user asked about.'}}})
   continue
  elif method in ['turn/interrupt','thread/unsubscribe','thread/inject_items','initialize']:pass
  if rid is not None:out({'id':rid,'result':result})

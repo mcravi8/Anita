@@ -16,7 +16,8 @@
   const systemPause=t=>t?.status==='paused'&&t.blockedBy!=='limit'&&!/^(user|routine|superseded)/.test(t.stopCause||'');
   // A sign-in the person answers in the chat (a password to type, a step to finish and confirm with Done, a service sign-in to save) has a
   // message of its own there (buddy-signin.js); the task's own message would only say it again.
-  const signinWait=t=>t?.status==='waiting_review'&&pending(t).length>0&&pending(t).every(r=>r.kind==='authentication')||t?.status==='waiting_user'&&t.stopCause!=='review.parked'&&['signin','captcha','verification','credential','file'].includes(t.checkpoint?.need);
+  // An account an agent wants Buddy to create (or a password to reset) is asked in the chat too, and so is a sign-up stopped for money.
+  const signinWait=t=>t?.status==='waiting_review'&&pending(t).length>0&&pending(t).every(r=>r.kind==='authentication'||r.kind==='account')||t?.status==='waiting_user'&&t.stopCause!=='review.parked'&&['signin','captcha','verification','credential','file','payment'].includes(t.checkpoint?.need);
   // A coding command waiting on the team supervisor's review is the supervisor's to answer, not the person's: it posts nothing in the chat.
   const supervisorWait=t=>t?.status==='waiting_review'&&pending(t).length>0&&pending(t).every(r=>r.route==='supervisor');
   const deliverable=t=>(['completed','failed','interrupted','waiting_review','waiting_user'].includes(t?.status)||systemPause(t))&&t?.quiet!==true&&!signinWait(t)&&!supervisorWait(t);
@@ -273,6 +274,8 @@
   }
   function review(r){
     if(r.kind==='checkpoint')return checkpointCard(r);
+    // Answered only in the agent's chat, with a click on its card: nothing to answer here.
+    if(r.kind==='account')return `<section class="worker-review worker-auth"><strong>${r.purpose==='reset'?'Reset your password':'Create an account'}</strong><small>${esc(r.origin||'')}${r.accountEmail?` · ${esc(r.accountEmail)}`:''}</small>${r.reason?`<p>${esc(r.reason)}</p>`:''}<p class="worker-caption">Answer in ${esc(agentName(detail?.agentId||'')||'the agent')}’s chat: ${r.purpose==='reset'?'Reset password':'Create account'} or Don’t. Buddy never pays or starts a paid trial.</p></section>`;
     if(r.kind==='authentication')return `<section class="worker-review worker-auth"><strong>${esc(authTitle(r.mode))}</strong><small>${esc(r.origin)}${r.accountEmail?` · ${esc(r.accountEmail)}`:''}</small><p>${esc(r.reason||'Continue your requested task.')}</p><p class="worker-caption">${r.mode==='signup'?'Choose or generate the new credential in Buddy’s Chrome window. Chrome can save it to Google Password Manager.':`Chrome keeps passwords private. You can also type the password in ${esc(agentName(detail?.agentId||''))}’s chat, in a private field that goes only to this website. Buddy receives the sign-in result.`} Allow email verification for this website during this sign-in.</p><div class="worker-toolbar">${button('auth-decline','Not now',`data-review-id="${esc(r.id)}"`)}${r.mode==='signin'?button('auth-saved','Use saved login',`data-review-id="${esc(r.id)}"`):''}${r.mode==='verification'?button('auth-verify','Verify email',`data-review-id="${esc(r.id)}"`,true):''}${button('auth-private',r.mode==='signup'?'Create privately':'Open privately',`data-review-id="${esc(r.id)}"`,r.mode!=='verification')}</div></section>`;
     const args={...r.tool?.arguments};const body=BuddyActions.messagePreview(args.payload);if(body)args.message=body;
     const data=Object.entries(args).filter(([k])=>!['payload'].includes(k));

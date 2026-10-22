@@ -269,3 +269,21 @@ test('Saved sign-ins lists each service sign-in as Saved or Not saved, with Repl
  assert.match(worker.savedSignins({profiles:[{id:'x',name:'A<b>',saved:true}],note:'Done <i>'}),/A&lt;b&gt;[\s\S]*Done &lt;i&gt;/);
  assert.doesNotMatch(worker.savedSignins({profiles:[{id:'x',name:'A<b>',saved:true}]}),/<b>/);
 });
+
+test('Background work lists every task running now with its agent, and Run at once offers 1 to 6',()=>{
+ const tasks=[{id:'a',title:'Left half',agentId:'f',status:'running'},{id:'b',title:'Right <half>',agentId:'v',status:'running'},{id:'c',title:'Notes',agentId:'x',status:'queued'}];
+ const agents=[{id:'f',name:'Forge'},{id:'v',name:'Vera & co'}];
+ const html=worker.runningNow({tasks,running:['a','b'],maxRunning:3,agents});
+ assert.match(html,/Working now · 2 of 3 at once/);
+ assert.equal((html.match(/data-worker-task=/g)||[]).length,2,'one row per running task, each opening its task');
+ assert.match(html,/data-worker-task="a"[\s\S]*Left half[\s\S]*Forge[\s\S]*data-worker-task="b"[\s\S]*Right &lt;half&gt;[\s\S]*Vera &amp; co/,'oldest first, each with its agent, escaped');
+ assert.doesNotMatch(html,/Notes/,'a queued task is not running');
+ assert.equal(worker.runningNow({tasks,running:[],maxRunning:3,agents}),'','nothing when nothing runs');
+ assert.equal(worker.runningNow({tasks,running:['gone'],agents}),'','a task the list no longer has is left out');
+ const field=worker.runLimitField(2);
+ assert.deepEqual([...field.matchAll(/<option value="(\d)"/g)].map(m=>Number(m[1])),[1,2,3,4,5,6]);
+ assert.match(field,/<option value="2" selected>Up to 2 tasks/);assert.match(field,/<option value="1" >One task at a time/);
+ assert.match(field,/data-worker-max-running/);assert.match(field,/Each agent works on one task at a time/);
+ assert.match(worker.runLimitField(undefined),/<option value="3" selected>/,'three until the person chooses');
+ assert.match(worker.runLimitField(9),/<option value="3" selected>/,'anything outside 1 to 6 shows the default');
+});

@@ -107,6 +107,12 @@
       if(!live.length&&dispatched.length)return `Retrying ${quoted(dispatched[0].title)}`;
       const head=`Working on Stage ${stage?.n??1} of ${total} — ${done} of ${inStage.length} tasks done`,t=live[0];
       if(!t)return head;
+      // Several teammates working at once, each on its own task (the pulse says who is busy with which): name each of them, up to three.
+      const busy=live.filter(x=>['working','quiet'].includes(liveState(x,pulse)));
+      if(busy.length>1){
+        const shown=busy.slice(0,3),rest=live.length-shown.length;
+        return `${head} — ${shown.map((x,i)=>`${nameOf(names,x.assignee)||'A teammate'}${i?' on':' is working on'} ${quoted(x.title)}${duration(sinceOf(x,run),now)}`).join(', ')}${rest>0?`, plus ${rest} more`:''}`;
+      }
       return `${head} — ${nameOf(names,t.assignee)||'A teammate'} is working on ${quoted(t.title)}${duration(sinceOf(t,run),now)}${live.length>1?`, plus ${live.length-1} more`:''}`;
     }
     // Only runs the person paused hold the stage: it goes on once they resume them.

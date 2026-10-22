@@ -175,3 +175,14 @@ test('a stage report goes to the group chat with that stage’s files attached; 
  assert.equal(out[1].message.noticeKind,'stage_report');
  assert.deepEqual(P.noticeFiles(state,p,p.notices[1]).map(f=>f.path),['figures/fig1.png','paper_draft.md','notes/sources.md'],'the same files for a report delivered before, read when it is drawn');
 });
+
+test('the plan strip names every teammate working at once, and each of their tasks reads Working',()=>{
+ const tasks=[task('t1','dispatched',{workerTaskId:'w1',workerStatus:'running'}),task('t2','dispatched',{assignee:'forge',workerTaskId:'w2',workerStatus:'running',updatedAt:'2026-10-19T10:18:00Z'}),task('t3','dispatched',{assignee:'chief',workerTaskId:'w3',workerStatus:'queued'})];
+ const p=active(tasks,{state:'working'});
+ const both=pulse({lyra:{state:'working',taskId:'w1'},forge:{state:'quiet',taskId:'w2'},chief:{state:'queued',taskId:'w3'}});
+ assert.equal(P.banner(p,both,names,NOW),'Working on Stage 1 of 3 — 0 of 3 tasks done — Lyra is working on “Task t1” (30 min), Forge on “Task t2” (12 min), plus 1 more');
+ assert.deepEqual(tasks.map(t=>P.taskChip(t,both).label),['Working','Working','Queued'],'each running task reads Working, the one waiting its turn Queued');
+ assert.match(P.stripHTML(p,both,names,{now:NOW}),/Lyra is working on “Task t1” \(30 min\), Forge on “Task t2” \(12 min\)/);
+ // With one at work it reads as it always did.
+ assert.equal(P.banner(p,pulse({lyra:{state:'working',taskId:'w1'}}),names,NOW),'Working on Stage 1 of 3 — 0 of 3 tasks done — Lyra is working on “Task t1” (30 min), plus 2 more');
+});

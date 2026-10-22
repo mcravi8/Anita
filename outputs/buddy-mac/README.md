@@ -131,7 +131,7 @@ Verified with native regression tests, independent python-docx/openpyxl/pypdf re
 
 ## Buddy 0.12 — background work
 
-The separate macOS helper runs durable serial tasks with private Chrome profiles and task files. Background work in the sidebar opens the queue, results, exact action reviews and document previews. Tasks use ChatGPT by default; optional Claude Console/API credits connect through a native secure field and Keychain with explicit estimated task budgets. The helper survives quitting the chat app, pauses on permission changes, and never automatically replays interrupted external actions. A temporarily unavailable permitted connector no longer blocks unrelated tools or plain conversation. See [the worker guide](../buddy-worker/README.md) for dependencies, lifecycle, billing limits, and testing.
+The separate macOS helper runs durable tasks, several at once (one per agent, up to the Run at once setting), with private Chrome profiles and task files. Background work in the sidebar opens the queue, results, exact action reviews and document previews. Tasks use ChatGPT by default; optional Claude Console/API credits connect through a native secure field and Keychain with explicit estimated task budgets. The helper survives quitting the chat app, pauses on permission changes, and never automatically replays interrupted external actions. A temporarily unavailable permitted connector no longer blocks unrelated tools or plain conversation. See [the worker guide](../buddy-worker/README.md) for dependencies, lifecycle, billing limits, and testing.
 
 
 ## Buddy 0.13 — AI provider settings

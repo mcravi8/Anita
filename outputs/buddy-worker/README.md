@@ -1,6 +1,6 @@
 # Buddy background worker
 
-Buddy 0.12 runs a separate per-user macOS helper, a serial durable task queue, and one private Chrome profile that every agent with internet access shares (each task drives its own page in it). Task files live in `~/Library/Application Support/Buddy/Worker/Tasks/<task-id>/Files`. This is a separate local browser and file workspace, not a virtual machine or a supplied cloud computer. The Mac must be awake, signed in, and online.
+Buddy 0.12 runs a separate per-user macOS helper, a durable task queue that runs several tasks at once (one per agent, up to three unless you change **Run at once** in Background work → Worker settings, from 1 to 6), and one private Chrome profile that every agent with internet access shares (each task drives its own page in it). Task files live in `~/Library/Application Support/Buddy/Worker/Tasks/<task-id>/Files`. This is a separate local browser and file workspace, not a virtual machine or a supplied cloud computer. The Mac must be awake, signed in, and online.
 
 Open **Background work → Start worker → New task**, or explicitly ask an agent in a direct chat to run a task in the background. The initial default is the existing ChatGPT subscription via Codex app-server. Settings → AI provider chooses the default for new replies and tasks and manages both connections. Closing or quitting the main Buddy app does not stop the helper. Pause queue stops current work and holds queued tasks. Resume can include additional facts or instructions.
 

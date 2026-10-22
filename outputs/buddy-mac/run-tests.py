@@ -119,6 +119,14 @@ with tempfile.TemporaryDirectory(prefix='buddy-signin-command-',suffix='.noindex
  subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
  subprocess.run([str(binary),str(source/'tests/signin-command-claude.py'),shutil.which('python3'),str(worker/'coding-shell.mjs'),shutil.which('node'),str(source/'tests/codex-coding-server.py')],check=True)
 
+# Several background tasks at once, through the real worker, Buddy's command runner and the Claude coding stand-in, which holds an attempt
+# open until the test releases it.
+with tempfile.TemporaryDirectory(prefix='buddy-parallel-tasks-',suffix='.noindex') as temp:
+ binary=Path(temp)/'buddy-parallel-tasks'
+ names=['BuddyWorkerCore.swift','BuddyOperationsDB.swift','BuddyWorkerProcess.swift','BuddyWorkerHost.swift','BuddyCodexCoding.swift','BuddyPlan.swift','BuddySupervisor.swift','BuddyMigrations.swift','BuddyWorkerClient.swift','BuddyAgentMemory.swift','BuddyTeamMonitorStore.swift','BuddyTeamMonitor.swift','BuddyAISettings.swift','ConversationService.swift','BuddyInboxReview.swift','BuddyMailVerification.swift','BuddyComputer.swift','BuddyTransport.swift','BuddyToolInput.swift','BuddyConnections.swift','BuddyTeam.swift','BuddyProjectFiles.swift','BuddyDocuments.swift','BuddyAgentProposals.swift','BuddyCredentials.swift','BuddyChromeAccounts.swift','BuddyCommandReview.swift','tests/ParallelTasks.swift']
+ subprocess.run(['xcrun','swiftc',*[str(source/name) for name in names],'-o',str(binary)],check=True)
+ subprocess.run([str(binary),str(source/'tests/coding-claude.py'),shutil.which('python3'),str(worker/'coding-shell.mjs'),shutil.which('node')],check=True)
+
 with tempfile.TemporaryDirectory(prefix='buddy-inbox-review-') as temp:
  binary=Path(temp)/'inbox-tests'
  subprocess.run(['xcrun','swiftc',str(source/'BuddyInboxReview.swift'),str(source/'BuddyOperationsDB.swift'),str(source/'tests/InboxReview.swift'),'-o',str(binary)],check=True)

@@ -807,6 +807,16 @@ struct BuddyAttempt {
         let old = paused; paused = value
         do { try db.transaction { try db.setMeta("paused", value ? "1" : "0") } } catch { paused = old; throw error }
     }
+    /// How many tasks may run at once: the person's choice in Background work ("Run at once"), kept with the queue. Three until they choose.
+    static let runLimits = 1...6, defaultRunLimit = 3
+    var maxRunning: Int {
+        if let saved = (try? db.meta("maxRunning")).flatMap({ $0.flatMap(Int.init) }), Self.runLimits.contains(saved) { return saved }
+        return Self.defaultRunLimit
+    }
+    func setMaxRunning(_ value: Int) throws {
+        guard Self.runLimits.contains(value) else { throw BuddyWorkerFailure(message: "Choose how many tasks may run at once, from 1 to 6.", code: "invalid_input") }
+        try db.transaction { try db.setMeta("maxRunning", String(value)) }
+    }
 
     // MARK: history
 

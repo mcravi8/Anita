@@ -880,5 +880,46 @@ import Foundation
         require((arrivedRun["goal"] as? String ?? "").contains("Marcaccioli_2022_published.pdf"), "the task starts again, told where the file is: \(arrivedRun["goal"] ?? "not started")")
         require(!(try arrival.store.openDecisions(workspace: w)).contains { $0["audience"] as? String == "user" }, "nothing waits for the user")
         print("PASS: a PARTIAL plan task waiting for a file the user must get continues by itself once the file appears where the supervisor asked for it; a file that was already there does not count")
+
+        // 20. The user's S02a: Chief cancelled a run to give the task to Forge, and every start after that was refused, so each of Chief's reassigns
+        // took effect and nothing followed it. The lane asked Chief about that one task about 170 times in 90 minutes and used up the user's ChatGPT
+        // allowance. After three decisions in a row that nothing followed, the lane stops asking about that task and the user gets one notice; it
+        // asks again as soon as anything happens to the task's work, and after a restart.
+        let looping = try world(base, "looping")
+        try mode(looping, "reassignall")
+        try propose(looping)
+        _ = try step(looping)
+        let t1Loop = looping.keys["t1"] ?? "", firstLoopRun = jobs(looping, "t1").first?["id"] as? String ?? ""
+        try looping.store.update(firstLoopRun, ["status": "cancelled", "stopCause": "supervisor.cancel", "progress": "Cancelled by Chief: Forge is the engineer for this."])
+        _ = try step(looping)
+        // Every start is refused, as the start cap refused them on S02a.
+        func refusingStep(_ world: World) throws {
+            _ = try BuddyStageLoop.step(plans: world.plans, workspace: w, jobs: world.store.jobs, names: names) { _, _, _ in throw BuddyWorkerFailure(message: "Forge can't start this task right now.") }
+        }
+        for _ in 0..<6 { await tick(looping); try refusingStep(looping) }
+        require(calls(looping).count == 3, "Chief is asked three times, and not again once nothing follows its decisions: \(calls(looping).map { $0["items"] ?? "" })")
+        let stuck20 = try notices(looping, "stuck"), stuckText = stuck20.first?["text"] as? String ?? ""
+        require(stuck20.count == 1 && stuckText.contains("Chief decided on “Rerun the pipeline” 3 times") && stuckText.contains("Forge can't start this task right now") && stuck20.first?["chat"] as? Bool == true,
+                "the user gets one notice that says what kept happening: \(stuck20)")
+        require(try planTask(looping, "t1")["status"] as? String == "blocked" && looping.stopped.isEmpty && jobs(looping, "t1").count == 1, "the task itself is left as it was, waiting")
+        // Something happens to the task's work (here the user starts it again, and that run is cancelled too): Chief is asked again.
+        try looping.plans.reassign(taskId: t1Loop, assignee: forge, by: "user", members: members)
+        let userRun = try step(looping).first ?? ""
+        try looping.store.update(userRun, ["status": "cancelled", "stopCause": "user.cancel"])
+        _ = try step(looping)
+        try mode(looping, "hold")
+        await tick(looping)
+        require(calls(looping).count == 4 && (calls(looping).last?["kinds"] as? [String]) == ["cancelled"], "once the task's work changed, Chief is asked about it again: \(calls(looping).last ?? [:])")
+        // Stuck a second time, then Buddy restarts (a fix may have come with it): Chief is asked once more.
+        try mode(looping, "reassignall")
+        for _ in 0..<6 { await tick(looping); try refusingStep(looping) }
+        let stuckAgain = try notices(looping, "stuck")
+        require(calls(looping).count == 7 && stuckAgain.count == 2, "three more decisions that nothing followed, and one more notice: \(calls(looping).count) \(stuckAgain.count)")
+        let reopened = try world(base, "looping")
+        reopened.planID = looping.planID; reopened.keys = looping.keys
+        try mode(reopened, "hold")
+        await tick(reopened)
+        require(calls(reopened).count == 8, "after a restart the lane asks Chief about the task again: \(calls(reopened).count)")
+        print("PASS: a supervisor whose decisions on a task take effect but change nothing (every start refused) is asked about it three times, then not again, and the user gets one notice saying what kept happening; the task is left waiting, and the lane asks again once anything happens to its work or after a restart")
     }
 }

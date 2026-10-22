@@ -90,6 +90,10 @@ for line in sys.stdin:
             actions.append({'item': key, 'do': 'resume', 'reason': 'Carry on.'})
         elif mode == 'reworkcode' and kind == 'result':
             actions.append({'item': key, 'do': 'rework', 'reason': 'S01 is partial.', 'text': REWORK})
+        elif mode == 'reassignall' and kind in ('cancelled', 'dispatch_blocked'):
+            # Chief on the user's S02a: the task's start is refused each time, and Chief gives it to the engineer again each time.
+            found = re.search(r'\(([^()]*)\)\s*$', (i.get('task') or {}).get('assignee', ''))
+            actions.append({'item': key, 'do': 'reassign', 'assignee': found.group(1) if found else '', 'reason': 'Forge is the engineer; start it again.'})
         elif mode == 'refuse':
             actions.append({'item': key, 'do': 'rework', 'reason': 'Needs another pass.'} if kind == 'result' else {'item': key, 'do': 'hold', 'reason': 'Waiting to see more.'})
         elif mode == 'bogus':

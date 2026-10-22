@@ -8,8 +8,9 @@ import Foundation
 /// from one plan), the plan, the record of what finished and was decided, and the user's standing directives, all as data. The model call may
 /// happen more than once; each effect happens at most once, because every action is applied only while the state it was decided on still
 /// holds. An action Buddy refuses is never silent: the reason is kept on its item and given back with it next time. Only the user list reaches
-/// the user (forward_to_user), and an item the lane cannot move after three answered tries becomes one "stuck" notice; a run that never got an
-/// answer (the process did not start, stopped or timed out) counts for nothing and is tried again.
+/// the user (forward_to_user), and an item the lane cannot move after three answered tries becomes one "stuck" notice, as does a task whose
+/// last three decisions took effect with nothing happening to its work after any of them (`unchanged`); a run that never got an answer (the
+/// process did not start, stopped or timed out) counts for nothing and is tried again.
 @MainActor final class BuddySupervisorLane {
     struct Hooks {
         var stopTask: (_ taskID: String, _ cause: String) async -> Void; var taskFiles: (_ taskID: String) -> [String]
@@ -22,7 +23,7 @@ import Foundation
     static let runTimeout: TimeInterval = 300, retryDelay: TimeInterval = 60
     /// After this long with no run answered, the user is told once that background supervision can't start.
     static let failureNoticeAfter: TimeInterval = 30 * 60
-    static let maxItems = 8, maxActions = 12, maxPresentations = 3, maxIdleRuns = 3, briefingLimit = 120 * 1024
+    static let maxItems = 8, maxActions = 12, maxPresentations = 3, maxIdleRuns = 3, maxUnchanged = 3, briefingLimit = 120 * 1024
     /// The most a ChatGPT run's briefing may weigh: the app-server transport takes at most 100,000 characters for an internal run (bytes ≥ characters).
     static let chatgptBriefingLimit = 100_000
     /// How long the app-server's answer to "signed in to ChatGPT?" is trusted, by the lane's clock.
@@ -75,14 +76,18 @@ import Foundation
     struct Item {
         var key = "", kind = "", planId = "", planTaskId = "", workerTaskId = "", stageId = "", decisionId = "", checkpointId = "", title = "", reviewId = ""
         var attempt = 0
+        /// The task the item is about, and what had happened to its work when the item was presented (see `trace`).
+        var subject = "", trace = ""
         var record: [String: Any] {
-            ["key": key, "kind": kind, "planId": planId, "planTaskId": planTaskId, "workerTaskId": workerTaskId, "stageId": stageId, "decisionId": decisionId, "checkpointId": checkpointId, "title": title, "attempt": attempt, "reviewId": reviewId]
+            ["key": key, "kind": kind, "planId": planId, "planTaskId": planTaskId, "workerTaskId": workerTaskId, "stageId": stageId, "decisionId": decisionId, "checkpointId": checkpointId, "title": title, "attempt": attempt, "reviewId": reviewId,
+             "subject": subject, "trace": trace]
         }
         init() {}
         init(record r: [String: Any]) {
             key = r["key"] as? String ?? ""; kind = r["kind"] as? String ?? ""; planId = r["planId"] as? String ?? ""; planTaskId = r["planTaskId"] as? String ?? ""
             workerTaskId = r["workerTaskId"] as? String ?? ""; stageId = r["stageId"] as? String ?? ""; decisionId = r["decisionId"] as? String ?? ""
             checkpointId = r["checkpointId"] as? String ?? ""; title = r["title"] as? String ?? ""; attempt = r["attempt"] as? Int ?? 0; reviewId = r["reviewId"] as? String ?? ""
+            subject = r["subject"] as? String ?? ""; trace = r["trace"] as? String ?? ""
         }
     }
     struct Supervisor { let id, name: String }
@@ -125,7 +130,9 @@ import Foundation
     }
     /// The lane's own record: every run with its items and output, and how often each item was presented, how it ended and why Buddy refused
     /// the last action on it (`refusal`, empty when it was not refused). A reopened item keeps when it was reopened (`reopened_at`: earlier runs no
-    /// longer count against it) and what changed since (`note`, given to the supervisor until it acts on the item).
+    /// longer count against it) and what changed since (`note`, given to the supervisor until it acts on the item). Per task (`subject`): how its
+    /// work looked after the supervisor's last decision that took effect (`trace`), how many such decisions in a row nothing followed (`repeats`),
+    /// and whether the supervisor is no longer asked about it (`state` stuck).
     private static let tables = [
         """
         CREATE TABLE IF NOT EXISTS supervisor_runs(id TEXT PRIMARY KEY, workspace TEXT NOT NULL, plan_id TEXT NOT NULL DEFAULT '', items TEXT NOT NULL,
@@ -136,6 +143,10 @@ import Foundation
         CREATE TABLE IF NOT EXISTS supervisor_items(key TEXT PRIMARY KEY, workspace TEXT NOT NULL, presented INTEGER NOT NULL DEFAULT 0,
           state TEXT NOT NULL CHECK(state IN ('open','handled','forwarded','stuck')), last_run TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
           refusal TEXT NOT NULL DEFAULT '', reopened_at TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '')
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS supervisor_subjects(subject TEXT PRIMARY KEY, workspace TEXT NOT NULL, trace TEXT NOT NULL DEFAULT '', repeats INTEGER NOT NULL DEFAULT 0,
+          state TEXT NOT NULL CHECK(state IN ('open','stuck')), updated_at TEXT NOT NULL)
         """,
     ]
 
@@ -215,7 +226,7 @@ import Foundation
             busy = false
         }
         guard now >= retryAt else { return }
-        let items = collect(workspace: workspace, db: db)
+        let items = collect(workspace: workspace, supervisor: supervisor, db: db)
         guard !items.isEmpty else { return }
         start(items, workspace: workspace, supervisor: supervisor, provider: provider, model: model, room: room, state: state, now: now, db: db)
     }
@@ -283,7 +294,7 @@ import Foundation
     private static let rank = ["question": 0, "command_review": 0, "result": 1, "stopped": 2, "paused": 2, "cancelled": 2, "dispatch_blocked": 3, "stage_plan": 4, "stage_check": 5]
     /// Everything waiting for the supervisor, most urgent first: questions, results, stops and cancelled runs, refused starts, stages to plan, stage checks. Items it
     /// forwarded to the user or gave up on are left out. One run takes up to 8 items of one plan (or of work outside any plan).
-    private func collect(workspace: String, db: BuddyOperationsDB) -> [Item] {
+    private func collect(workspace: String, supervisor: Supervisor, db: BuddyOperationsDB) -> [Item] {
         var items: [Item] = []
         for raw in (try? plans.workItems(workspace: workspace)) ?? [] {
             var item = Item()
@@ -310,10 +321,59 @@ import Foundation
             if !item.key.isEmpty { items.append(item) }
         }
         let closed = Set(((try? db.rows("SELECT key FROM supervisor_items WHERE workspace = ? AND state IN ('forwarded', 'stuck')", [.text(workspace)])) ?? []).compactMap { $0.first?.string })
-        let ordered = items.enumerated().filter { !closed.contains($0.element.key) }
+        for i in items.indices { (items[i].subject, items[i].trace) = trace(items[i]) }
+        let quiet = unchanged(items, workspace: workspace, supervisor: supervisor, db: db)
+        let ordered = items.enumerated().filter { !closed.contains($0.element.key) && !quiet.contains($0.element.subject) }
             .sorted { (Self.rank[$0.element.kind] ?? 9, $0.offset) < (Self.rank[$1.element.kind] ?? 9, $1.offset) }.map(\.element)
         guard let first = ordered.first else { return [] }
         return Array(ordered.filter { $0.planId == first.planId }.prefix(Self.maxItems))
+    }
+    /// What has happened so far to the work an item is about (`subject`): the runs of its plan task, or its own worker task outside a plan, each
+    /// with its status, attempts and when it last changed. Empty for an item about no task (a stage to plan or check).
+    private func trace(_ item: Item) -> (subject: String, trace: String) {
+        let own: [[String: Any]], subject: String
+        if !item.planTaskId.isEmpty {
+            subject = "task:" + item.planTaskId
+            own = store.jobs.filter { ($0["requestId"] as? String ?? "").hasPrefix("plan:\(item.planTaskId):") || (!item.workerTaskId.isEmpty && $0["id"] as? String == item.workerTaskId) }
+        } else if !item.workerTaskId.isEmpty, let job = try? store.job(item.workerTaskId) {
+            subject = "worker:" + item.workerTaskId; own = [job]
+        } else { return ("", "") }
+        let runs = own.map { "\($0["id"] as? String ?? ""):\($0["status"] as? String ?? ""):\($0["attempt"] as? Int ?? 0):\($0["updatedAt"] as? String ?? "")" }.sorted()
+        return (subject, "\(runs.count);" + runs.joined(separator: ","))
+    }
+    /// The tasks the supervisor is not asked about now: its last `maxUnchanged` decisions on one took effect, and nothing happened to the task's
+    /// work after any of them. On the user's S02a every start of the task was refused, so Chief reassigned it about 170 times in 90 minutes and
+    /// used up the user's ChatGPT allowance. Such a task is marked stuck and the user gets one notice; the task itself is left as it is. It is
+    /// presented again as soon as anything happens to its work (a run starts, changes or ends), and after a restart (`recover`).
+    private func unchanged(_ items: [Item], workspace: String, supervisor: Supervisor, db: BuddyOperationsDB) -> Set<String> {
+        var quiet = Set<String>(), seen = Set<String>()
+        let stamp = Self.stamp(Date())
+        for item in items where !item.subject.isEmpty && seen.insert(item.subject).inserted {
+            guard let row = (try? db.rows("SELECT trace, repeats, state FROM supervisor_subjects WHERE subject = ?", [.text(item.subject)]))?.first else { continue }
+            let same = row[0].string == item.trace, repeats = Int(row[1].int ?? 0)
+            if row[2].string == "stuck" {
+                if same { quiet.insert(item.subject); continue }
+                // Its work changed: the supervisor looks at it again, counting from nothing.
+                _ = try? db.run("UPDATE supervisor_subjects SET state = 'open', repeats = 0, updated_at = ? WHERE subject = ?", [.text(stamp), .text(item.subject)])
+                try? store.resolveDecision(id: "stuck:" + item.subject, by: "supervisor:" + supervisor.id, resolution: "reopened")
+                continue
+            }
+            guard same, repeats >= Self.maxUnchanged else { continue }
+            quiet.insert(item.subject)
+            _ = try? db.run("UPDATE supervisor_subjects SET state = 'stuck', updated_at = ? WHERE subject = ?", [.text(stamp), .text(item.subject)])
+            let why = (planTask(item)?["blockedReason"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = "\(supervisor.name) decided on “\(item.title)” \(repeats) times, but nothing happened to its work after any of those decisions"
+                + (why.contains(" ") ? " (the last reason Buddy gave: \(Self.clause(why)))" : "")
+                + ". Buddy stopped asking \(supervisor.name) about it; it asks again as soon as anything happens to the task's work, or after Buddy restarts. Tell me how to proceed."
+            let keys = items.filter { $0.subject == item.subject }.map(\.key)
+            if !item.planId.isEmpty {
+                _ = try? plans.addNotice(planId: item.planId, kind: "stuck", text: text, chat: true, refs: ["itemKeys": keys, "subject": item.subject])
+            } else {
+                try? store.openDecision(workspace: workspace, id: "stuck:" + item.subject, agent: supervisor.id, kind: "notice", title: "The team is stuck", question: text, label: "Open task",
+                                        payload: ["taskId": item.workerTaskId, "itemKeys": keys], audience: "user")
+            }
+        }
+        return quiet
     }
 
     // MARK: the briefing
@@ -613,6 +673,11 @@ import Foundation
     /// marked stuck after a run that got no answer are open again.
     private func recover(_ db: BuddyOperationsDB, supervisor: Supervisor, state: [String: Any]) async {
         let stamp = Self.stamp(Date())
+        // A restart may come with a fix: tasks the supervisor stopped being asked about are looked at again, counting from nothing.
+        for row in (try? db.rows("SELECT subject FROM supervisor_subjects WHERE state = 'stuck'")) ?? [] {
+            try? store.resolveDecision(id: "stuck:" + (row.first?.string ?? ""), by: "supervisor:" + supervisor.id, resolution: "reopened")
+        }
+        _ = try? db.run("UPDATE supervisor_subjects SET state = 'open', repeats = 0, updated_at = ?", [.text(stamp)])
         reopenStuckByFailures(db, supervisor: supervisor)
         reopenStuckForCodexSaves(db, supervisor: supervisor)
         rerouteOwnQuestions(supervisor: supervisor, workspace: state["conversationWorkspace"] as? String ?? "")
@@ -932,6 +997,17 @@ import Foundation
     private func settle(_ run: Run, effective: Set<String>, forwarded: Set<String>, reasons: [String: String]) {
         guard let db else { return }
         let stamp = Self.stamp(Date())
+        // A decision that took effect on a task: one more in a row that nothing followed when the task's work looked, as the item was presented,
+        // just as the last decision left it. How this one leaves it is what the next one is compared with.
+        var counted = Set<String>()
+        for item in run.items where effective.contains(item.key) && !forwarded.contains(item.key) && !item.subject.isEmpty && counted.insert(item.subject).inserted {
+            let row = (try? db.rows("SELECT trace, repeats, state FROM supervisor_subjects WHERE subject = ?", [.text(item.subject)]))?.first
+            let repeats = row.map { $0[0].string == item.trace && $0[2].string == "open" ? Int($0[1].int ?? 0) + 1 : 1 } ?? 1
+            _ = try? db.run("""
+                INSERT INTO supervisor_subjects(subject, workspace, trace, repeats, state, updated_at) VALUES(?, ?, ?, ?, 'open', ?)
+                ON CONFLICT(subject) DO UPDATE SET trace = excluded.trace, repeats = excluded.repeats, state = 'open', updated_at = excluded.updated_at
+                """, [.text(item.subject), .text(run.workspace), .text(trace(item).trace), .int(Int64(repeats)), .text(stamp)])
+        }
         var stuck: [Item] = []
         for item in run.items {
             if forwarded.contains(item.key) { _ = try? db.run("UPDATE supervisor_items SET state = 'forwarded', note = '', updated_at = ? WHERE key = ?", [.text(stamp), .text(item.key)]) }

@@ -3,9 +3,10 @@ import {lookup} from 'node:dns/promises';
 import {isIP} from 'node:net';
 import {startGuardProxy,publicAddress} from './network-guard.mjs';
 import {randomUUID, createHash} from 'node:crypto';
-import {mkdir, chmod, lstat, readlink, unlink, writeFile} from 'node:fs/promises';
-import {hostname} from 'node:os';
-import {resolve, isAbsolute} from 'node:path';
+import {mkdir, chmod, lstat, readlink, unlink, writeFile, readdir, stat, rm, cp, copyFile, link, open} from 'node:fs/promises';
+import {hostname, tmpdir} from 'node:os';
+import {resolve, isAbsolute, join, basename, extname} from 'node:path';
+import {constants as fsConstants} from 'node:fs';
 import {createInterface} from 'node:readline';
 import {pathToFileURL} from 'node:url';
 import {realpathSync} from 'node:fs';
@@ -35,6 +36,8 @@ export function sessionRefreshDestination(shared,raw){
 const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const runFile=promisify(execFile);
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
+// A wait that never keeps the bridge running by itself.
+const idle=ms=>new Promise(r=>{const t=setTimeout(r,ms);t.unref?.();});
 // After a submit: wait for the page it leads to (if any) to load, without waiting long for a page that stays put.
 async function afterSubmit(page,act){
   const navigated=new Promise(resolve=>{const on=f=>{if(f===page.mainFrame()){page.off('framenavigated',on);resolve(true);}};page.on('framenavigated',on);setTimeout(()=>{page.off('framenavigated',on);resolve(false);},2500);});
@@ -53,6 +56,43 @@ const OPEN_FOR_YOU='Private sign-in is open: Buddy’s private Chrome is open fo
 const DOWNLOAD_LIMIT=32*1024*1024;
 // A web page where a file was expected: a sign-in form, a CAPTCHA, an error page.
 const webPage=(type,body)=>/^(text\/html|application\/xhtml\+xml)$/.test(type)||/^\s*<(!doctype html|html|head|body)\b/i.test(body.subarray(0,512).toString('latin1').replace(/^\uFEFF/,''));
+
+// MARK: fetching a file with Buddy's Chrome (buddy_browser_fetch)
+
+// The largest file one fetch saves.
+export const FETCH_LIMIT=200*1024*1024;
+const tooLarge=limit=>Error(`The file is larger than ${Math.max(1,Math.round(limit/1048576))} MB, so Buddy didn't save it.`);
+const POSTED='The page tried to submit a form. A fetch only opens the address you gave (GET) and never submits anything, so nothing was sent and nothing was saved.';
+// What a fetch saves: a relative path inside the folder Buddy chose, every part visible and plain. Returns its parts.
+function savedName(raw){
+  const text=typeof raw==='string'?raw.trim():'';
+  const parts=text.split('/');
+  if(!text||text.length>1000||text.startsWith('/')||/[\\:\0]/.test(text)||parts.length>12||parts.some(p=>!p||p.startsWith('.')||p.length>255||p!==p.trim()))
+    throw Error('Give saveAs: a relative path inside the folder, with the file name (for example sources/article.pdf). No hidden names, no .., no absolute paths.');
+  return parts;
+}
+// A page that stands between the person and the file: a CAPTCHA (its frames, its widgets, its words), a sign-in form, or an access check.
+const CAPTCHA_SOURCES=/recaptcha|hcaptcha|challenges\.cloudflare\.com|turnstile|captcha|arkoselabs|funcaptcha|perimeterx|px-cloud|datadome|geetest/i;
+const CAPTCHA_WORDS=/\bcaptcha\b|verify (that )?you(['\u2019]re| are) (a )?human|are you a (robot|human)|i['\u2019]?m not a robot|confirm (that )?you(['\u2019]re| are) (a )?human|checking (if the site connection is secure|your browser)|just a moment|press (&|and) hold|unusual traffic|security check|bot (check|detection|protection|manager)|human verification|make sure (it is|it['\u2019]s) (actually )?you/i;
+const SIGNIN_TITLE=/\b(sign|log) ?in\b|\blogin\b/i;
+const BLOCKED_WORDS=/access denied|forbidden|request (was )?blocked|not authori[sz]ed|subscription required|(log|sign) in to (access|continue|view|read)|institutional (access|login)|you (do not|don['\u2019]t) have access/i;
+// A file's type from its first bytes or its name, when the website didn't say.
+const KNOWN_TYPES={pdf:'application/pdf',csv:'text/csv',txt:'text/plain',json:'application/json',zip:'application/zip',xlsx:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gz:'application/gzip',html:'text/html',htm:'text/html'};
+const typeOf=(head,name)=>head.subarray(0,5).toString('latin1')==='%PDF-'?'application/pdf':KNOWN_TYPES[extname(name||'').slice(1).toLowerCase()]||'application/octet-stream';
+// An address as a receipt keeps it: no user name, no fragment, and no value of a parameter that may be a key or a ticket.
+function receiptURL(raw){try{const u=new URL(raw);u.username='';u.password='';u.hash='';for(const key of [...u.searchParams.keys()])if(/code|token|password|secret|credential|assertion|ticket|sig|key|session|auth/i.test(key))u.searchParams.set(key,'[private]');return u.href;}catch{return '';}}
+// macOS quarantine on every saved file, as a browser download has: macOS asks before anything in it is opened or run.
+async function quarantine(path){
+  if(process.platform!=='darwin')return;
+  await runFile('/usr/bin/xattr',['-w','com.apple.quarantine',`0081;${Math.floor(Date.now()/1000).toString(16)};Buddy;${randomUUID().toUpperCase()}`,path],{timeout:5000}).catch(()=>{});
+}
+async function sha256File(path){const hash=createHash('sha256'),file=await open(path,'r');try{for await(const chunk of file.createReadStream())hash.update(chunk);}finally{await file.close().catch(()=>{});}return hash.digest('hex');}
+async function head(path){const file=await open(path,'r');try{const buffer=Buffer.alloc(1024);const {bytesRead}=await file.read(buffer,0,1024,0);return buffer.subarray(0,bytesRead);}finally{await file.close().catch(()=>{});}}
+// What is copied of the shared profile while the person's window is open: its sign-ins (cookies, site storage, saved logins, settings), not
+// its locks, caches, history or other large stores the agents' pages never need (service workers are blocked for them anyway).
+const NOT_COPIED=/^(Singleton(Lock|Cookie|Socket)|lockfile|Cache|Code Cache|GPUCache|DawnCache|DawnGraphiteCache|DawnWebGPUCache|GrShaderCache|GraphiteDawnCache|ShaderCache|Crashpad|component_crx_cache|extensions_crx_cache|Safe Browsing|BrowserMetrics.*|optimization_guide.*|OnDeviceHeadSuggestModel|Subresource Filter|CacheStorage|ScriptCache|Download Service|Service Worker|File System|blob_storage|GCM Store|Extensions|Extension State|Local Extension Settings|Sync Data|History|History-journal|Favicons|Favicons-journal|Top Sites|Top Sites-journal|Visited Links|Shortcuts|Shortcuts-journal|Media History|shared_proto_db|Feature Engagement Tracker|Segmentation Platform|VideoDecodeStats|Platform Notifications|BudgetDatabase|commerce_subscription_db|coupon_db|DIPS|DIPS-journal|SharedStorage|Accounts)$/;
+// Google refuses a sign-in in a browser an agent drives; the person then finishes it in Buddy's Chrome window.
+const GOOGLE_REFUSED='Google won\u2019t accept this sign-in in the browser agents use. Finish it in Buddy\u2019s Chrome window.';
 
 // The account a task must use (the Mac app pins it from the person's own words; a model never sets it). With several Google accounts signed
 // in to the one Chrome, Google opens a page as the default account (/u/0) unless the address says otherwise, so a pinned task's Google pages
@@ -74,14 +114,23 @@ const otherAccount=(seen,account)=>`This page is signed in as ${seen}, but this 
  *  Manager) are the profile's and so everyone's; pages, observed controls, approvals and sign-in requests are the session's alone. One
  *  network guard checks every request any page makes. A session that closes, crashes or stops responding takes only its own page with it. */
 export class SharedBrowser {
-  constructor(profile,{testOrigin='',testOrigins=[],testGooglePath='',testGoogle=[],commandDeadlineMs=40000,resolver=lookup,guardOptions={},manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',secretTTLms=600000}={}) {
+  constructor(profile,{testOrigin='',testOrigins=[],testGooglePath='',testGoogle=[],commandDeadlineMs=40000,resolver=lookup,guardOptions={},manualExecutable='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',secretTTLms=600000,fetchDeadlineMs=180000,downloadWaitMs=4000}={}) {
     this.profile=resolve(profile);this.testOrigins=new Set([testOrigin,...testOrigins].filter(Boolean));this.testGooglePath=this.testOrigins.size?testGooglePath:'';
     // Test origins that stand in for Google's own sites (only ever one of the test origins).
     this.testGoogle=new Set([].concat(testGoogle).filter(o=>this.testOrigins.has(o)));
     this.commandDeadlineMs=commandDeadlineMs;this.resolver=resolver;this.guardOptions=guardOptions;this.manualExecutable=manualExecutable;this.secretTTLms=secretTTLms;
     this.context=null;this.launching=null;this.closing=null;this.spare=[];this.creating=0;this.sessions=new Map();this.manualProcess=null;this.handingOff=false;this.lastURL=null;
     this.secrets=new Set();this.secretOrigins=new Map();this.blockedAt=0;
+    // Downloads: only a fetch's own download is kept (one fetch at a time); any other is dropped. Chrome writes them in `downloadsDir`.
+    this.fetchDeadlineMs=fetchDeadlineMs;this.downloadWaitMs=downloadWaitMs;this.fetchQueue=Promise.resolve();this.droppedDownloads=0;this.downloadsDir=null;
+    // The Chrome the agents use runs on `contextProfile`: the shared profile, or while the person's window is open on it, a copy (`shadow`).
+    // `manualOwner` is the task that window is for (null for the setup window): only that task waits for it.
+    this.contextProfile=null;this.shadow=null;this.manualOwner=null;
   }
+  /** Where the copy of the profile goes while the person's window is open (beside the profile, never in it). */
+  get shadowPath(){return this.profile+'.while-open.noindex';}
+  /** Whether `session` belongs to the task the person's window is open for (its own page, or its fetch). */
+  ownsWindow(session){const owner=this.manualOwner;return !!owner&&!!session&&(session.id===owner||session.id.startsWith(owner+':'));}
   isTestOrigin(origin){return this.testOrigins.has(origin);}
   /** One of Google's own sites (google.com and its subdomains, youtube.com), where several of the person's Google accounts can be signed in. */
   isGoogle(url){try{const u=url instanceof URL?url:new URL(url);return u.protocol==='https:'&&googleProperty(u.hostname)||this.testGoogle.has(u.origin);}catch{return false;}}
@@ -130,33 +179,74 @@ export class SharedBrowser {
   // Whether the Chrome holding the profile lock is one an agent connection drives (it has a debugging pipe).
   async automated(pid){const {stdout}=await runFile('/bin/ps',['-p',String(pid),'-ww','-o','command='],{timeout:2000,maxBuffer:65536}).catch(()=>({stdout:''}));return /--remote-debugging|--enable-automation/.test(stdout);}
   manualOpen(){const p=this.manualProcess;return this.handingOff||!!p&&p.exitCode===null&&p.signalCode===null;}
-  async ensureContext(){
+  /** The agents' Chrome, for `session`. While the person's window is open on the shared profile, the agents' Chrome runs on the copy made
+   *  when it opened; the task the window is for (and a moment with no copy) waits for the person instead. */
+  async ensureContext(session){
     if(this.closing)await this.closing;
-    if(this.manualOpen())throw Error(OPEN_FOR_YOU);
-    if(this.context)return this.context;
-    if(!this.launching)this.launching=this.launch().finally(()=>{this.launching=null;});
+    const open=this.manualOpen();
+    if(open&&(!this.shadow||this.ownsWindow(session)))throw Error(OPEN_FOR_YOU);
+    const where=open?this.shadow:this.profile;
+    if(this.launching){await this.launching.catch(()=>{});if(this.closing)await this.closing;}
+    if(this.context&&this.contextProfile===where)return this.context;
+    // The other profile's Chrome closes first (its pages are reset; each task opens its page again at its next step).
+    if(this.context)await this.closeAutomation();
+    if(!this.launching)this.launching=this.launch(where).finally(()=>{this.launching=null;});
     return await this.launching;
   }
-  async launch() {
-    if(this.manualOpen())throw Error(OPEN_FOR_YOU);
-    await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);
+  async launch(where=this.profile) {
+    const copy=where!==this.profile;
+    if(copy?!this.manualOpen()||where!==this.shadow:this.manualOpen())throw Error(OPEN_FOR_YOU);
+    await mkdir(where,{recursive:true,mode:0o700});await chmod(where,0o700);
     // A Chrome window still open on the profile (the person's, from before a restart) is never joined by an agent connection.
-    if(await this.profileLock())throw Error('Buddy’s private Chrome window is still open. Close it, or choose Done, before agents use the browser.');
+    if(!copy&&await this.profileLock())throw Error('Buddy’s private Chrome window is still open. Close it, or choose Done, before agents use the browser.');
+    // A copy left from a window that was open when Buddy stopped is no longer needed.
+    if(!copy)await rm(this.shadowPath,{recursive:true,force:true}).catch(()=>{});
+    if(!this.downloadsDir){const dir=join(tmpdir(),`buddy-browser-downloads-${randomUUID()}.noindex`);await mkdir(dir,{recursive:true,mode:0o700});this.downloadsDir=dir;}
     // Every request Chrome makes goes through a proxy that checks the real destination as it connects (see network-guard.mjs). The bypass
     // list switches off Chrome's built-in exemption for localhost and loopback, which would otherwise skip the proxy entirely.
     if(!this.netGuard)this.netGuard=await startGuardProxy({resolver:this.resolver,allow:[...this.testOrigins].map(o=>{const u=new URL(o);return u.hostname.replace(/^\[|\]$/g,'')+':'+(u.port||(u.protocol==='https:'?'443':'80'));}),onBlocked:()=>{this.blockedAt=Date.now();},...this.guardOptions});
     // Use Chrome's real encrypted profile, never Playwright's mock Keychain/basic password store.
-    const context=await chromium.launchPersistentContext(this.profile,{channel:'chrome',headless:true,chromiumSandbox:true,acceptDownloads:false,permissions:[],serviceWorkers:'block',proxy:{server:this.netGuard.server,username:this.netGuard.username,password:this.netGuard.password,bypass:'<-loopback>'},ignoreDefaultArgs:['--password-store=basic','--use-mock-keychain','--disable-sync'],args:['--disable-extensions','--disable-background-networking','--force-webrtc-ip-handling-policy=disable_non_proxied_udp']});
+    // Downloads are accepted into Buddy's own folder for Chrome's downloads, and only a fetch's own download is kept (see `routeDownload`).
+    const context=await chromium.launchPersistentContext(where,{channel:'chrome',headless:true,chromiumSandbox:true,acceptDownloads:true,downloadsPath:this.downloadsDir,permissions:[],serviceWorkers:'block',proxy:{server:this.netGuard.server,username:this.netGuard.username,password:this.netGuard.password,bypass:'<-loopback>'},ignoreDefaultArgs:['--password-store=basic','--use-mock-keychain','--disable-sync'],args:['--disable-extensions','--disable-background-networking','--force-webrtc-ip-handling-policy=disable_non_proxied_udp']});
     this.spare=[...context.pages()];
+    for(const p of context.pages())this.watchDownloads(p);
     await context.route('**/*',route=>this.route(route));
     // If Chrome exits or crashes, forget the dead context so the next command starts a new one instead of failing forever.
-    context.on('close',()=>{if(this.context!==context)return;this.context=null;this.spare=[];for(const s of this.sessions.values()){s.reset();s.owned.clear();}});
-    context.on('page',p=>this.adopt(p));
-    this.context=context;return context;
+    context.on('close',()=>{if(this.context!==context)return;this.context=null;this.contextProfile=null;this.spare=[];for(const s of this.sessions.values()){s.reset();s.owned.clear();}});
+    context.on('page',p=>{this.watchDownloads(p);this.adopt(p);});
+    this.context=context;this.contextProfile=where;return context;
+  }
+  watchDownloads(page){page.on('download',download=>this.routeDownload(page,download));}
+  /** A download is kept only when the fetch that asked for it is waiting on that very page; any other (a page that starts one by itself, a
+   *  link an agent clicks) is cancelled and deleted at once. */
+  routeDownload(page,download){
+    const s=this.sessionFor(page),f=s?.fetching;
+    if(f&&f.page===page&&!f.download){f.download=download;f.gotDownload(download);return;}
+    this.droppedDownloads++;
+    download.cancel().catch(()=>{}).finally(()=>download.delete().catch(()=>{}));
+  }
+  /** One fetch at a time across every task: Chrome's download folder then holds only that fetch's file. */
+  serialFetch(work){const run=this.fetchQueue.then(work,work);this.fetchQueue=run.catch(()=>{});return run;}
+  /** The copy of the shared profile the other tasks browse in while the person's window is open: made while no Chrome runs on the profile,
+   *  without locks and caches. When it can't be made, they wait for the person as before. */
+  async makeShadow(){
+    await this.dropShadow();
+    const dir=this.shadowPath;
+    try{
+      await rm(dir,{recursive:true,force:true});
+      await cp(this.profile,dir,{recursive:true,force:true,errorOnExist:false,verbatimSymlinks:true,filter:src=>src===this.profile||!NOT_COPIED.test(basename(src))});
+      await chmod(dir,0o700);this.shadow=dir;
+    }catch{await rm(dir,{recursive:true,force:true}).catch(()=>{});this.shadow=null;}
+  }
+  /** Closes the agents' Chrome on the copy, if it runs there, and removes the copy. What an agent's page did in it is not kept. */
+  async dropShadow(){
+    const dir=this.shadow;this.shadow=null;
+    if(this.contextProfile&&this.contextProfile!==this.profile)await this.closeAutomation();
+    if(dir)await rm(dir,{recursive:true,force:true}).catch(()=>{});
   }
   /** A page for `session`: the blank page Chrome opened with, or a new one. */
   async newPage(session){
-    const context=await this.ensureContext();
+    const context=await this.ensureContext(session);
     let page=this.spare.pop();while(page&&page.isClosed())page=this.spare.pop();
     if(!page){this.creating++;try{page=await context.newPage();}finally{this.creating--;}}
     session.owned.add(page);this.sweep();return page;
@@ -189,6 +279,8 @@ export class SharedBrowser {
         if(navigation&&[...this.sessions.values()].some(x=>x.scope))throw Error('This window belongs to no agent.');
         await route.continue();return;
       }
+      // A fetch opens its address and nothing else: a form its page would submit (a POST, or any other method) never leaves Chrome.
+      if(navigation&&s.fetching&&request.method()!=='GET'){s.fetching.posted=true;throw Error(POSTED);}
       const shared=s.scope;
       if(shared&&navigation&&!s.googleFlow&&url.origin!==shared&&!(s.sessionRefresh&&sessionRefreshDestination(shared,url.href)))throw Error('Outside shared website session.');
       // A pinned task's page heading to a Google page that does not name an account (a link it follows, a redirect) is sent to the same
@@ -230,7 +322,7 @@ export class SharedBrowser {
     const existing=this.manualOpen();
     const exact=step?await this.stepPage(step,account):null;
     if(existing&&destination!=='google'){if(exact)await this.forward(exact);return {opened:true,private:true};}
-    if(!existing&&[...this.sessions.values()].some(s=>s.id!==requester&&s.page&&!s.page.isClosed()))throw Error('Another agent is using Buddy’s browser right now. Try again when it has finished, or pause that task.');
+    if(!existing&&[...this.sessions.values()].some(s=>s.id!==requester&&!(requester&&s.id.startsWith(requester+':'))&&s.page&&!s.page.isClosed()))throw Error('Another agent is using Buddy’s browser right now. Try again when it has finished, or pause that task.');
     const owner=requester?this.sessions.get(requester):null;
     // An agent's step opens at its page (or, once that has closed, where it was told to); setup opens where the person last was.
     const own=owner?.page&&!owner.page.isClosed()?owner.page.url():owner?.lastURL;
@@ -243,13 +335,15 @@ export class SharedBrowser {
       if(!existing)this.lastURL=url;await this.closeAutomation();await mkdir(this.profile,{recursive:true,mode:0o700});await chmod(this.profile,0o700);
       // The person's window must never open inside a Chrome an agent connection still drives (it would join that Chrome).
       const holder=await this.profileLock();if(holder&&await this.automated(holder))throw Error('Buddy’s browser is still closing. Try again in a moment.');
+      // The other tasks browse in a copy of the profile while the window is open; only the task it is for waits for the person.
+      if(!existing){this.manualOwner=requester||null;await this.makeShadow();}
       // No debugging connection, automation flags, page scripts, screenshots, or password reads during the handoff. The page opens as the
       // only page Buddy asks for, in a new window; if Chrome restores the person's earlier tabs as it starts, it adds this page to the
       // window it restores last and brings that window to the front with this page showing. Its "Restore pages?" bubble is not shown.
       const child=spawn(this.manualExecutable,[`--user-data-dir=${this.profile}`,'--no-first-run','--no-default-browser-check','--disable-background-mode','--hide-crash-restore-bubble','--new-window',url],{stdio:'ignore'});
       await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('Could not open private Chrome. Install Google Chrome and try again.')));});
       await new Promise(resolve=>{const timer=setTimeout(resolve,350);child.once('exit',()=>{clearTimeout(timer);resolve();});});
-      if((child.exitCode!==null||child.signalCode!==null)&&!await this.profileLock())throw Error('Chrome did not open. Your saved browser data was kept; try opening Chrome again.');
+      if((child.exitCode!==null||child.signalCode!==null)&&!await this.profileLock()){if(!existing){await this.dropShadow();this.manualOwner=null;}throw Error('Chrome did not open. Your saved browser data was kept; try opening Chrome again.');}
       if(!existing)this.manualProcess=child;
     }finally{if(handing)this.handingOff=false;}
     return {opened:true,private:true};
@@ -262,7 +356,10 @@ export class SharedBrowser {
     await new Promise(resolve=>{const timer=setTimeout(resolve,5000);timer.unref();child.once('exit',()=>{clearTimeout(timer);resolve();});});
     child.unref();
   }
-  async finishManual(){const p=this.manualProcess;if(p&&p.exitCode===null&&p.signalCode===null){p.kill('SIGTERM');await Promise.race([new Promise(resolve=>p.once('exit',resolve)),new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error('Close Buddy’s private Chrome window before finishing sign-in.')),8000);t.unref();})]);}this.manualProcess=null;await this.closeManualProfile();return {closed:true,url:this.lastURL?.startsWith('https:')?new URL(this.lastURL).origin:null};}
+  async finishManual(){const p=this.manualProcess;if(p&&p.exitCode===null&&p.signalCode===null){p.kill('SIGTERM');await Promise.race([new Promise(resolve=>p.once('exit',resolve)),new Promise((_,reject)=>{const t=setTimeout(()=>reject(Error('Close Buddy’s private Chrome window before finishing sign-in.')),8000);t.unref();})]);}this.manualProcess=null;await this.closeManualProfile();
+    // Everyone is back on the one profile, with whatever the person signed in to there.
+    await this.dropShadow();this.manualOwner=null;
+    return {closed:true,url:this.lastURL?.startsWith('https:')?new URL(this.lastURL).origin:null};}
   /** Ends one task's use of the browser: its pages close, nobody else's. Chrome itself closes with the last session. */
   async closeSession(id){
     const s=this.sessions.get(id);
@@ -273,27 +370,27 @@ export class SharedBrowser {
   async closeAutomation(){
     for(const s of this.sessions.values()){s.reset();s.owned.clear();}this.spare=[];
     if(this.launching)await this.launching.catch(()=>{});
-    const c=this.context;this.context=null;
+    const c=this.context;this.context=null;this.contextProfile=null;
     if(c){const done=Promise.race([c.close().catch(()=>{}),pause(5000)]);this.closing=done;try{await done;}finally{if(this.closing===done)this.closing=null;}}
   }
-  async close(){await this.closeAutomation();await this.finishManual();const guard=this.netGuard;this.netGuard=null;await guard?.close();}
+  async close(){await this.closeAutomation();await this.finishManual();const guard=this.netGuard;this.netGuard=null;await guard?.close();const downloads=this.downloadsDir;this.downloadsDir=null;if(downloads)await rm(downloads,{recursive:true,force:true}).catch(()=>{});}
 }
 
 /** One task's page in the shared Chrome: what it observed, what it may act on, and its sign-in requests. */
 class BrowserSession {
-  constructor(browser,id,scope,account=''){this.browser=browser;this.id=id;this.scope=scope;this.account=account;this.pinned=new Map();this.page=null;this.owned=new Set();this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.secretPlanState=null;this.googleFlow=null;this.lastURL=null;this.intendedURL=null;this.blockedNavigation=null;this.sessionRefresh=false;this.sessionRefreshes=0;}
+  constructor(browser,id,scope,account=''){this.browser=browser;this.id=id;this.scope=scope;this.account=account;this.pinned=new Map();this.page=null;this.owned=new Set();this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.secretPlanState=null;this.googleFlow=null;this.lastURL=null;this.intendedURL=null;this.blockedNavigation=null;this.sessionRefresh=false;this.sessionRefreshes=0;this.fetching=null;}
   get sharedOrigin(){return this.scope;}
   /** The address a pinned task opens instead of `raw`: the same Google page with its account named (authuser), or null when it needs no
    *  change. `explicit` (an address the agent asked for) also replaces an account given by number (/u/1/), which may be any account; a page
    *  reached by a link or a redirect keeps it, and is checked before anything is done on it. A page Google keeps sending back without the
    *  account is left to that check too, so the two never go round in circles. */
-  pinURL(raw,explicit=false){
-    if(!this.account)return null;
+  pinURL(raw,explicit=false,account=this.account){
+    if(!account)return null;
     let u;try{u=new URL(raw);}catch{return null;}
     if(!this.browser.isGoogle(u)||this.browser.identityPage(u))return null;
     if(NUMBERED.test(u.pathname)){if(!explicit)return null;u.pathname=u.pathname.replace(NUMBERED,'')||'/';}
-    else if((u.searchParams.get('authuser')||'').trim().toLowerCase()===this.account)return null;
-    u.searchParams.set('authuser',this.account);
+    else if((u.searchParams.get('authuser')||'').trim().toLowerCase()===account)return null;
+    u.searchParams.set('authuser',account);
     if(!explicit){
       const key=u.href,now=Date.now(),last=this.pinned.get(key);
       for(const [k,v] of this.pinned)if(now-v.at>10000)this.pinned.delete(k);
@@ -315,13 +412,14 @@ class BrowserSession {
   }
   /** A pinned task acts on a Google page only when the page shows that it is signed in as the task's account. `strict`: an account Buddy
    *  cannot see is refused too (before an action); reading refuses only a page that shows another account. */
-  async assertAccount({strict=true,tail=''}={}){
+  async assertAccount({tail=''}={}){
     if(!this.account||!this.page)return;
     const url=this.page.url();if(!this.browser.isGoogle(url)||this.browser.identityPage(url))return;
+    // Only a page that clearly shows another account is refused. Many Google pages show none Buddy can read (YouTube, a help page, another
+    // language): those go ahead, still opened with the task's account in the address and through the chooser's own tile.
     const seen=await this.pageAccount();
-    if(seen.length===1&&seen[0]===this.account)return;
-    if(seen.length===1)throw Error(otherAccount(seen[0],this.account)+tail);
-    if(strict)throw Error(`Buddy couldn’t tell which Google account this page is signed in as, and this task must use ${this.account}. Buddy stopped instead of acting on it.`+tail);
+    if(!seen.length||seen.includes(this.account))return;
+    throw Error((seen.length===1?otherAccount(seen[0],this.account):`This page shows other accounts (${seen.join(', ')}), not ${this.account}, the account this task must use. Buddy stopped instead of acting on it.`)+tail);
   }
   /** On Google's account chooser, the pinned account's own tile is chosen. 'missing' when the chooser does not offer it (it is not signed
    *  in to this Chrome); null on any other page, and on a password, code, CAPTCHA or permission step, which stays the person's. */
@@ -347,7 +445,7 @@ class BrowserSession {
   otherSignIn(user){return this.account&&isEmail(user||'')&&user.trim().toLowerCase()!==this.account?user.trim():'';}
   reset(){this.page=null;this.refs=[];this.snapshot=null;this.prepared=null;this.authPlan=null;this.secretPlanState=null;}
   async ready() {
-    await this.browser.ensureContext();
+    await this.browser.ensureContext(this);
     if(this.page&&!this.page.isClosed())return;
     this.reset();
     const page=await this.browser.newPage(this);this.page=page;page.setDefaultTimeout(12000);
@@ -386,7 +484,7 @@ class BrowserSession {
     if(typeof dest!=='string'||!isAbsolute(dest)||!dest.endsWith('.part'))throw Error('Choose where Buddy saves the download.');
     const limit=Math.min(Number(maxBytes)||DOWNLOAD_LIMIT,DOWNLOAD_LIMIT),{resolver,testOrigins}=this.browser;
     let target=await publicURL(url,resolver,testOrigins);this.assertScope(target);target=this.pinURL(target,true)||target;
-    const context=await this.browser.ensureContext();
+    const context=await this.browser.ensureContext(this);
     for(let hop=0;hop<=5;hop++){
       const response=await context.request.get(target,{maxRedirects:0,timeout:60000,failOnStatusCode:false});
       try{
@@ -405,6 +503,175 @@ class BrowserSession {
       }finally{await response.dispose().catch(()=>{});}
     }
     throw Error('The website redirected too many times. Nothing was saved.');
+  }
+  /** buddy_browser_fetch: opens `raw` (GET only) in this task's own page of the shared Chrome, with the person's sign-ins and through the
+   *  network guard, and saves the file it gives into `dir` (an absolute folder Buddy chose) as `saveAs` (relative, visible, never over another
+   *  file: a number is added). The file is the page's own download, or the address itself when it is a file. Returns a receipt (path, bytes,
+   *  type, sha256, the address and where it led), never the page, cookies or headers. A CAPTCHA, a sign-in form or an access check comes
+   *  back as `challenge` for the person, and nothing is saved; an ordinary web page is not a file (unless saveAs ends in .html). `account`:
+   *  the account an unpinned task names for this file (a pinned task's own always wins). */
+  fetch(raw,options={}){return this.browser.serialFetch(()=>this.fetchFile(raw,options));}
+  async fetchFile(raw,{dir,saveAs,maxBytes=FETCH_LIMIT,account}={}){
+    if(typeof dir!=='string'||!isAbsolute(dir))throw Error('Choose the folder Buddy saves the file in.');
+    const parts=savedName(saveAs),limit=Math.min(Number(maxBytes)||FETCH_LIMIT,FETCH_LIMIT);
+    try{const st=await lstat(dir);if(!st.isDirectory())throw 0;}catch{throw Error('Choose the folder Buddy saves the file in: it is missing.');}
+    let asked;try{asked=new URL(String(raw||''));}catch{throw Error('Give the file’s public http or https address.');}
+    if(!['http:','https:'].includes(asked.protocol))throw Error('Buddy fetches only public http and https addresses.');
+    const named=pinnedAccount(account);
+    if(this.account&&named&&named!==this.account)throw Error(`This task must use ${this.account}, so Buddy won’t fetch as ${named}.`);
+    const pin=this.account||named,{resolver,testOrigins}=this.browser;
+    let target=await publicURL(asked.href,resolver,testOrigins);this.assertScope(target);target=this.pinURL(target,true,pin)||target;
+    await this.ready();
+    const page=this.page,downloads=this.browser.downloadsDir,before=new Set(await readdir(downloads).catch(()=>[]));
+    let gotDownload;const downloaded=new Promise(r=>{gotDownload=r;});
+    const fetching={page,download:null,posted:false,gotDownload};
+    this.fetching=fetching;this.snapshot=null;this.refs=[];this.prepared=null;this.blockedNavigation=null;this.intendedURL=target;
+    const deadline=Date.now()+this.browser.fetchDeadlineMs,started=Date.now(),site=new URL(target).host;
+    const receipt={url:receiptURL(asked.href)};
+    const save=download=>this.saveDownload(download,{dir,parts,limit,deadline,before,receipt});
+    try{
+      let response=null,failed=null;
+      try{response=await page.goto(target,{waitUntil:'domcontentloaded',timeout:Math.max(1000,Math.min(45000,deadline-Date.now()))});}catch(error){failed=error;}
+      if(fetching.posted)throw Error(POSTED);
+      // An address that is itself a download ends its navigation at once ("Download is starting"); the download follows.
+      if(!fetching.download&&failed)await Promise.race([downloaded,idle(1500)]);
+      if(fetching.download)return await save(fetching.download);
+      if(failed){
+        if(this.blockedNavigation)throw Error('Website navigation blocked: '+this.blockedNavigation);
+        if(this.browser.blockedAt>=started)throw Error('Website navigation blocked: Local and private network pages are unavailable in Buddy’s browser.');
+        throw Error(`Buddy couldn’t open ${site}: ${String(failed.message||failed).split('\n')[0].replace(/^page\.goto: /,'').slice(0,200)} Nothing was saved.`);
+      }
+      const status=response?.status()??0,headers=response?await response.allHeaders().catch(()=>({})):{},type=(headers['content-type']||'').split(';')[0].trim().toLowerCase();
+      // The address is a file Chrome shows itself (a PDF, a text or an image): its own body is the file.
+      if(response&&type&&!/^(text\/html|application\/xhtml\+xml)$/.test(type)){
+        if(status<200||status>=300)throw Error(`The website answered ${status} instead of the file. Nothing was saved.`);
+        if(Number(headers['content-length']||0)>limit)throw tooLarge(limit);
+        let body=await response.body().catch(()=>null);
+        // Chrome shows a PDF in its viewer, and the response is then the viewer's page: the page reads the same address once more, in
+        // Chrome itself (the same sign-ins and connection), and hands over its bytes.
+        if(!body||webPage(type,body))body=await this.readInPage(page.url(),limit);
+        if(!body)throw Error('Buddy couldn’t read the file the website sent. Nothing was saved.');
+        if(body.length>limit)throw tooLarge(limit);
+        if(!body.length)throw Error('The website sent an empty file. Nothing was saved.');
+        if(!webPage(type,body))return await this.saveBody(body,{dir,parts,type,final:page.url(),via:'page',receipt});
+      }
+      // A web page. A pinned task on Google's account chooser picks its own account (the file may follow).
+      if(this.account&&this.browser.identityPage(page.url())){
+        const chosen=await this.chooseAccount(page);
+        if(chosen==='missing')throw Error(missingAccount(this.account));
+        if(chosen==='chosen'){await Promise.race([downloaded,idle(this.browser.downloadWaitMs)]);if(fetching.download)return await save(fetching.download);}
+      }
+      const challenge=await this.challengeOf(status);
+      if(challenge)return this.challenged(challenge,status,receipt);
+      // The page's own download (a "your download starts in a moment" page), else an ordinary page.
+      await Promise.race([downloaded,idle(Math.max(0,Math.min(this.browser.downloadWaitMs,deadline-Date.now())))]);
+      if(fetching.posted)throw Error(POSTED);
+      if(fetching.download)return await save(fetching.download);
+      const later=await this.challengeOf(status);
+      if(later)return this.challenged(later,status,receipt);
+      if(/\.html?$/i.test(parts[parts.length-1])&&status>=200&&status<300&&response){
+        const body=await response.body().catch(()=>null);
+        if(body&&body.length&&body.length<=limit)return await this.saveBody(body,{dir,parts,type:'text/html',final:page.url(),via:'page',receipt});
+      }
+      if(status>=400)throw Error(`The website answered ${status} instead of the file. Nothing was saved.`);
+      throw Error(`${site} sent a web page, not a file, and it isn’t a CAPTCHA or a sign-in page. Nothing was saved. Give the file’s own address (such as the PDF link), or saveAs ending in .html to keep the page itself.`);
+    }finally{
+      this.fetching=null;
+      // A download that was still starting when the fetch ended is not kept.
+      if(fetching.download&&!fetching.saved)fetching.download.delete().catch(()=>{});
+    }
+  }
+  /** The bytes at `url`, read by the page itself (GET, with the page's own cookies), in pieces; null when the page can't. */
+  async readInPage(url,limit){
+    const page=this.page,key='__buddyFetch'+randomUUID().replace(/-/g,'');
+    try{
+      const got=await page.evaluate(async({url,limit,key})=>{
+        const r=await fetch(url,{credentials:'include',method:'GET',redirect:'follow'});
+        if(!r.ok)return {status:r.status};
+        const data=new Uint8Array(await r.arrayBuffer());
+        if(data.length>limit)return {tooLarge:true};
+        window[key]=data;return {bytes:data.length};
+      },{url,limit,key});
+      if(got?.tooLarge)throw tooLarge(limit);
+      if(!got||typeof got.bytes!=='number')return null;
+      const pieces=[],step=4*1024*1024;
+      for(let at=0;at<got.bytes;at+=step)pieces.push(Buffer.from(await page.evaluate(({key,at,step})=>{const part=window[key].subarray(at,at+step);let text='';for(let i=0;i<part.length;i+=32768)text+=String.fromCharCode.apply(null,part.subarray(i,i+32768));return btoa(text);},{key,at,step}),'base64'));
+      return Buffer.concat(pieces);
+    }catch(error){if(/larger than/.test(error.message))throw error;return null;}
+    finally{await page.evaluate(key=>{delete window[key];},key).catch(()=>{});}
+  }
+  challenged(challenge,status,receipt){
+    let final=this.page?.url()||'';try{final=new URL(final).href;}catch{final='';}
+    return {saved:false,challenge:{kind:challenge.kind,title:challenge.title,status,url:receipt.url,page:receiptURL(final),origin:final?new URL(final).origin:''}};
+  }
+  /** What stands between the person and the file on the page now: 'captcha', 'signin' or 'blocked', with the page's title; null for none. */
+  async challengeOf(status){
+    const info=await this.page.evaluate(()=>{
+      const visible=e=>!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length);
+      return {title:document.title||'',text:(document.body?.innerText||'').slice(0,5000),
+        sources:[...document.querySelectorAll('iframe[src],script[src]')].map(e=>e.getAttribute('src')||'').join(' '),
+        widget:!!document.querySelector('.g-recaptcha,.h-captcha,.cf-turnstile,[data-sitekey],#challenge-form,#challenge-stage,#cf-challenge-running,#px-captcha,[id*="captcha" i],[class*="captcha" i]'),
+        password:[...document.querySelectorAll('input[type=password]')].some(visible),
+        login:/(^|\/)(login|log-in|signin|sign-in|sso|saml|shibboleth|idp|wayf|cas|auth|authenticate|oauth)(\/|$)/i.test(location.pathname)&&!!document.querySelector('input[type=email],input[autocomplete=username],input[name*="user" i],input[name*="email" i]')};
+    }).catch(()=>null);
+    if(!info)return null;
+    const words=info.title+'\n'+info.text;
+    const kind=CAPTCHA_SOURCES.test(info.sources)||info.widget||CAPTCHA_WORDS.test(words)?'captcha'
+      :info.password||info.login||status===401||SIGNIN_TITLE.test(info.title)?'signin'
+      :[401,403,407,429,451,503].includes(status)||BLOCKED_WORDS.test(words)?'blocked':null;
+    return kind?{kind,title:info.title.replace(/\s+/g,' ').trim().slice(0,200)}:null;
+  }
+  /** Writes a new file into `dir` at `parts` (a number added when the name is taken: never over another file), with quarantine and no
+   *  execute permission. `write` fills the hidden temporary file it is given. Returns the saved path, relative to `dir`. */
+  async place(dir,parts,write){
+    let folder=dir;
+    for(const name of parts.slice(0,-1)){
+      folder=join(folder,name);
+      try{const st=await lstat(folder);if(!st.isDirectory()||st.isSymbolicLink())throw Error('A folder on that path is a link or a file. Nothing was saved.');}
+      catch(error){if(error.code!=='ENOENT')throw error;await mkdir(folder,{mode:0o755});}
+    }
+    const temp=join(folder,`.buddy-fetch-${randomUUID()}.part`);
+    try{
+      await write(temp);await chmod(temp,0o644);await quarantine(temp);
+      const name=parts[parts.length-1],ext=extname(name),stem=ext&&ext!==name?name.slice(0,-ext.length):name,suffix=ext&&ext!==name?ext:'';
+      for(let n=1;n<=100;n++){
+        const candidate=n===1?name:`${stem} (${n})${suffix}`;
+        try{await link(temp,join(folder,candidate));return parts.slice(0,-1).concat(candidate).join('/');}
+        catch(error){if(error.code!=='EEXIST')throw error;}
+      }
+      throw Error('That folder already has 100 files with this name. Nothing was saved.');
+    }finally{await unlink(temp).catch(()=>{});}
+  }
+  async saveBody(body,{dir,parts,type,final,via,receipt}){
+    const path=await this.place(dir,parts,temp=>writeFile(temp,body,{flag:'wx',mode:0o600}));
+    return {saved:true,path,bytes:body.length,sha256:createHash('sha256').update(body).digest('hex'),contentType:type||typeOf(body,parts[parts.length-1]),...receipt,finalURL:receiptURL(final),via};
+  }
+  /** A fetch's own download: watched while Chrome writes it, stopped as soon as it passes the limit, then copied into place. */
+  async saveDownload(download,{dir,parts,limit,deadline,before,receipt}){
+    const downloads=this.browser.downloadsDir;let over=false;
+    const watch=setInterval(async()=>{
+      for(const name of await readdir(downloads).catch(()=>[])){
+        if(before.has(name))continue;
+        const size=(await stat(join(downloads,name)).catch(()=>null))?.size||0;
+        if(size>limit&&!over){over=true;download.cancel().catch(()=>{});}
+      }
+    },100);
+    try{
+      let file;
+      try{file=await Promise.race([download.path(),idle(Math.max(1000,deadline-Date.now())).then(()=>{throw Error('timeout');})]);}
+      catch(error){download.cancel().catch(()=>{});if(over)throw tooLarge(limit);throw Error(error.message==='timeout'?'The download took too long, so Buddy stopped it. Nothing was saved.':'The download didn’t finish. Nothing was saved.');}
+      if(over)throw tooLarge(limit);
+      const failure=await download.failure().catch(()=>null);if(failure)throw Error(`The download didn’t finish (${failure}). Nothing was saved.`);
+      const size=(await stat(file)).size;
+      if(size>limit)throw tooLarge(limit);
+      if(!size)throw Error('The website sent an empty file. Nothing was saved.');
+      const start=await head(file);
+      if(webPage('',start)&&!/\.html?$/i.test(parts[parts.length-1]))throw Error('The website sent a web page instead of the file, most likely a sign-in page or a CAPTCHA. Nothing was saved.');
+      let sha256='';
+      const path=await this.place(dir,parts,async temp=>{await copyFile(file,temp,fsConstants.COPYFILE_EXCL);sha256=await sha256File(temp);});
+      if(this.fetching)this.fetching.saved=true;
+      return {saved:true,path,bytes:size,sha256,contentType:typeOf(start,download.suggestedFilename()||parts[parts.length-1]),...receipt,finalURL:receiptURL(download.url()),via:'download'};
+    }finally{clearInterval(watch);await download.delete().catch(()=>{});}
   }
   assertScope(url=this.page.url()){if(this.scope&&new URL(url).origin!==this.scope)throw Error('This shared session is available only for '+this.scope+'.');}
   // A page that never yields (a script that spins) must not block the bridge for good: after the deadline this agent's page is closed and
@@ -433,7 +700,7 @@ class BrowserSession {
     this.lastURL=this.page.url();const privacy=await this.privacy();
     if(privacy.private){this.snapshot=null;return {url:new URL(this.page.url()).origin,title:'Private sign-in',text:'Sign-in and verification contents are private. Use buddy_browser_signin; never request passwords in chat.',controls:[],authentication:{kind:privacy.kind,private:true}};}
     // A Google page signed in as another account shows the agent nothing of that account.
-    try{await this.assertAccount({strict:false});}catch(error){this.snapshot=null;throw error;}
+    try{await this.assertAccount();}catch(error){this.snapshot=null;throw error;}
     const elements=await this.page.$$('a[href],button,input:not([type=hidden]),textarea,select,[role=button]');const controls=[];
     for(const e of elements.slice(0,250)) {
       if(!await e.isVisible())continue;
@@ -638,7 +905,8 @@ class BrowserSession {
     await this.ready();this.assertScope();this.secretPlanState=null;
     const url=new URL(await publicURL(this.page.url(),resolver,testOrigins));
     if(url.protocol!=='https:'&&!this.browser.isTestOrigin(url.origin))throw Error('Typing a password needs a secure (HTTPS) sign-in page. Do this step yourself in Buddy’s Chrome window.');
-    if(identityProvider(url.hostname))throw Error('This identity provider’s sign-in needs you in Buddy’s Chrome window.');
+    // Google, Microsoft and Apple take a typed password or code like any site. Google may still refuse a browser an agent drives.
+    if(await this.refusedSignIn())throw Error(GOOGLE_REFUSED);
     const privacy=await this.privacy();
     if(privacy.kind==='security')throw Error('Account recovery and security changes need you in Buddy’s Chrome window.');
     const candidates=[];
@@ -649,7 +917,16 @@ class BrowserSession {
       if(info.auto==='one-time-code'||/verification.?code|one.?time|\botp\b|security.?code|auth.?code|2fa|two.?factor/i.test(info.label))candidates.push({e,kind:'code'});
     }
     if(candidates.some(c=>c.kind==='new')||candidates.filter(c=>c.kind==='password').length>1)throw Error('This page asks for a new password (a new account or a password change). Do that yourself in Buddy’s Chrome window.');
-    const codes=candidates.filter(c=>c.kind==='code'),pick=candidates.find(c=>c.kind==='password')||(codes.length===1?codes[0]:null);
+    const codes=candidates.filter(c=>c.kind==='code');let pick=candidates.find(c=>c.kind==='password')||(codes.length===1?codes[0]:null);
+    // An email-first sign-in (Google, Microsoft, Apple and many others) asks which account first: the person types it in the chat too.
+    if(!pick){
+      const users=[];
+      for(const e of await this.page.$$('input')){
+        const ok=await e.evaluate(e=>{const shown=!!(e.offsetWidth||e.offsetHeight||e.getClientRects().length)&&getComputedStyle(e).visibility!=='hidden';return shown&&!e.disabled&&!e.readOnly&&!['hidden','password','checkbox','radio','submit','button','file'].includes(e.type)&&(e.type==='email'||/username|email/i.test(e.autocomplete)||/identifier|e-?mail|username|login/i.test([e.name,e.id].join(' ')));}).catch(()=>false);
+        if(ok)users.push(e);
+      }
+      if(users.length===1)pick={e:users[0],kind:'username'};
+    }
     if(!pick)return {field:null,origin:url.origin,waiting:privacy.private};
     // A code that confirms a payment or a bank transfer is the person's to enter where they can see what it confirms.
     if(pick.kind==='code'&&await this.page.evaluate(()=>/payment|card ?number|credit card|debit|3-?d ?secure|verified by visa|securecode|bank|transfer|transaction|purchase|amount due|checkout/i.test(document.title+' '+(document.body?.innerText||'').slice(0,4000))).catch(()=>true))throw Error('A payment or bank verification needs you in Buddy’s Chrome window.');
@@ -666,6 +943,7 @@ class BrowserSession {
     if(other)throw Error(`This sign-in is for ${other}, but this task must use ${this.account}. Nothing was typed. Choose ${this.account} in Buddy’s Chrome window, then press Done.`);
     const token=randomUUID();
     this.secretPlanState={token,origin:url.origin,field:pick.e,kind:pick.kind,button,signature:await this.formSignature(),created:Date.now()};
+    if(pick.kind==='username')return this.browser.scrub({token,origin:url.origin,field:'username',account:null,private:true});
     return this.browser.scrub({token,origin:url.origin,field:pick.kind,account:account||null,private:true});
   }
   /** Types what the person sent into the field the token was made for, and submits it, once. It is remembered only to keep it out of
@@ -678,7 +956,11 @@ class BrowserSession {
     if(Date.now()-plan.created>this.browser.secretTTLms)throw Error('This sign-in request expired. Nothing was typed.');
     if(!await plan.field.isVisible().catch(()=>false)||!await plan.field.isEnabled().catch(()=>false))throw Error('The sign-in page changed. Nothing was typed.');
     if(this.otherSignIn(await this.username()))throw Error('The sign-in page now names another account. Nothing was typed.');
-    this.browser.remember(value,plan.origin);this.snapshot=null;
+    // The account typed for an email-first sign-in: a pinned task's own, never another. It is not a secret (it is in every Google address
+    // of a pinned task), so it is not kept out of what agents see.
+    if(plan.kind==='username'){if(this.account&&value.trim().toLowerCase()!==this.account)throw Error(`This task must use ${this.account}. Type that account, or choose it in Buddy’s Chrome window. Nothing was typed.`);}
+    else this.browser.remember(value,plan.origin);
+    this.snapshot=null;
     try{
       await plan.field.fill(value);
       await afterSubmit(this.page,()=>plan.button?plan.button.click({timeout:12000}):plan.field.press('Enter'));
@@ -687,6 +969,8 @@ class BrowserSession {
   }
   // Signed in when the page no longer asks for anything private. Otherwise: what can be typed next (a fresh token), or nothing to type.
   async outcome(){
+    // Google refused the sign-in because an agent drives this browser: the person finishes it in Buddy's Chrome window.
+    if(await this.refusedSignIn())return {signedIn:false,next:null,waiting:false,kind:'signin',needsChrome:true,reason:GOOGLE_REFUSED};
     // A page that is still loading has no document to look at yet: look again in a moment.
     let privacy;for(let i=0;;i++){try{privacy=await this.privacy();break;}catch(error){if(i>=4||!this.page||this.page.isClosed())throw error;await pause(300);}}
     if(!privacy.private){this.snapshot=null;return {signedIn:true,performed:true,page:await this.readPage()};}
@@ -694,6 +978,12 @@ class BrowserSession {
     try{next=await this.planSecret();}catch(error){reason=String(error.message||error);}
     if(next?.token)return {signedIn:false,next:{token:next.token,field:next.field,origin:next.origin,account:next.account},kind:privacy.kind};
     return {signedIn:false,next:null,waiting:true,kind:privacy.kind,...(reason?{needsChrome:true,reason}:{})};
+  }
+  /** Whether this page is an identity provider's own "this browser or app may not be secure" refusal. */
+  async refusedSignIn(){
+    let u;try{u=new URL(this.page.url());}catch{return false;}
+    if(!identityProvider(u.hostname)&&!this.browser.isGoogle(u)&&!this.browser.identityPage(u))return false;
+    return await this.page.evaluate(()=>/this browser or app may not be secure|try using a different browser|couldn[’']t sign you in/i.test(document.title+' '+(document.body?.innerText||'').slice(0,3000))).catch(()=>false);
   }
   /** Done: look again. `reload` opens the page the agent wanted once more (after the person used Chrome's own window): the step's own page
    *  (`url`) when it named one, else the page this session was on. */
@@ -732,7 +1022,7 @@ export class PrivateBrowser extends SharedBrowser {
 if(process.argv[1]&&import.meta.url===pathToFileURL(realpathSync(process.argv[1])).href){
   const browser=new SharedBrowser(process.argv[2]);
   const lanes=new Map();
-  const pageCommands={download:(s,r)=>s.download(r.url,r.to,{expect:typeof r.expect==='string'?r.expect:'',maxBytes:r.maxBytes}),open:(s,r)=>s.navigate(r.url),read:s=>s.read(),prepare:(s,r)=>s.prepare(r.arguments),commit:(s,r)=>s.commit(r.token,r.upload),prepareSignIn:(s,r)=>s.prepareSignIn(r.mode),useSaved:(s,r)=>s.useSaved(r.token),verificationPlan:s=>s.verificationPlan(),verifyEmail:(s,r)=>s.verifyEmail(r.token,r.code),secretPlan:s=>s.secretPlan(),fillSecret:(s,r)=>s.fillSecret(r.token,r.value),recheck:(s,r)=>s.recheck({reload:r.reload===true,url:typeof r.url==='string'?r.url:''})};
+  const pageCommands={download:(s,r)=>s.download(r.url,r.to,{expect:typeof r.expect==='string'?r.expect:'',maxBytes:r.maxBytes}),fetch:(s,r)=>s.fetch(r.url,{dir:r.dir,saveAs:r.saveAs,maxBytes:r.maxBytes,account:typeof r.fetchAccount==='string'?r.fetchAccount:''}),open:(s,r)=>s.navigate(r.url),read:s=>s.read(),prepare:(s,r)=>s.prepare(r.arguments),commit:(s,r)=>s.commit(r.token,r.upload),prepareSignIn:(s,r)=>s.prepareSignIn(r.mode),useSaved:(s,r)=>s.useSaved(r.token),verificationPlan:s=>s.verificationPlan(),verifyEmail:(s,r)=>s.verifyEmail(r.token,r.code),secretPlan:s=>s.secretPlan(),fillSecret:(s,r)=>s.fillSecret(r.token,r.value),recheck:(s,r)=>s.recheck({reload:r.reload===true,url:typeof r.url==='string'?r.url:''})};
   async function answer(request){
     if(Object.hasOwn(pageCommands,request.command))return pageCommands[request.command](browser.session(request.session,request.scope??'',request.account??''),request);
     if(request.command==='manual')return browser.manual(undefined,{session:typeof request.session==='string'?request.session:undefined,url:typeof request.url==='string'?request.url:undefined,page:typeof request.page==='string'&&request.page?request.page:undefined,account:typeof request.account==='string'?request.account:undefined});

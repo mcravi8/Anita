@@ -431,6 +431,65 @@ struct BuddyFileReceipt: Codable {
         do { try persist(entries, workspace: scope.workspace) } catch { result["warning"] = "The file was saved, but its version receipt needs recovery. The previous contents are backed up." }
         return result
     }
+    /// A file Buddy's Chrome fetched (buddy_browser_fetch), placed as a NEW file at `path`, or when that name is taken at "name (2).ext" and
+    /// so on: never over another file. It is copied from `file` in pieces (up to `maximumBytes`, more than other files may be), checked
+    /// against `sha256` before it appears, quarantined as a browser download is (macOS asks before anything in it is opened), never
+    /// executable, and recorded with a file receipt like any file Buddy writes. Returns where it went, its size and fingerprint.
+    func placeDownload(_ scope: BuddyFileScope, path: String, from file: URL, maximumBytes: Int, sha256 expected: String, actor: String, actorName: String) throws -> [String: Any] {
+        let lockURL = support.appendingPathComponent("project-write.lock")
+        try fm.createDirectory(at: support, withIntermediateDirectories: true)
+        let lock = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard lock >= 0 else { throw failure("write_failed", "Couldn’t lock the shared file history.") }
+        defer { Darwin.close(lock) }
+        guard flock(lock, LOCK_EX) == 0 else { throw failure("write_failed", "Couldn’t lock the shared file history.") }
+        defer { flock(lock, LOCK_UN) }
+        let (fd, name) = try parent(scope, path, create: true); defer { Darwin.close(fd) }
+        let input = Darwin.open(file.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard input >= 0 else { throw failure("write_failed", "The fetched file is missing. Nothing was saved.") }
+        defer { Darwin.close(input) }
+        var meta = stat()
+        guard fstat(input, &meta) == 0, (meta.st_mode & S_IFMT) == S_IFREG else { throw failure("write_failed", "The fetched file isn’t a regular file. Nothing was saved.") }
+        guard meta.st_size <= Int64(maximumBytes) else { throw failure("file_too_large", "The file is larger than \(maximumBytes / 1_048_576) MB. Nothing was saved.") }
+        let temporary = ".buddy-fetch-" + UUID().uuidString + ".part"
+        let output = openat(fd, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
+        guard output >= 0 else { throw failure("write_failed", "Couldn’t save the file in that folder. Nothing was saved.") }
+        defer { Darwin.close(output); unlinkat(fd, temporary, 0) }
+        var hasher = SHA256(), total = 0, buffer = [UInt8](repeating: 0, count: 1 << 20)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(input, $0.baseAddress, $0.count) }
+            if count == 0 { break }
+            if count < 0 { if errno == EINTR { continue }; throw failure("read_failed", "Couldn’t read the fetched file. Nothing was saved.") }
+            total += count
+            guard total <= maximumBytes else { throw failure("file_too_large", "The file is larger than \(maximumBytes / 1_048_576) MB. Nothing was saved.") }
+            buffer.withUnsafeBytes { hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: $0.prefix(count))) }
+            var offset = 0
+            while offset < count {
+                let written = buffer.withUnsafeBytes { Darwin.write(output, $0.baseAddress!.advanced(by: offset), count - offset) }
+                if written < 0 && errno == EINTR { continue }
+                guard written > 0 else { throw failure("write_failed", "Couldn’t save the complete file. Nothing was saved.") }
+                offset += written
+            }
+        }
+        let hash = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        guard total > 0, hash == expected else { throw failure("write_failed", "The fetched file changed on its way into the folder. Nothing was saved.") }
+        let mark = String(format: "0081;%08x;Buddy;", Int(Date().timeIntervalSince1970)) + UUID().uuidString
+        _ = mark.withCString { fsetxattr(output, "com.apple.quarantine", $0, strlen($0), 0, 0) }
+        guard fchmod(output, 0o644) == 0, fsync(output) == 0 else { throw failure("write_failed", "Couldn’t finish saving the file. Nothing was saved.") }
+        let ext = (name as NSString).pathExtension, stem = ext.isEmpty ? name : (name as NSString).deletingPathExtension
+        var chosen: String?
+        for n in 1...100 {
+            let candidate = n == 1 ? name : "\(stem) (\(n))" + (ext.isEmpty ? "" : "." + ext)
+            if renameatx_np(fd, temporary, fd, candidate, UInt32(RENAME_EXCL)) == 0 { chosen = candidate; break }
+            guard errno == EEXIST else { throw failure("write_failed", "Couldn’t save the file in that folder. Nothing was saved.") }
+        }
+        guard let chosen else { throw failure("file_exists", "That folder already has 100 files with this name. Nothing was saved.") }
+        _ = fsync(fd)
+        let folder = (path as NSString).deletingLastPathComponent, saved = folder.isEmpty ? chosen : folder + "/" + chosen
+        let record = BuddyFileReceipt(id: UUID().uuidString, folderId: scope.folderId, path: saved, actor: actor, actorName: actorName, date: ISO8601DateFormatter().string(from: Date()), previousHash: "", hash: hash, kind: "downloaded", status: "committed")
+        var result: [String: Any] = ["path": saved, "bytes": total, "sha256": hash, "version": hash, "folderId": scope.folderId]
+        do { var entries = try receipts(scope.workspace); entries.append(record); try persist(entries, workspace: scope.workspace) } catch { result["warning"] = "The file was saved, but its receipt couldn’t be recorded." }
+        return result
+    }
     func versions(_ scope: BuddyFileScope, path: String) throws -> [[String: Any]] {
         _ = try location(scope)
         _ = try components(path)

@@ -96,6 +96,86 @@ struct BuddyCredentials: BuddySignInStore {
     }
 }
 
+/// A website password the person chose to remember when they typed it in a chat ("Remember for shop.example (ada@example.com)"): which
+/// site and which account, never the password.
+struct BuddyWebsiteSignIn: Equatable { let origin: String, username: String }
+
+/// Where remembered website passwords live: the Keychain (`BuddyCredentials`), or a test's own store. Buddy reads one only to type it into
+/// that very site's sign-in page for that very account (the browser's one-use, site-bound field), the way a typed password goes there.
+protocol BuddyWebsiteSignInStore {
+    func sitePassword(workspace: String, origin: String, username: String) -> String?
+    func saveSite(workspace: String, origin: String, username: String, password: String) throws
+    func removeSite(workspace: String, origin: String, username: String) throws
+    func sites(workspace: String) -> [BuddyWebsiteSignIn]
+}
+
+/// Remembered website passwords in the Keychain: one generic password each, service "app.buddy.signin", account
+/// "<workspace>:site:<origin>|<username>", data the password alone. The site and account are in the item's name, so listing them never
+/// reads a password (and never makes macOS ask to use one).
+extension BuddyCredentials: BuddyWebsiteSignInStore {
+    static func siteKey(_ workspace: String, _ origin: String, _ username: String) -> String { workspace + ":site:" + origin + "|" + username }
+    private func siteQuery(_ workspace: String, _ origin: String, _ username: String) -> [CFString: Any] {
+        [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: Self.siteKey(workspace, origin, username)]
+    }
+    func sitePassword(workspace: String, origin: String, username: String) -> String? {
+        var request = siteQuery(workspace, origin, username); request[kSecReturnData] = true; request[kSecMatchLimit] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(request as CFDictionary, &result) == errSecSuccess, let data = result as? Data, let password = String(data: data, encoding: .utf8), !password.isEmpty else { return nil }
+        return password
+    }
+    func saveSite(workspace: String, origin: String, username: String, password: String) throws {
+        guard BuddyWebsiteSignIns.origin(origin) == origin, username.count <= 254, !username.contains("\0"), !username.contains("|"), !password.isEmpty, password.count <= 1000, !password.contains("\0") else {
+            throw BuddyWorkerFailure(message: "Buddy can remember a password only for a website's sign-in page.")
+        }
+        let match = siteQuery(workspace, origin, username), data = Data(password.utf8)
+        let code = SecItemUpdate(match as CFDictionary, [kSecValueData: data] as CFDictionary)
+        if code == errSecItemNotFound {
+            var add = match; add[kSecValueData] = data; add[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            add[kSecAttrLabel] = "Buddy: \(URL(string: origin)?.host ?? origin) sign-in" + (username.isEmpty ? "" : " (\(username))")
+            guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else { throw BuddyWorkerFailure(message: "Couldn’t save this sign-in in Keychain.") }
+        } else if code != errSecSuccess { throw BuddyWorkerFailure(message: "Couldn’t update this sign-in in Keychain.") }
+    }
+    func removeSite(workspace: String, origin: String, username: String) throws {
+        let code = SecItemDelete(siteQuery(workspace, origin, username) as CFDictionary)
+        guard [errSecSuccess, errSecItemNotFound].contains(code) else { throw BuddyWorkerFailure(message: "Couldn’t remove this sign-in from Keychain.") }
+    }
+    func sites(workspace: String) -> [BuddyWebsiteSignIn] {
+        let request: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecReturnAttributes: true, kSecMatchLimit: kSecMatchLimitAll]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(request as CFDictionary, &result) == errSecSuccess, let items = result as? [[String: Any]] else { return [] }
+        let prefix = workspace + ":site:"
+        return items.compactMap { item -> BuddyWebsiteSignIn? in
+            guard let account = item[kSecAttrAccount as String] as? String, account.hasPrefix(prefix) else { return nil }
+            let rest = account.dropFirst(prefix.count)
+            guard let bar = rest.firstIndex(of: "|") else { return nil }
+            return BuddyWebsiteSignIn(origin: String(rest[..<bar]), username: String(rest[rest.index(after: bar)...]))
+        }.sorted { ($0.origin, $0.username) < ($1.origin, $1.username) }
+    }
+}
+
+/// The remembered website sign-ins as Buddy's own sign-in box offers them: listed (site and account), replaced, removed.
+enum BuddyWebsiteSignIns {
+    /// A website's origin as remembered (scheme, host and port, nothing else), or nil.
+    static func origin(_ raw: String?) -> String? {
+        guard let raw, let parts = URLComponents(string: raw), let scheme = parts.scheme?.lowercased(), ["https", "http"].contains(scheme), let host = parts.host?.lowercased(), !host.isEmpty,
+              parts.user == nil, parts.password == nil else { return nil }
+        return scheme + "://" + host + (parts.port.map { ":\($0)" } ?? "")
+    }
+    static func handle(_ action: String, _ payload: [String: Any], workspace: String, store: BuddyWebsiteSignInStore) throws -> [String: Any] {
+        let all = store.sites(workspace: workspace)
+        if action == "sites" { return ["sites": all.map { ["origin": $0.origin, "username": $0.username, "site": URL(string: $0.origin)?.host ?? $0.origin] as [String: Any] }] }
+        guard let origin = origin(payload["origin"] as? String), let username = payload["username"] as? String, all.contains(BuddyWebsiteSignIn(origin: origin, username: username)) else {
+            throw BuddyWorkerFailure(message: "Buddy doesn’t remember a password for that sign-in.")
+        }
+        if action == "removeSite" { try store.removeSite(workspace: workspace, origin: origin, username: username); return ["removed": true, "origin": origin, "username": username] }
+        guard let password = payload["password"] as? String, !password.isEmpty, password.count <= 1000, password.rangeOfCharacter(from: .newlines) == nil, !password.contains("\0") else {
+            throw BuddyWorkerFailure(message: "Type the new password on one line, up to 1,000 characters.")
+        }
+        try store.saveSite(workspace: workspace, origin: origin, username: username, password: password)
+        return ["saved": true, "origin": origin, "username": username]
+    }
+}
+
 /// What the person can type in a chat for a waiting sign-in: the browser's one-use token for one task's page and field, its site and
 /// account. Only the worker holds it, in memory; the page and the model never see the token, and it ends after `lifetime`.
 struct BuddyTypedSignIn {
@@ -124,10 +204,16 @@ struct BuddyTypedSignIn {
     static func handle(_ payload: [String: Any], workspace: String, support: URL, store: BuddySignInStore = BuddyCredentials()) async throws -> [String: Any] {
         let action = payload["action"] as? String ?? "status"
         if action == "status" { return ["profiles": BuddyCredentials.profiles.map { ["id": $0.id, "name": $0.name, "saved": store.has(workspace: workspace, profile: $0.id)] as [String: Any] }] }
+        // Remembered website sign-ins (Background work → Browser sign-in): listed, replaced, removed here, in the app, never by the worker.
+        if ["sites", "replaceSite", "removeSite"].contains(action) {
+            guard let sites = store as? BuddyWebsiteSignInStore else { throw BuddyWorkerFailure(message: "Remembered sign-ins are unavailable.") }
+            return try BuddyWebsiteSignIns.handle(action, payload, workspace: workspace, store: sites)
+        }
         if ["secret", "check", "done"].contains(action) {
             var arguments: [String: Any] = ["action": action, "taskId": payload["taskId"] as? String ?? ""]
             if let review = payload["reviewId"] as? String { arguments["reviewId"] = review }
-            if action == "secret" { arguments["value"] = payload["value"] as? String ?? "" }
+            // "Remember for <site> (<account>)": kept in the Keychain once the site took it, and filled by Buddy next time.
+            if action == "secret" { arguments["value"] = payload["value"] as? String ?? ""; arguments["remember"] = payload["remember"] as? Bool == true }
             // Typing into a page, and Done (which may close Chrome and look at the page again), take longer than other requests.
             return try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "signin", "arguments": arguments], timeout: 90)
         }

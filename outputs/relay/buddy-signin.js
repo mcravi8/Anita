@@ -8,7 +8,7 @@
   // What the person types goes from the field to the app's sign-in bridge and nowhere else: never into a message, the saved workspace,
   // drafts, browser storage or a log. The field is cleared as soon as it is sent. Messages keep only what was asked and what came of it.
   const KINDS=new Set(['signin','step','credential','mfa']);
-  const KEPT=['key','kind','taskId','agentId','reviewId','mode','origin','account','field','step','note','attempts','choices','profile','service','instruction','need','chromeOpen','legacy','title','url','target','coding','unknownPage'];
+  const KEPT=['key','kind','taskId','agentId','reviewId','mode','origin','account','field','step','note','attempts','choices','profile','service','instruction','need','chromeOpen','legacy','title','url','target','coding','unknownPage','fetch'];
   const host=origin=>{try{return new URL(origin).host||String(origin);}catch{return String(origin||'')||'this website';}};
   // A step on a web page is on its exact page (`url`), else on its site; one with neither is a step Buddy doesn't know the page of.
   const stepPage=r=>r.unknownPage?'':r.url||r.origin||'';
@@ -106,6 +106,8 @@
   // A typed value lives only in its field. The chat redraws often (a reply streams, a status arrives), and a redraw would empty the
   // field mid-typing, so the field being typed in is moved into the redrawn message instead. It is let go the moment it is sent.
   const typing=new Map();let lastField=null;
+  // "Remember for <site> (<account>)" on a password field, on unless the person turned it off for that request.
+  const remember=new Map();
   const fieldKey=(key,name)=>`${key}|${name}`;
   function field(r,name,label,type){
     return `<label class="signin-field"><span>${esc(label)}</span><input type="${type}" data-signin-input="${esc(fieldKey(r.key,name))}" data-signin-name="${esc(name)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="${name==='username'?200:1000}" aria-label="${esc(label)}"></label>`;
@@ -122,9 +124,10 @@
     if(r.note&&r.note!==m.result)html+=`<p class="signin-note">${esc(r.note)}</p>`;
     if(r.kind==='signin'){
       if(r.field){
-        const label=r.field==='code'?`Code for ${site}`:`Password for ${site}`;
-        html+=`<div class="signin-holder" data-signin-holder="${esc(r.key)}" data-signin-task="${esc(r.taskId)}">${field(r,r.field,label,'password')}${button('data-signin-send',r.key,busy.has(r.key)?'Sending…':'Send',true,off)}</div>`;
-        html+=`<small class="signin-assurance">Buddy types this into ${esc(site)}’s sign-in page and nowhere else. ${esc(who)} never sees it, and it isn’t saved in this chat.</small>`;
+        const label=r.field==='code'?`Code for ${site}`:r.field==='username'?`Email or username for ${site}`:`Password for ${site}`;
+        html+=`<div class="signin-holder" data-signin-holder="${esc(r.key)}" data-signin-task="${esc(r.taskId)}">${field(r,r.field,label,r.field==='username'?'email':'password')}${button('data-signin-send',r.key,busy.has(r.key)?'Sending…':'Send',true,off)}</div>`;
+        if(r.field==='password')html+=`<label class="signin-remember"><input type="checkbox" data-signin-remember="${esc(r.key)}" ${remember.get(r.key)!==false?'checked':''} ${off?'disabled':''}><span>Remember for ${esc(site)}${r.account?` (${esc(r.account)})`:''}</span></label>`;
+        html+=`<small class="signin-assurance">Buddy types this into ${esc(site)}’s sign-in page and nowhere else. ${esc(who)} never sees it, and it isn’t saved in this chat.${r.field==='password'?' Remembered, it stays in your Mac’s Keychain and Buddy fills it in next time.':''}</small>`;
       }else if(r.step==='wait')html+=`<p class="signin-note">${esc(r.note||`${site} is waiting for a step you do elsewhere. Do it, then press Done.`)}</p>`;
       else if(!r.note)html+=`<p class="signin-note">${esc(r.mode==='signup'?`${who} wants to create an account on ${site}. Create it in Buddy’s Chrome window, where Chrome can save the new password.`:`${who} needs you to sign in to ${site}.`)}</p>`;
       const choices=r.choices||[];
@@ -141,6 +144,8 @@
       if(!page)html+=`<p class="signin-note">${esc(who)} didn’t say which page this is on. Reply in this chat to ask ${esc(who)} which page it needs.</p>`;
       html+=`<div class="signin-actions" data-signin-task="${esc(r.taskId)}">${button('data-signin-done',r.key,busy.has(r.key)?'Checking…':'Done',true,off)}${page?button('data-signin-chrome',r.key,'Open the page',false,off):button('data-signin-reply',r.key,'Reply in chat',false,false)}</div>`;
       if(r.need==='file')html+=`<small class="signin-assurance">Name it ${esc(fileName(r.target))}. Save it from the page into that folder, then press Done: ${esc(who)} checks it’s there before using it.</small>`;
+      // A file Buddy's Chrome is fetching: the person only finishes the page; Done fetches it again and saves it.
+      else if(r.fetch)html+=`<small class="signin-assurance">When you press Done, Buddy’s Chrome fetches it again and saves ${esc(fileName(r.target))} into ${esc(folderOf(r.target))}. Nothing to download yourself; ${esc(who)} continues from there.</small>`;
       else if(r.coding)html+=`<small class="signin-assurance">${esc(who)}’s commands can’t use what you sign in to in Chrome. Press Done and ${esc(who)} will ask you for the file instead.</small>`;
       else html+=`<small class="signin-assurance">Done tells Buddy to look again and carry on.</small>`;
     }else if(r.kind==='mfa'){
@@ -175,12 +180,12 @@
     try{
       const signin=bridge();
       reply=r.kind==='credential'?await signin({action:'provide',profile:r.profile,taskId:r.taskId,username:values.username,password:values.password})
-        :await signin({action:'secret',taskId:r.taskId,reviewId:r.reviewId,value:values[r.field]});
+        :await signin({action:'secret',taskId:r.taskId,reviewId:r.reviewId,value:values[r.field],...(r.field==='password'?{remember:remember.get(key)!==false}:{})});
     }catch(error){reply={sent:false,error:String(error?.message||error)};}
     finally{for(const k of Object.keys(values))values[k]='';busy.delete(key);}
     pinNext(key,reply);
     if(r.kind==='credential')settle(state,key,reply?.saved?{status:'done',result:reply.resumed?`Saved — ${agentName(r.agentId)} is continuing.`:'Saved in your Keychain.'}:{result:reply?.error||'That didn’t save. Try again.'});
-    else if(reply?.signedIn)settle(state,key,{status:'done',result:'Sent — signed in'});
+    else if(reply?.signedIn)settle(state,key,{status:'done',result:'Sent — signed in'+(reply.remembered?`. Remembered for ${host(r.origin)}.`:'')});
     else if(reply?.sent)settle(state,key,{result:reply.retry?'Sent — that didn’t work, try again':reply.chrome?'Sent — the website needs you in Buddy’s Chrome window.':'Sent — the website wants another step.',request:{reviewId:reply.reviewId,field:reply.field??null,note:reply.note,step:reply.step}});
     else settle(state,key,{result:reply?.note||reply?.error||'That didn’t go through. Nothing was sent. Try again.',request:reply?.reviewId?{reviewId:reply.reviewId}:undefined});
     redraw();window.BuddyWorkerUI?.refresh?.(false);
@@ -243,6 +248,7 @@
     e.preventDefault();const holder=input.closest('[data-signin-holder]'),next=[...holder.querySelectorAll('[data-signin-input]')].find(i=>!i.value);
     if(next&&next!==input)next.focus();else send(holder.dataset.signinHolder);
   });
+  document.addEventListener('change',e=>{const box=e.target.closest?.('[data-signin-remember]');if(box)remember.set(box.dataset.signinRemember,box.checked);});
   document.addEventListener('input',e=>{const input=e.target.closest?.('[data-signin-input]');if(!input)return;if(input.value)typing.set(input.dataset.signinInput,input);else typing.delete(input.dataset.signinInput);});
   document.addEventListener('focusin',e=>{if(e.target.closest?.('[data-signin-input]'))lastField=e.target;});
   new MutationObserver(records=>{

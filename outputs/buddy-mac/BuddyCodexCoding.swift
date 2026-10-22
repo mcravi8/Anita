@@ -49,12 +49,12 @@ import Foundation
     }
 
     /// The tools Buddy gives a Codex coding thread: the same as a Claude coding session's — connected-folder files, copying into the project and
-    /// saving results out of it, deciding, asking the user to act in person, asking for a saved sign-in — with Buddy's command tool only for a
+    /// saving results out of it, fetching a file with Buddy's Chrome, deciding, asking the user to act in person, asking for a saved sign-in — with Buddy's command tool only for a
     /// command that signs in (credential), so the sign-in goes through Buddy's runner and never through Codex's shell, which runs everything else.
     /// Without the save tools a Codex task's results stayed in its private copy, where no teammate or supervisor could check them.
     static var tools: [[String: Any]] {
         BuddyProjectFiles.tools + [BuddyWorkerHost.codingCopyTool, BuddyWorkerHost.codingCopyOutTool, BuddyWorkerHost.codexSignInCommandTool]
-            + BuddyWorkerHost.tools.filter { $0["name"] as? String == "buddy_checkpoint" } + [BuddyWorkerHost.requestDecisionTool, BuddyWorkerHost.requestSignInTool]
+            + BuddyWorkerHost.tools.filter { $0["name"] as? String == "buddy_checkpoint" } + [BuddyWorkerHost.requestDecisionTool, BuddyWorkerHost.requestSignInTool, BuddyBrowserFetch.tool(coding: true)]
     }
     static var toolNames: Set<String> { Set(tools.compactMap { $0["name"] as? String }) }
     /// A resumed Codex thread keeps the tools it was started with (they can't be given again on resume), so a saved thread is resumed only when

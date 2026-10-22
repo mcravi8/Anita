@@ -80,7 +80,7 @@ test('a website password is typed in the agent’s chat; the group chat shows th
   await page.evaluate(()=>{replies.secret=[{sent:true,signedIn:true}];});
   await holder.getByRole('button',{name:'Send'}).click();
   await page.getByText('Sent — signed in').waitFor();
-  assert.deepEqual(await page.evaluate(()=>calls),[{action:'secret',taskId:'t1',reviewId:'r1',value:SECRET}],'one call, to the sign-in bridge, for exactly this request');
+  assert.deepEqual(await page.evaluate(()=>calls),[{action:'secret',taskId:'t1',reviewId:'r1',value:SECRET,remember:true}],'one call, to the sign-in bridge, for exactly this request (Remember is on unless turned off)');
   assert.equal(await page.locator('[data-signin-holder]').count(),0,'the field is gone');
   assert.deepEqual(await nowhere(page,SECRET),[],'after Send it is nowhere on the page');
   assert.equal(await page.evaluate(()=>state.messages.team.find(m=>m.kind==='signin-request').result),'Sent — signed in','the group chat’s message says so too');

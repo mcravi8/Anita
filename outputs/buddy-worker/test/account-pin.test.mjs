@@ -113,7 +113,7 @@ test('“Continue with Google” on another site chooses the pinned account, and
  }finally{await browser.close();await rm(root,{recursive:true,force:true});await s.close();}
 });
 
-test('a Google page signed in as another account (or as an unknown one) is refused before any action, and the action never runs',{timeout:60000},async()=>{
+test('a Google page that shows another account is refused before any action and the action never runs; one that shows no account at all goes ahead',{timeout:60000},async()=>{
  const g=await google(),{root,profile}=await fixtureRoot('buddy-account-mismatch-');
  const browser=new SharedBrowser(profile,{testOrigins:[g.origin],testGoogle:[g.origin],testGooglePath:'/accounts/'});
  try{
@@ -122,20 +122,23 @@ test('a Google page signed in as another account (or as an unknown one) is refus
   // Google shows the default account instead (the pinned one is not signed in there): the agent is told, and sees nothing of that account.
   await assert.rejects(usc.navigate(g.origin+'/fallback/mail'),refusal);
   await assert.rejects(usc.read(),refusal,'reading it again is refused too');
-  // A Google page that shows no account can be read, but nothing is done on it.
+  // A Google page that shows no account (YouTube, a help page, another language): Buddy can't see another account there, so the step goes
+  // ahead (the address still names the task's account).
   const plain=await usc.navigate(g.origin+'/plain');
-  const send=plain.controls.find(c=>c.name==='Send');
-  await assert.rejects(usc.prepare({snapshotId:plain.snapshotId,action:'click',ref:send.ref}),/couldn’t tell which Google account/);
+  assert.ok(g.seen.includes('/plain?authuser=craviott%40usc.edu'),'the address still names the account: '+g.seen);
+  await click(usc,'Send');await settle();
+  assert.deepEqual(g.sent,['unknown'],'a page with no account signal is not refused');
+  assert.ok(plain.controls.some(c=>c.name==='Send'));
   // The page's account changes after a step was approved: the approved step is not done.
   const mail=await usc.navigate(g.origin+'/mail/');
   const prepared=await usc.prepare({snapshotId:mail.snapshotId,action:'click',ref:mail.controls.find(c=>c.name==='Send').ref});
   await usc.page.evaluate(who=>{const a=document.querySelector('[aria-label^="Google Account"]');a.setAttribute('aria-label',`Google Account: Fixture Person (${who})`);},PERSONAL);
   await assert.rejects(usc.commit(prepared.token),/Nothing was sent/);
   await settle();
-  assert.deepEqual(g.sent,[],'no action ran as the wrong (or an unknown) account');
+  assert.deepEqual(g.sent,['unknown'],'no action ran as the wrong account');
   // The same step on the right account goes through, once.
   await usc.navigate(g.origin+'/mail/');await click(usc,'Send');await settle();
-  assert.deepEqual(g.sent,[USC]);
+  assert.deepEqual(g.sent,['unknown',USC]);
  }finally{await browser.close();await rm(root,{recursive:true,force:true});await g.close();}
 });
 

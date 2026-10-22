@@ -373,11 +373,11 @@ enum BuddyWebStep {
         let doing = need == "captcha" ? "solve the CAPTCHA" : need == "verification" ? "verify" : need == "file" ? "get the file" : "sign in"
         return "Give the exact page: url must be the https address of the public page where the user must \(doing) (for example https://publisher.example/article/123), not a site's name or a local address. Buddy opens exactly that page for them. Nothing was asked of the user yet."
     }
-    static let codingRefusal = "A coding session can't use Buddy's Chrome or anything signed in there, so a sign-in, CAPTCHA or verification done in Chrome never lets your commands through. If a site blocks a download, call buddy_checkpoint with need file, url (the file's own address, such as the PDF link, else the exact page), folderId (a connected folder from buddy_list_folders) and path (where in that folder it is saved, with the file name): when the user presses Done, Buddy downloads it there with their sign-in in Buddy's Chrome, or they save it themselves; or ask for the one fact you need from the page with buddy_request_decision. Nothing was asked of the user yet."
+    static let codingRefusal = "Your coding session's own commands can't use Buddy's Chrome or anything signed in there, so a sign-in, CAPTCHA or verification step is never yours to ask for. If a site blocks a download, call buddy_browser_fetch with url (the file's own address, such as the PDF link) and saveAs: Buddy's Chrome fetches it with the user's sign-ins into your project, and if the site shows a CAPTCHA or a sign-in, Buddy itself asks the user to finish it and saves the file when they press Done. Only if buddy_browser_fetch says it can't, ask for the file with buddy_checkpoint need file (url, folderId, path), or for the one fact you need with buddy_request_decision. Nothing was asked of the user yet."
     static let folderRefusal = "Give folderId: a connected folder from buddy_list_folders where the user saves the file, not your own project copy (the user can't reach it). Nothing was asked of the user yet."
     static let pathRefusal = "Give path: where in that folder the user saves the file, relative and with the file name (for example stages/S01/sources/article.pdf). Nothing was asked of the user yet."
     /// The line every coding brief carries about a site that blocks a download.
-    static let codingGuidance = "A coding session can't use Buddy's Chrome or anything signed in there: a website that blocks a download (a CAPTCHA, a sign-in, a paywall) is never fixed by the user signing in, so never ask them to sign in or solve a CAPTCHA for your commands. Instead call buddy_checkpoint with need file, url (the file's own address, such as the PDF link, else the exact page), folderId (a connected folder from buddy_list_folders, such as the project's) and path (where in that folder to save it, with the file name), then end the attempt: when the user presses Done, Buddy downloads it there with what they signed in to in Buddy's Chrome, or they save it themselves; when you are resumed, check the file is there with buddy_list_files and bring it in with buddy_copy_into_project. If you need only one fact from that page, ask for exactly that fact with buddy_request_decision instead."
+    static let codingGuidance = "Your own commands can't use Buddy's Chrome or anything signed in there, but buddy_browser_fetch can: when a website blocks a download (a CAPTCHA, a sign-in, a paywall the user has access to, curl getting a web page instead of the file), call buddy_browser_fetch with url (the file's own address, such as the PDF link) and saveAs (where in your project, with the file name). Buddy's Chrome opens it with the user's sign-ins and saves the file into your project, and you get its path, size, type and sha256; then use it with your own file tools. If the site shows a CAPTCHA, a sign-in or another check, Buddy asks the user to finish it in Buddy's Chrome and fetches the file again when they press Done: end this attempt then, and you are resumed with a note naming the saved file. Never ask the user to sign in, solve a CAPTCHA or download a file by hand for your commands. Only if buddy_browser_fetch itself says it can't get the file, call buddy_checkpoint with need file, url, folderId (a connected folder from buddy_list_folders) and path, then end the attempt; when you are resumed, check the file with buddy_list_files and bring it in with buddy_copy_into_project. If you need only one fact from a page, ask for exactly that fact with buddy_request_decision instead."
     /// The note a task is resumed with after the person's Done on its step. `checked`: Buddy looked at the page again in the task's own
     /// session and it no longer asks for anything; `present`: whether Buddy sees the saved file at its path.
     static func doneNote(_ job: [String: Any], checked: Bool, present: Bool?, downloaded: [String: Any]? = nil) -> String {
@@ -393,13 +393,81 @@ enum BuddyWebStep {
                 + "Check it with buddy_list_files" + (coding ? " and bring it into the project with buddy_copy_into_project" : "") + " before using it, then continue. If it isn't there, ask again with buddy_checkpoint need file."
         }
         if coding {
-            return "[Buddy] The user says they finished the step on \(where_ ?? "the website they were asked about"): \(asked) Your coding session's commands can't use what is signed in to Buddy's Chrome, so don't retry the blocked download as it was. If you still need something from that page, ask the user to save it into a connected folder with buddy_checkpoint need file (url, folderId, path), or ask for the one fact you need with buddy_request_decision."
+            return "[Buddy] The user says they finished the step on \(where_ ?? "the website they were asked about"): \(asked) Your coding session's commands can't use what is signed in to Buddy's Chrome, so don't retry the blocked download as it was. If you still need a file from that site, fetch it with buddy_browser_fetch, which uses Buddy's Chrome and the user's sign-ins; only if that says it can't, ask the user to save it into a connected folder with buddy_checkpoint need file (url, folderId, path), or ask for the one fact you need with buddy_request_decision."
         }
         if checked {
             return need == "signin" ? "[Buddy] The user finished the sign-in step in Buddy’s Chrome window, and Buddy checked that \(site(of: job) ?? where_ ?? "the website") is signed in. Reopen \(where_ ?? "the website") and continue."
                 : "[Buddy] The user finished the step on \(where_ ?? "the website") in Buddy’s Chrome window, and Buddy checked that the page no longer asks for anything. Reopen it and continue."
         }
         return "[Buddy] The user says they finished the step they were asked to do" + (where_.map { " on \($0)" } ?? "") + ": \(asked) Reopen " + (where_ ?? "the website") + " and check its actual state before continuing."
+    }
+}
+
+/// buddy_browser_fetch: a file from the web, fetched by Buddy's Chrome in the task's own page with the person's sign-ins (and their pinned
+/// account), through the network guard, GET only, and saved into the task's project (a coding session) or a folder the task may write to,
+/// never over another file. The model hears only what was saved. A CAPTCHA, a sign-in or an access check becomes the person's web step,
+/// whose Done fetches the file again in the same Chrome and resumes the task with a note naming the saved file.
+enum BuddyBrowserFetch {
+    /// The largest file one fetch saves, and how many files one task may save this way.
+    static let maximumBytes = 200 * 1024 * 1024
+    static let perTask = 25
+    static func tool(coding: Bool) -> [String: Any] {
+        let place = coding ? "into your project (where your own commands and file tools see it)" : "into your task folder, or into a connected folder you name with folderId"
+        var properties: [String: Any] = [
+            "url": ["type": "string", "description": "The file's own http(s) address (such as the PDF link), or the page whose own download gives the file."],
+            "saveAs": ["type": "string", "description": coding ? "Where in your project, relative, with the file name (for example sources/article.pdf)." : "Where in the folder, relative, with the file name (for example sources/article.pdf)."],
+            "reason": ["type": "string", "maxLength": 300, "description": "One line: what the file is for."],
+            "account": ["type": "string", "description": "Optional: the email address of the account to open it as (a Google file, say). A task with its own account always uses that one."]]
+        if !coding { properties["folderId"] = ["type": "string", "description": "Optional: a connected folder from buddy_list_folders. Left out, the file goes into your task folder."] }
+        return ["type": "function", "name": "buddy_browser_fetch",
+                "description": "Fetch one file (a PDF, CSV, dataset, image or archive) from the web with Buddy's Chrome, which has the user's own sign-ins, and save it \(place). Use it whenever a website blocks a plain download (a CAPTCHA, a sign-in, a paywall the user has access to) or you need a file that only a signed-in browser gets. It only opens the address you give (GET): it never fills or submits anything. Returns the saved file's path, size, type and sha256, never the page, cookies or headers. An existing file is never replaced: Buddy adds a number to the name. If the site shows a CAPTCHA, a sign-in or another check, Buddy asks the user to finish it in Buddy's Chrome and saves the file when they press Done: end this attempt then with one short sentence; you are resumed with a note naming the saved file. Files up to 200 MB. Needs internet access.",
+                "inputSchema": ["type": "object", "additionalProperties": false, "properties": properties, "required": ["url", "saveAs", "reason"]]]
+    }
+    /// A public http(s) address as given, or nil: no other scheme, no user name or password, no spaces. (The browser checks where the name
+    /// really leads, and every request it makes, before anything is fetched.)
+    static func address(_ raw: String?) -> String? {
+        guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty, text.count <= 2048, !text.contains(where: { $0.isWhitespace }),
+              let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.user == nil, url.password == nil, let host = url.host, !host.isEmpty else { return nil }
+        return url.absoluteString
+    }
+    static let addressRefusal = "Give url: the file's public http or https address (such as the PDF link). Nothing was fetched."
+    static let pathRefusal = "Give saveAs: a relative path with the file name (for example sources/article.pdf), with no hidden names, no .. and no absolute path. Nothing was fetched."
+    static func offline(_ name: String) -> String { "\(name) has no internet access (Web research is off for this agent), so Buddy's Chrome can't fetch anything for it. Nothing was fetched. Ask the user to turn on internet access for \(name), or ask for the file with buddy_request_decision." }
+    /// What stands in the way, in a few words.
+    static func what(_ kind: String) -> String { kind == "captcha" ? "a CAPTCHA" : kind == "signin" ? "a sign-in page" : "an access check" }
+    /// The web step's one line: what to do on the page, and what Buddy does next.
+    static func instruction(kind: String, site: String, file: String) -> String {
+        let doing = kind == "captcha" ? "Complete the CAPTCHA on \(site)" : kind == "signin" ? "Sign in on \(site)" : "Finish what \(site) asks (a check or a sign-in)"
+        return "\(doing); Buddy will save \(file) when you press Done."
+    }
+    /// The task's own type for what the browser said the file is, or a plain one.
+    static func contentType(_ value: Any?) -> String {
+        guard let text = value as? String, text.count <= 200, text.range(of: #"^[a-z0-9.+-]+/[a-z0-9.+-]+$"#, options: [.regularExpression, .caseInsensitive]) != nil else { return "application/octet-stream" }
+        return text.lowercased()
+    }
+    /// What the model hears when the file is saved: where, how big, what, its sha256. Nothing of the page, cookies or headers.
+    static func receipt(_ saved: [String: Any], coding: Bool, folderName: String) -> [String: Any] {
+        let path = saved["path"] as? String ?? ""
+        var out: [String: Any] = [:]
+        for key in ["path", "folderId", "bytes", "contentType", "sha256", "url"] { out[key] = saved[key] ?? NSNull() }
+        out["saved"] = true
+        out["note"] = coding ? "Saved in your project at \(path). Use it with your own tools; don't download it again." : "Saved as \(path) in \(folderName) (folderId \(saved["folderId"] as? String ?? "")). Read it with buddy_read_file if you need what it says."
+        return out
+    }
+    /// The note a task is resumed with once the person's Done brought the file.
+    static func doneNote(_ job: [String: Any], saved: [String: Any], fetch: [String: Any]) -> String {
+        let coding = job["kind"] as? String == "coding", point = job["checkpoint"] as? [String: Any] ?? [:]
+        let site = BuddyWebStep.host(point["url"] as? String) ?? "the website", kind = fetch["kind"] as? String ?? "captcha"
+        let finished = kind == "captcha" ? "the CAPTCHA" : kind == "signin" ? "the sign-in" : "the check"
+        let path = saved["path"] as? String ?? "", facts = "\(saved["bytes"] as? Int ?? 0) bytes, \(saved["contentType"] as? String ?? ""), sha256 \(saved["sha256"] as? String ?? "")"
+        let fetched = "[Buddy] The user finished \(finished) on \(site) in Buddy's Chrome, and Buddy fetched \(fetch["url"] as? String ?? "the file") with Buddy's Chrome: "
+        if coding { return fetched + "it is saved in your project at \(path) (\(facts)). Use it from there with your own tools; don't download it again." }
+        return fetched + "it is saved as \(path) in \(fetch["folderName"] as? String ?? "your task folder") (folderId \(saved["folderId"] as? String ?? ""); \(facts)). Continue with it; don't download it again."
+    }
+    /// The note when the person finished the step but the fetch then failed for another reason: the task goes on and decides.
+    static func failedNote(_ job: [String: Any], fetch: [String: Any], reason: String) -> String {
+        let site = BuddyWebStep.host((job["checkpoint"] as? [String: Any])?["url"] as? String) ?? "the website"
+        return "[Buddy] The user finished the step on \(site), but Buddy's Chrome still couldn't fetch \(fetch["url"] as? String ?? "the file"): \(reason) Nothing was saved. Don't ask the user to download it by hand; try the file's own address with buddy_browser_fetch, or ask for the one fact you need with buddy_request_decision."
     }
 }
 

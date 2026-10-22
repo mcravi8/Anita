@@ -88,3 +88,9 @@
   .sidebar.mobile-open{transition:transform var(--glide) var(--curve),visibility 0s}
 }
 /* Anyone who asks their system for less motion gets none: the page-wide rule in styles.css switches every transition off. */
+/* Rows end at the sidebar's edge, hidden agents' too. A visible row is stretched by the list; a hidden one sits in the "Hidden" box, where a
+   button is as wide as its one-line preview, so it ran past the edge and the list scrolled sideways. */
+.chat-list{overflow-x:hidden}
+.hidden-agents{min-width:0}
+.hidden-agents .chat-row,
+.shell.sidebar-compact .hidden-agents .chat-row{width:100%;box-sizing:border-box}

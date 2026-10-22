@@ -225,7 +225,12 @@ enum BuddyLiveWork {
                 let finished = commands.filter { $0["status"] as? String != "running" }.compactMap { ($0["durationMs"] as? NSNumber)?.doubleValue }.suffix(3)
                 if !finished.isEmpty { text += "; last \(finished.count) command\(finished.count == 1 ? "" : "s") took " + finished.map(took).joined(separator: ", ") }
                 if !commands.isEmpty { text += "; \(commands.count) command\(commands.count == 1 ? "" : "s") so far" }
-            case "queued": text += "queued" + (started.map { " since \(time($0))" } ?? "") + ", waiting for the task ahead of it to finish"
+            case "queued":
+                // Several tasks run at once, but an agent works on one at a time: a queued task waits for its own agent's running one, or
+                // otherwise for a free slot.
+                let ahead = jobs.first { ($0["workspace"] as? String ?? workspace) == workspace && $0["agentId"] as? String == job["agentId"] as? String && $0["status"] as? String == "running" }
+                text += "queued" + (started.map { " since \(time($0))" } ?? "")
+                    + (ahead.map { ", waiting for \(who(job))’s running task “\(short($0["title"] as? String ?? "Background task", 80))” to finish (an agent works on one task at a time)" } ?? ", waiting for a free slot while other tasks run")
             case "waiting_review", "waiting_user": text += "waiting" + (touched.map { " since \(time($0))" } ?? "")
             default: text += "\(status == "paused" ? "paused" : "stopped")" + (touched.map { " at \(time($0))" } ?? "") + "; Buddy restarts it by itself when it can"
             }

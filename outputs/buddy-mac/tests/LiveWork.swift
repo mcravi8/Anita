@@ -35,6 +35,11 @@ import Foundation
         let chief = BuddyLiveWork.context(jobs: jobs, workspace: "w", agent: "chief", supervises: true, names: names, now: now, zone: pacific)
         require(chief.contains("Forge: “Run v3 fits and write SUMMARY_v3”") && chief.contains("Vera: “Sign off or object to v2 and v3 rules” — queued"), "the supervisor sees each teammate's work by name: \(chief)")
         require(BuddyLiveWork.context(jobs: jobs, workspace: "w", agent: "lyra", supervises: false, names: names, now: now, zone: pacific).isEmpty, "an agent with no work of its own gets no section")
+        // Several tasks run at once, one per agent: a queued task waits for its own agent's running task, or else for a free slot.
+        require(chief.contains("Vera: “Sign off or object to v2 and v3 rules” — queued since 7:06 PM, waiting for a free slot while other tasks run"), "Vera's task waits for a slot, not for Forge: \(chief)")
+        var next = vera; next["id"] = "t-forge-next"; next["agentId"] = "forge"; next["title"] = "Write the appendix"
+        let behind = BuddyLiveWork.context(jobs: jobs + [next], workspace: "w", agent: "forge", supervises: false, names: names, now: now, zone: pacific)
+        require(behind.contains("“Write the appendix” — queued since 7:06 PM, waiting for Forge’s running task “Run v3 fits and write SUMMARY_v3” to finish (an agent works on one task at a time)"), "Forge's next task waits for Forge's own: \(behind)")
 
         // 3. It stays a short section even when a lot is going on.
         let many = (0..<40).map { n -> [String: Any] in var j = forgeRun; j["id"] = "t\(n)"; j["title"] = String(repeating: "Long title \(n) ", count: 20); return j }

@@ -10,7 +10,7 @@ password. It runs on your ChatGPT subscription or your Claude API key.
 [Get started](#get-started)
 · [Go further](#go-further)
 · [Development](#development)
-· [Report an issue](https://github.com/mcravi8/Anita/issues)
+· [Report an issue](https://github.com/mcravi8/BuddyBot/issues)
 
 ![Buddy showing a team chat with four agents, the chat list and the dot-field sidebar.](docs/images/buddy.png)
 
@@ -139,7 +139,7 @@ accounts, your Keychain sign-ins or your folders without copying them off your M
 
 ## Development
 
-This repository (Anita) holds the app in three parts:
+This repository (BuddyBot) holds the app in three parts:
 
 | Directory | Contents |
 | --- | --- |
@@ -162,5 +162,5 @@ Keep exactly one installed app, `/Applications/Buddy.app`, and update it in plac
 [AGENTS.md](AGENTS.md). Runtime data, sign-ins, built apps and archives stay out of
 version control. Third-party frontend licenses are in `outputs/relay/vendor/`.
 
-Bug reports are welcome as [GitHub issues](https://github.com/mcravi8/Anita/issues).
+Bug reports are welcome as [GitHub issues](https://github.com/mcravi8/BuddyBot/issues).
 Include what you did, what you expected and what Buddy showed.

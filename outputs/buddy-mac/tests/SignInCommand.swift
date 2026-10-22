@@ -183,6 +183,7 @@ import Security
             let declined = reviews(second).first ?? [:]
             try require(declined["status"] as? String == "cancelled" && declined["answeredBy"] as? String == "user" && !text(declined["answeredAt"]).isEmpty, "the declined review records who answered: \(declined)")
             try require(((second["commands"] as? [[String: Any]]) ?? []).isEmpty, "the declined command left no receipt: \(second["commands"] ?? [])")
+            try require(second["signInGrants"] == nil && pending(second)?["answeredBy"] == nil, "a declined request opens nothing: the next command asks again: \(second["signInGrants"] ?? "-")")
             try await answer(signinID, pending(second) ?? [:], accept: true)
         }
         await section("while the WRDS command runs the task says “Waiting for your Duo approval” and a Needs item asks to approve the push; both clear when it ends, with no stall stop") {
@@ -200,7 +201,7 @@ import Security
         }
         await section("after approval the sign-in reaches only that command's environment; its output is hidden in the receipt and in the tool result") {
             let job = try await detail(signinID), commands = job["commands"] as? [[String: Any]] ?? []
-            try require(saved.reads == 1, "the Keychain was read once, for the approved command: \(saved.reads)")
+            try require(saved.reads == 2, "the Keychain was read once for each approved command (two), and never for the declined one: \(saved.reads)")
             let signed = commands.first { $0["credential"] as? String == "wrds" } ?? [:], plain = commands.first { $0["credential"] == nil } ?? [:]
             try require(text(signed["output"]).contains("user=[hidden] pass=[hidden]") && text(signed["output"]).contains("digest=" + digest), "the exact sign-in reached the command and is hidden in its receipt: \(signed["output"] ?? "")")
             try require(text(signed["code"]) == envCommand && signed["network"] as? Bool == true && signed["exitCode"] as? Int == 0 && signed["timeoutSeconds"] as? Int == 300, "the receipt keeps the command, not the sign-in: \(signed.filter { $0.key != "output" })")
@@ -208,8 +209,23 @@ import Security
             let result = toolResult("cred2") ?? [:]
             try require(text(result["output"]).contains("user=[hidden] pass=[hidden]") && !json(result).contains(username) && !json(result).contains(password), "the model sees it hidden: \(result)")
             try require(text(job["result"]).hasPrefix("Ran the extract with the saved sign-in"), "the task's result: \(job["result"] ?? "")")
-            let approved = reviews(job).last ?? [:]
+            let approved = reviews(job).count > 1 ? reviews(job)[1] : [:]
             try require(approved["status"] as? String == "completed" && approved["answeredBy"] as? String == "user" && approved["answeredByName"] as? String == "you", "the approved review: \(approved)")
+        }
+        await section("approve once per task: a second WRDS command in the same task goes ahead on the user's earlier OK, says so on its record, and still asks for its own Duo push") {
+            let job = try await detail(signinID), all = reviews(job)
+            try require(all.count == 3, "three reviews: the declined one, the approved one, and the one that went ahead on that OK: \(all.map { "\($0["status"] ?? "")/\($0["answeredByName"] ?? "")" })")
+            let again = all.count == 3 ? all[2] : [:], args = (again["tool"] as? [String: Any])?["arguments"] as? [String: Any] ?? [:]
+            try require(again["status"] as? String == "completed" && again["answeredBy"] as? String == "user" && again["answeredByName"] as? String == "you (earlier in this task)"
+                        && again["credential"] as? String == "wrds" && !text(again["answerReason"]).isEmpty && text(args["command"]).contains("again user="), "the record says it went ahead on the user's earlier OK: \(again)")
+            let grant = (job["signInGrants"] as? [String: Any])?["wrds"] as? [String: Any] ?? [:]
+            try require(grant["reviewId"] as? String == all[1]["id"] as? String && !text(grant["at"]).isEmpty, "the task keeps which OK opened WRDS for it: \(job["signInGrants"] ?? "-")")
+            let every = try everyDecision(signinID)
+            try require(every.filter { $0.kind == "review" }.count == 2 && every.allSatisfy { $0.audience == "user" }, "the user was asked twice (declined, then approved), never a third time: \(every)")
+            try require(every.filter { $0.kind == "mfa" }.count == 2, "each WRDS sign-in still waited for its own Duo push: \(every)")
+            let ran = (job["commands"] as? [[String: Any]] ?? []).first { text($0["code"]).contains("again user=") } ?? [:]
+            try require(ran["credential"] as? String == "wrds" && text(ran["output"]) == "again user=[hidden] pass=[hidden]\n", "it ran with the sign-in, hidden in its receipt: \(ran)")
+            try require(text(toolResult("cred3")?["output"]) == "again user=[hidden] pass=[hidden]\n", "and the model saw it hidden: \(toolResult("cred3") ?? [:])")
         }
         await section("a background task asks with buddy_request_signin too, and waits for the user") {
             try await clearQueue()
@@ -227,6 +243,8 @@ import Security
             try await clearQueue()
             let id = try await start("CODEX_SIGNIN: run the WRDS extract.", as: forge, request: "codex-signin")
             let waiting = try await poll(id, "the Codex credentialed command waits for review") { pending($0) != nil }
+            try require(waiting["signInGrants"] == nil && reviews(waiting).count == 1 && pending(waiting)?["credential"] as? String == "wrds" && pending(waiting)?["route"] as? String == "user",
+                        "a new task asks again, once: the OK given in another task does not carry over: \(reviews(waiting))")
             let thread = codexLog(id).filter { $0["kind"] as? String == "request" }.compactMap { $0["value"] as? [String: Any] }.first { $0["method"] as? String == "thread/start" }?["params"] as? [String: Any] ?? [:]
             let tools = thread["dynamicTools"] as? [[String: Any]] ?? []
             let command = tools.first { $0["name"] as? String == "buddy_coding_command" } ?? [:], schema = command["inputSchema"] as? [String: Any] ?? [:]
@@ -244,6 +262,31 @@ import Security
             try require(text(signed["output"]) == "codex user=[hidden] pass=[hidden]\n" && commands.contains { $0["id"] as? String == "cmd-after" }, "Buddy's receipt survives beside Codex's own: \(commands)")
             let result = codexLog(id).filter { $0["kind"] as? String == "tool-result" }.compactMap { $0["value"] as? [String: Any] }.first { $0["call"] as? String == "credential" } ?? [:]
             try require(result["success"] as? Bool == true && text((result["value"] as? [String: Any])?["output"]).contains("[hidden]") && !json(result).contains(username) && !json(result).contains(password), "the model sees it hidden: \(result)")
+        }
+
+        await section("Settings → Saved sign-ins: the person replaces a wrong WRDS password or removes it through the page's sign-in bridge; no agent and no supervisor can, and no reply carries it") {
+            let wrongOne = "Fx!pw-WRONG-0001"
+            try saved.save(workspace: workspace, profile: "wrds", username: username, password: wrongOne)
+            let replaced = try await BuddySignInBox.handle(["action": "provide", "profile": "wrds", "username": username, "password": password], workspace: workspace, support: support, store: saved)
+            try require(replaced["saved"] as? Bool == true && replaced["resumed"] == nil && !json(replaced).contains(password) && !json(replaced).contains(username), "replaced from Settings, with no task to resume: \(json(replaced))")
+            try require(saved.items[workspace + ":wrds"]?.password == password, "the new password replaced the wrong one")
+            for actor in [clara, chief] {
+                for action in ["provide", "remove"] {
+                    var refused = false
+                    do { _ = try await worker(["operation": "signin", "actorId": actor, "arguments": ["action": action, "profile": "wrds", "username": username, "password": wrongOne]]) } catch { refused = true }
+                    try require(refused, "\(actor == chief ? "the supervisor" : "an agent") cannot \(action) a saved sign-in")
+                }
+            }
+            for action in ["provide", "remove"] {
+                var refused = false
+                do { _ = try await worker(["operation": "signin", "arguments": ["action": action, "profile": "wrds", "username": username, "password": wrongOne]]) } catch { refused = true }
+                try require(refused && BuddySignInBox.workerRefuses(["operation": "signin", "arguments": ["action": action, "profile": "wrds"]]), "only the page's sign-in bridge can \(action) one, not the worker bridge")
+            }
+            try require(saved.items[workspace + ":wrds"]?.password == password, "it is still the person's")
+            let removed = try await BuddySignInBox.handle(["action": "remove", "profile": "wrds"], workspace: workspace, support: support, store: saved)
+            let listed = try await BuddySignInBox.handle(["action": "status"], workspace: workspace, support: support, store: saved)
+            try require(removed["saved"] as? Bool == false && saved.items.isEmpty && ((listed["profiles"] as? [[String: Any]])?.first?["saved"] as? Bool) == false, "removed, and the status says not saved: \(json(listed))")
+            try saved.save(workspace: workspace, profile: "wrds", username: username, password: password)
         }
 
         // MARK: supervisor approval of routine coding commands
@@ -404,6 +447,41 @@ import Security
             let done = try await poll(id, "it runs after the user's answer") { ["completed", "failed"].contains($0["status"] as? String ?? "") }
             try require(done["status"] as? String == "completed" && reviews(done).first?["answeredBy"] as? String == "user", "the user approved it: \(reviews(done).first ?? [:])")
             _ = try await worker(["operation": "limit", "scope": "agent", "agentId": chief, "amountUSD": NSNull()])
+        }
+
+        // MARK: no per-task limits
+
+        await section("a coding task that already ran 120 commands and had 160 reviews keeps going: the record keeps the last 100 and 150, and the rest stay in the task's history file") {
+            try await clearQueue()
+            _ = try await worker(["operation": "pauseAll", "paused": true])
+            let id = try await start("MANY_FIXTURE: run one more command, then one more check.", as: clara, request: "many")
+            let stamp = ISO8601DateFormatter().string(from: Date())
+            let ran = (1...120).map { n -> [String: Any] in ["id": UUID().uuidString, "code": "echo \(n)", "network": false, "status": "completed", "exitCode": 0, "output": "\(n)\n", "at": stamp] }
+            let asked = (1...160).map { n -> [String: Any] in ["id": UUID().uuidString, "kind": "coding", "status": "completed", "route": "user", "answeredBy": "user", "answeredByName": "you", "answeredAt": stamp,
+                                                                 "tool": ["name": "Run command with network access", "service": "Buddy coding project", "arguments": ["command": "echo \(n)", "reason": "old check \(n)"]]] }
+            host.testingSeed(id, ["commands": ran, "reviews": asked])
+            _ = try await worker(["operation": "pauseAll", "paused": false])
+            var done: [String: Any] = [:]
+            let deadline = Date().addingTimeInterval(60)
+            while Date() < deadline {
+                let value = try await detail(id)
+                if let review = pending(value), review["route"] as? String == "user" { try await answer(id, review, accept: true) }
+                if terminal(value) { done = value; break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            try require(done["status"] as? String == "completed" && text(done["result"]).hasPrefix("Ran past the old limits."), "it kept going past 100 commands and 150 reviews: \(done["status"] ?? "-") \(done["progress"] ?? "") \(done["result"] ?? "")")
+            let commands = done["commands"] as? [[String: Any]] ?? [], all = reviews(done)
+            try require(commands.contains { text($0["output"]) == "command 121\n" } && commands.contains { text($0["output"]) == "review 161\n" }, "both new commands ran: \(commands.suffix(2))")
+            try require(commands.count == 100 && done["archivedCommands"] as? Int == 22 && all.count == 150 && done["archivedReviews"] as? Int == 11,
+                        "the record keeps the last 100 commands and 150 settled reviews and counts the rest: \(commands.count)+\(done["archivedCommands"] ?? "-"), \(all.count)+\(done["archivedReviews"] ?? "-")")
+            let history = lines(support.appendingPathComponent("Worker/Tasks/\(id)/history.jsonl"))
+            let older = history.filter { $0["kind"] as? String == "command" }.compactMap { ($0["value"] as? [String: Any])?["code"] as? String }
+            try require(older == (1...22).map { "echo \($0)" } && history.filter { $0["kind"] as? String == "review" }.count == 11, "the full history is kept, oldest first, in the task's history file: \(older.prefix(3))… \(history.count) lines")
+            let status = try await worker(["operation": "coding", "agentId": clara, "arguments": ["action": "status", "taskId": id]])
+            try require(((status["task"] as? [String: Any])?["commands"] as? [Any])?.count == 100, "the agent's status of the task carries the window, not the whole history")
+            let prompt = text(fixture("start").last { text($0["prompt"]).contains("MANY_FIXTURE") }?["prompt"])
+            try require(prompt.contains("Previous native command receipts") && prompt.contains("echo 120") && !prompt.contains("\"echo 20\"") && prompt.contains("20 earlier receipts"),
+                        "the model's brief carries the recent receipts and says how many earlier ones there are: \(prompt.suffix(300))")
         }
 
         // MARK: nothing secret anywhere

@@ -610,6 +610,11 @@ struct BuddyAttempt {
         var merged = old; merged.merge(Self.decimals(values)) { _, new in new }; merged["updatedAt"] = ISO8601DateFormatter().string(from: Date())
         // A copy of a review that arrives late (from the connection service) must not move an action backwards.
         if values["reviews"] != nil { merged = try keepingActionProgress(merged) }
+        // No task has a limit on how many commands it runs or reviews it asks for: what its record no longer keeps goes to its history file.
+        if values["commands"] != nil || values["reviews"] != nil {
+            var trimmed = merged; let moved = Self.overflow(&trimmed, from: old)
+            if moved.isEmpty || appendHistory(moved, task: id) { merged = trimmed }
+        }
         jobs[i] = merged
         let saved = merged
         // A run that finishes ends the older runs of the same work that stopped without finishing, in the same transaction.
@@ -622,6 +627,60 @@ struct BuddyAttempt {
         } catch { jobs[i] = old; throw error }
         for s in stale { jobs[s.index] = s.new }
         return jobs[i]
+    }
+    /// A task's record keeps its newest command receipts and settled reviews: what the page and the model are shown, and what keeps one task
+    /// under `rowLimit` however long it works. Older ones move, oldest first, to the task's history file (`historyFile`), one
+    /// {"kind": "command" | "review", "value": …} per line, and the record counts them (archivedCommands, archivedReviews). Receipts a caller
+    /// let go of (a Codex session keeps only its newest) go there too. A running command and an open review (waiting, approved, being sent,
+    /// unconfirmed) always stay, and so does a review whose outcome changed in this update, so its action record sees the change first.
+    static let keptCommands = 100, keptReviews = 150
+    static let settledReviews: Set<String> = ["completed", "cancelled", "declined", "not_sent", "expired"]
+    static func overflow(_ job: inout [String: Any], from old: [String: Any]) -> [[String: Any]] {
+        var moved: [[String: Any]] = []
+        if let given = job["commands"] as? [[String: Any]] {
+            var excess = given.count - keptCommands, kept: [[String: Any]] = []
+            for c in given { if excess > 0, c["id"] is String, c["status"] as? String != "running" { excess -= 1 } else { kept.append(c) } }
+            let keptIDs = Set(kept.compactMap { $0["id"] as? String })
+            var latest: [String: [String: Any]] = [:]; for c in given { if let id = c["id"] as? String { latest[id] = c } }
+            var seen = Set<String>(), count = 0
+            for c in (old["commands"] as? [[String: Any]] ?? []) + given {
+                guard let id = c["id"] as? String, !keptIDs.contains(id), seen.insert(id).inserted else { continue }
+                moved.append(["kind": "command", "value": latest[id] ?? c]); count += 1
+            }
+            if count > 0 { job["commands"] = kept; job["archivedCommands"] = (job["archivedCommands"] as? Int ?? 0) + count }
+        }
+        if let reviews = job["reviews"] as? [[String: Any]] {
+            var before: [String: String] = [:]
+            for r in old["reviews"] as? [[String: Any]] ?? [] { if let id = r["id"] as? String { before[id] = r["status"] as? String ?? "" } }
+            func settled(_ r: [String: Any]) -> Bool { settledReviews.contains(r["status"] as? String ?? "") }
+            var excess = reviews.filter(settled).count - keptReviews, kept: [[String: Any]] = [], count = 0
+            for r in reviews {
+                if excess > 0, settled(r), let id = r["id"] as? String, before[id] == r["status"] as? String { moved.append(["kind": "review", "value": r]); excess -= 1; count += 1 } else { kept.append(r) }
+            }
+            if count > 0 { job["reviews"] = kept; job["archivedReviews"] = (job["archivedReviews"] as? Int ?? 0) + count }
+        }
+        return moved
+    }
+    /// Where a task's older command receipts and reviews are kept: beside its files, never in a reply.
+    func historyFile(_ id: String) -> URL { directory.appendingPathComponent("Tasks/" + id + "/history.jsonl") }
+    /// Appends to a task's history file. False (and the record keeps everything) when it can't be written.
+    private func appendHistory(_ entries: [[String: Any]], task id: String) -> Bool {
+        guard UUID(uuidString: id) != nil else { return false }
+        var data = Data()
+        for entry in entries { guard JSONSerialization.isValidJSONObject(entry), let line = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]) else { return false }; data.append(line); data.append(10) }
+        let url = historyFile(id)
+        guard (try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])) != nil else { return false }
+        let fd = Darwin.open(url.path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+        var offset = 0
+        while offset < data.count {
+            let wrote = data.withUnsafeBytes { Darwin.write(fd, $0.baseAddress!.advanced(by: offset), data.count - offset) }
+            if wrote < 0 && errno == EINTR { continue }
+            guard wrote > 0 else { return false }
+            offset += wrote
+        }
+        return true
     }
     /// The older runs of the same work (the same plan task, else the same routine series or routine) that a run finishing now makes stale: ones that
     /// failed, were interrupted or paused, and that left nothing that may have been sent. They become cancelled, saying which run superseded them.
@@ -1998,7 +2057,7 @@ enum BuddyRulesReader {
 
     private func fail(_ message: String) -> BuddyWorkerFailure { BuddyWorkerFailure(message: message) }
     static let labels: [String: String] = ["name": "name", "role": "role", "instructions": "instructions", "avatarShape": "figure", "avatarColor": "colour", "hidden": "visibility", "model": "model", "dailyLimitUSD": "daily spending limit",
-        "proactive": "proactive updates", "tools.web": "web access (also needed for website tasks)", "tools.projectFiles": "file access", "tools.desktop": "Mac app access (also needed for website tasks)", "teamCheckInsEnabled": "team check-ins", "teamCheckInIntervalMinutes": "team check-in interval",
+        "proactive": "proactive updates", "tools.web": "web access (also Buddy’s Chrome for website tasks)", "tools.projectFiles": "file access", "tools.desktop": "Mac app access", "teamCheckInsEnabled": "team check-ins", "teamCheckInIntervalMinutes": "team check-in interval",
         "teamCheckInModel": "team check-in model", "teamDailyLimitUSD": "team check-in limit", "teamSupervisor": "team supervisor"]
     private func name(of agent: String) -> String { ((try? agents())?.first { $0["id"] as? String == agent }?["name"] as? String) ?? "this agent" }
     func describe(_ field: String, _ value: Any?) -> String {

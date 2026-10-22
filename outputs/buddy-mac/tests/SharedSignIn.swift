@@ -32,7 +32,8 @@ import Darwin
         let workspace = UUID().uuidString, ada = UUID().uuidString, bo = UUID().uuidString, cy = UUID().uuidString
         try JSONSerialization.data(withJSONObject: ["conversationWorkspace": workspace, "agents": [
             ["id": ada, "name": "Ada", "role": "Shopper", "description": "Website tasks", "tools": ["web": true, "desktop": true]],
-            ["id": bo, "name": "Bo", "role": "Shopper", "description": "Website tasks", "tools": ["web": true, "desktop": true]],
+            // Bo has Mac apps off: internet access (Web research) alone gives an agent Buddy's Chrome.
+            ["id": bo, "name": "Bo", "role": "Shopper", "description": "Website tasks", "tools": ["web": true, "desktop": false]],
             ["id": cy, "name": "Cy", "role": "Writer", "description": "No internet", "tools": ["web": false, "desktop": true]]]]).write(to: support.appendingPathComponent("workspace.json"))
         let host = BuddyWorkerHost(support: support, executable: URL(fileURLWithPath: arguments[1]),
                                    makeBrowser: { BuddyWorkerProcess(resource: URL(fileURLWithPath: arguments[2]), runtime: URL(fileURLWithPath: arguments[3])) })
@@ -122,7 +123,7 @@ import Darwin
             try require(leftRequests.isEmpty && leftCards.isEmpty, "the chat request and the Needs item are gone: \(leftRequests) \(leftCards)")
         }
         var stepTask = ""
-        await section("Open Chrome, then Done: Done closes Chrome, looks again, says so while it is not finished, and continues once it is") {
+        await section("Open Chrome, then Done (Bo, with Mac apps off, uses the browser): Done closes Chrome, looks again, says so while it is not finished, and continues once it is") {
             stepTask = try await create("CHROME_STEP: read my last order at the fixture shop.", as: bo, request: "step")
             let waiting = try await poll(stepTask, "the task asks how to sign in") { $0["status"] as? String == "waiting_review" && pending($0) != nil }
             _ = try await worker(["operation": "review", "taskId": stepTask, "id": pending(waiting)?["id"] ?? "", "accept": true, "authAction": "private"])
@@ -161,7 +162,7 @@ import Darwin
             let open = (try await status())["privateBrowser"] as? [String: Any] ?? [:]
             try require(open["shared"] as? Bool == true && open["taskId"] is NSNull, "the shared window is open for setup: \(open)")
             let agents = (try await status())["browserAgents"] as? [String] ?? []
-            try require(Set(agents) == [ada, bo], "every agent with internet access uses it, the one without does not: \(agents)")
+            try require(Set(agents) == [ada, bo], "every agent with internet access uses it (Bo too, with Mac apps off), the one without does not: \(agents)")
             _ = try await worker(["operation": "finishSignIn"])
             try require((try await status())["privateBrowser"] is NSNull, "Done closes it")
         }

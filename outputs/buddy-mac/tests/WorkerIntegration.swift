@@ -603,8 +603,16 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
         for action in ["status","cancel","continue"] {
             do {_ = try await computer(["action":action,"taskId":browserID,"goal":"Not mine"],owner:second);require(false,"browser tool cannot inspect or control another agent's task")}catch{}
         }
-        agents[0]["tools"]=["desktop":false];fixture["agents"]=agents;try JSONSerialization.data(withJSONObject:fixture).write(to:support.appendingPathComponent("workspace.json"),options:.atomic)
-        do {_ = try await computer(["action":"start","title":"Denied","goal":"Open a website"],requestID:"denied");require(false,"revoked browser permission prevents enqueue")}catch{}
+        // Internet access (Web research) alone gives an agent Buddy's Chrome; Mac apps is about other apps on this Mac. (The other agent: the first
+        // one's Web research was changed in chat earlier, and that change counts over the saved workspace.)
+        let other=agents.count-1
+        agents[other]["tools"]=["desktop":false];fixture["agents"]=agents;try JSONSerialization.data(withJSONObject:fixture).write(to:support.appendingPathComponent("workspace.json"),options:.atomic)
+        let webOnly=try await computer(["action":"start","title":"Web only","goal":"Open a website"],owner:second,requestID:"web-only")["task"] as? [String:Any] ?? [:]
+        require(webOnly["status"] as? String=="queued","an agent with Web research on and Mac apps off starts a website task: \(webOnly)")
+        _ = try await computer(["action":"cancel","taskId":webOnly["id"] ?? ""],owner:second)
+        agents[other]["tools"]=["web":false];fixture["agents"]=agents;try JSONSerialization.data(withJSONObject:fixture).write(to:support.appendingPathComponent("workspace.json"),options:.atomic)
+        do {_ = try await computer(["action":"start","title":"Denied","goal":"Open a website"],owner:second,requestID:"denied");require(false,"an agent with Web research off gets no browser: revoked browser permission prevents enqueue")}catch{}
+        agents[other]["tools"]=[String:Bool]()
         agents[0]["tools"]=[String:Bool]();fixture["agents"]=agents;try JSONSerialization.data(withJSONObject:fixture).write(to:support.appendingPathComponent("workspace.json"),options:.atomic)
         _ = try BuddyAISettings(support:support).update(workspace,enabled:("claude",true))
         _ = try BuddyAISettings(support:support).update(workspace,provider:"claude")

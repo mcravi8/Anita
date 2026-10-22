@@ -76,6 +76,8 @@ struct BuddyOfficeZip {
 }
 
 @MainActor enum BuddyDocuments {
+    /// The largest UTF-8 text file Buddy reads or writes as text (an agent reads one a page at a time: BuddyProjectFiles.readPage).
+    static let maximumTextBytes = 10 * 1024 * 1024
     static func fail(_ message: String) -> BuddyFileFailure { BuddyFileFailure(code:"document_edit",message:message) }
     static func xml(_ data: Data) throws -> XMLDocument {
         guard !String(decoding:data,as:UTF8.self).replacingOccurrences(of:"\0",with:"").uppercased().contains("<!DOCTYPE"), !String(decoding:data,as:UTF8.self).replacingOccurrences(of:"\0",with:"").uppercased().contains("<!ENTITY") else { throw fail("Documents with external XML entities aren’t supported.") }
@@ -152,11 +154,11 @@ struct BuddyOfficeZip {
         case "xlsx": return try excel(data)
         case "pdf": return try pdfRead(data,previewPage:preview ? page : nil)
         default:
-            if let text=String(data:data,encoding:.utf8), !data.contains(0), data.count<=1024*1024 { return ["format":"text","content":text,"editable":true] }
+            if data.count<=maximumTextBytes, !data.contains(0), let text=String(data:data,encoding:.utf8) { return ["format":"text","content":text,"editable":true] }
             var result:[String:Any]=["format":"binary","editable":false,"notice":"Ask your agent to work with this format, or open it in its usual app. Buddy preserves the original bytes."]
             // Say what the file is. A big spreadsheet export is text, not an unknown format, and a coding session can work on it.
-            if !data.contains(0), data.count>1024*1024, String(data:data,encoding:.utf8) != nil {
-                result["notice"]=String(format:"This is a text file of %.1f MB. Chats read up to 1 MB, so ask an agent to work on it in a coding session: it copies the file into its project and runs commands on it. Buddy preserves the original bytes.",Double(data.count)/1_048_576)
+            if !data.contains(0), data.count>maximumTextBytes, String(data:data,encoding:.utf8) != nil {
+                result["notice"]=String(format:"This is a text file of %.1f MB. Buddy reads and writes text files up to 10 MB, so ask an agent to work on it in a coding session: it copies the file into its project and runs commands on it. Buddy preserves the original bytes.",Double(data.count)/1_048_576)
             } else if !data.contains(0), String(data:data,encoding:.utf8) == nil {
                 result["notice"]="This looks like text in an encoding other than UTF-8. Ask an agent to read it in a coding session, which can convert it. Buddy preserves the original bytes."
             }

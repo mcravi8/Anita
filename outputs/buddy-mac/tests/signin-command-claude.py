@@ -12,6 +12,8 @@ SESSION = '6c1f2e9a-5b7d-4e0a-9c3b-2a4d6e8f0b1c'
 ENV_CMD = ("node -e 'const c=require(\"crypto\");const u=process.env.PGUSER||\"\",p=process.env.PGPASSWORD||\"\";"
            "setTimeout(()=>{console.log(\"user=\"+u+\" pass=\"+p);console.log(\"digest=\"+c.createHash(\"sha256\").update(u+\":\"+p).digest(\"hex\"))},3000)'")
 PLAIN_CMD = "node -e 'console.log(\"plain user=\"+process.env.PGUSER+\" pass=\"+process.env.PGPASSWORD)'"
+# A second command with the same sign-in in the same task: it runs on the user's earlier OK, and still waits for its own Duo push.
+AGAIN_CMD = "node -e 'setTimeout(()=>console.log(\"again user=\"+(process.env.PGUSER||\"\")+\" pass=\"+(process.env.PGPASSWORD||\"\")),1500)'"
 ROUTINE_CMD = 'curl -fsSL https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv -o data/vix.csv'
 OWN_CMD = 'curl -fsS --max-time 5 https://buddy-fixture-never-resolves.example.com/vix.csv -o data/vix.csv'
 # A project script the agent writes with an ordinary command, then asks to run with network access. It only writes a file in the project.
@@ -65,6 +67,9 @@ for line in sys.stdin:
             call('ask2', 'buddy_request_signin', {'profile': 'wrds', 'purpose': 'run the OptionMetrics SPX skew extract'})
         elif 'SIGNIN_FIXTURE' in prompt:
             call('ask', 'buddy_request_signin', {'profile': 'wrds', 'purpose': 'run the OptionMetrics SPX skew extract'})
+        elif 'MANY_FIXTURE' in prompt:
+            # A task that already ran more commands and had more reviews than the old per-task limits (100 and 150): it keeps going.
+            call('many1', 'buddy_coding_command', {'code': "node -e 'console.log(\"command 121\")'"})
         elif 'NETWORK_OWN_FIXTURE' in prompt:
             # Chief's own routine download. The host never resolves, so nothing leaves this Mac even after Buddy approves it.
             call('net', 'buddy_coding_command', {'code': OWN_CMD, 'network': True, 'reason': 'fetch the public VIX history for the check'})
@@ -90,9 +95,15 @@ for line in sys.stdin:
             # The first review is declined: the same command is asked for once more.
             call('cred2', 'buddy_coding_command', {'code': ENV_CMD, 'credential': 'wrds', 'reason': 'Run the WRDS extract with the saved sign-in'})
         elif cid == 'cred2':
+            call('cred3', 'buddy_coding_command', {'code': AGAIN_CMD, 'credential': 'wrds', 'reason': 'Run the second WRDS extract with the saved sign-in'})
+        elif cid == 'cred3':
             call('plain', 'buddy_coding_command', {'code': PLAIN_CMD})
         elif cid == 'plain':
             finish('Ran the extract with the saved sign-in; it stayed private.')
+        elif cid == 'many1':
+            call('many2', 'buddy_coding_command', {'code': "node -e 'console.log(\"review 161\")'", 'network': True, 'reason': 'MANY_FIXTURE: one more check with network access'})
+        elif cid == 'many2':
+            finish('UNEXPECTED: ' + str(result.get('error')) if 'error' in result else 'Ran past the old limits.')
         elif cid in ('mk1', 'mk2'):
             n = cid[-1]
             reason = 'run the project probe for the check' + (' EDIT_AFTER_REVIEW' if n == '2' else '')

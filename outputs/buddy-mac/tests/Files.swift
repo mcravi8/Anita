@@ -38,7 +38,7 @@ import Darwin
         link(outside.path, root.appendingPathComponent("hard.txt").path); mkfifo(root.appendingPathComponent("pipe.txt").path, 0o600)
         for path in ["../outside.txt", "/outside.txt", ".hidden", "notes/../plan.md", "link.txt", "linked/outside.txt", "hard.txt", "pipe.txt", "notes"] { rejects { _ = try files.read(scope, path: path) }; rejects { _ = try files.write(scope, path: path, content: "BAD", expectedVersion: "", actor: "a", actorName: "A") } }
         require(try String(contentsOf: outside, encoding: .utf8) == "UNTOUCHED", "outside file unchanged")
-        rejects("file_too_large") { _ = try files.write(scope, path: "big.txt", content: String(repeating: "x", count: 1_048_577), expectedVersion: "", actor: "a", actorName: "A") }
+        rejects("file_too_large") { _ = try files.write(scope, path: "big.txt", content: String(repeating: "x", count: 10 * 1_048_576 + 1), expectedVersion: "", actor: "a", actorName: "A") }
         try Data([0, 255, 1]).write(to: root.appendingPathComponent("binary.bin")); require(try files.read(scope, path: "binary.bin")["format"] as? String == "binary", "binary files return metadata")
         require((try files.list(scope)["files"] as! [[String: Any]]).allSatisfy { !["link.txt", "hard.txt", "pipe.txt"].contains($0["path"] as! String) }, "unsafe entries excluded from listing")
         print("PASS: folder boundaries, symlinks, hard links, devices, hidden paths, file limits, and permission preservation")
@@ -78,7 +78,7 @@ import Darwin
         rejects("folder_changed") { _ = try files.read(scope, path: "private.txt") }; rejects("folder_changed") { _ = try files.versions(scope, path: "private.txt") }
         try Data("broken".utf8).write(to: support.appendingPathComponent("project-folders.json")); rejects("folder_settings") { _ = try files.scope(workspace) }
         print("PASS: changing folders invalidates old requests; malformed folder settings fail closed")
-        // A coding project gets a connected folder's files natively. 3 MB is more than the model can read (1 MB), and sending it through the conversation costs more than a coding budget.
+        // A coding project gets a connected folder's files natively: sending a 3 MB dataset through the conversation costs more than a coding budget.
         do {
             let base = fm.temporaryDirectory.appendingPathComponent("buddy-copy-test-" + UUID().uuidString), sourceRoot = base.appendingPathComponent("Source"), projectRoot = base.appendingPathComponent("Project"), outside = base.appendingPathComponent("Outside"), copySupport = base.appendingPathComponent("Support")
             for directory in [sourceRoot.appendingPathComponent("data"), projectRoot, outside, copySupport] { try fm.createDirectory(at: directory, withIntermediateDirectories: true) }
@@ -203,5 +203,57 @@ import Darwin
             require(description.contains("moreFiles") && description.contains("path") && description.contains("depth"), "the description tells the agent how to list deeper: \(description)")
         }
         print("PASS: an agent's folder listing is shallow paths and sizes, says what it left out, and reaches the whole tree on request")
+        // Text files up to 10 MB. A 5 MB file is written in one go and read a page at a time: no single tool result holds the whole file, and the
+        // pages put back together are the file exactly. Over 10 MB, writing is refused and reading says what the file is instead of its text.
+        do {
+            let base = fm.temporaryDirectory.appendingPathComponent("buddy-pages-test-" + UUID().uuidString)
+            defer { try? fm.removeItem(at: base) }
+            let files = BuddyProjectFiles(support: base), scope = try files.scope(UUID().uuidString), root = try files.location(scope)
+            _ = try files.write(scope, path: "notes/plan.md", content: "External edit", expectedVersion: "", actor: "a", actorName: "A")
+            let line = "2026-10-21,SPX,5832.10,é,\(String(repeating: "x", count: 60))\n"
+            let count = 5 * 1_048_576 / line.utf8.count + 1, big = String(repeating: line, count: count)
+            func read(_ arguments: [String: Any]) throws -> [String: Any] { try files.call(scope, tool: "buddy_read_file", arguments: arguments.merging(["path": "data/big.csv"]) { mine, _ in mine }, actor: "a", actorName: "A") }
+            let saved = try files.call(scope, tool: "buddy_write_file", arguments: ["path": "data/big.csv", "content": big, "expectedVersion": ""], actor: "a", actorName: "A")
+            require(saved["saved"] as? Bool == true && big.utf8.count > 5 * 1_048_576, "a 5 MB text file is written with the file tool")
+            let first = try read([:]), page = first["content"] as? String ?? ""
+            require(first["format"] as? String == "text" && first["editable"] as? Bool == true && first["more"] as? Bool == true && first["bytes"] as? Int == big.utf8.count && first["version"] as? String == BuddyProjectFiles.hash(Data(big.utf8)),
+                    "the first page of a big file says it is text, its whole size and version, and that there is more: \(first.filter { $0.key != "content" })")
+            require(page.utf8.count <= BuddyProjectFiles.readPageBytes && page.utf8.count > BuddyProjectFiles.readPageBytes - line.utf8.count && page.hasSuffix("\n") && first["nextOffset"] as? Int == page.utf8.count,
+                    "a page is at most \(BuddyProjectFiles.readPageBytes) bytes and ends at a line break: \(page.utf8.count)")
+            require(first["startLine"] as? Int == 1 && first["endLine"] as? Int == page.components(separatedBy: "\n").count - 1 && first["lines"] as? Int == count,
+                    "a page says which lines it holds out of how many: \(first["startLine"] ?? "-")–\(first["endLine"] ?? "-") of \(first["lines"] ?? "-")")
+            let note = first["note"] as? String ?? ""
+            require(note.contains("offset") && note.contains("\(page.utf8.count)") && note.contains("5.0 MB"), "the page says how to read on: \(note)")
+            var whole = page, offset = first["nextOffset"] as? Int, pages = 1
+            while let at = offset {
+                let next = try read(["offset": at]); whole += next["content"] as? String ?? ""; pages += 1
+                require((next["content"] as? String ?? "").utf8.count <= BuddyProjectFiles.readPageBytes && pages < 60, "every page stays within one page: page \(pages)")
+                offset = next["more"] as? Bool == true ? next["nextOffset"] as? Int : nil
+                if offset == nil { require(next["nextOffset"] == nil && next["endLine"] as? Int == count, "the last page says there is no more: \(next.filter { $0.key != "content" })") }
+            }
+            require(whole == big && pages > 15, "the pages put together are the file, byte for byte (\(pages) pages)")
+            let small = try read(["offset": line.utf8.count, "limit": line.utf8.count * 2 + 5])
+            require(small["content"] as? String == line + line && small["startLine"] as? Int == 2 && small["endLine"] as? Int == 3 && small["nextOffset"] as? Int == line.utf8.count * 3, "offset and limit read a few lines from the middle: \(small)")
+            let inside = try read(["offset": line.utf8.count + 24, "limit": 10])
+            require((inside["content"] as? String).map { !$0.isEmpty && Data($0.utf8).count <= 10 } == true, "an offset inside a character still reads whole characters: \(inside)")
+            let end = try read(["offset": big.utf8.count])
+            require(end["content"] as? String == "" && end["more"] as? Bool == false, "reading at the end gives nothing more")
+            for bad: [String: Any] in [["offset": -1], ["offset": big.utf8.count + 1], ["limit": 0], ["limit": BuddyProjectFiles.readPageBytes + 1], ["offset": "10"], ["offset": true]] { rejects("invalid_arguments") { _ = try read(bad) } }
+            let short = try files.call(scope, tool: "buddy_read_file", arguments: ["path": "notes/plan.md"], actor: "a", actorName: "A")
+            require(short["content"] as? String == "External edit" && short["more"] == nil && short["nextOffset"] == nil, "a small file is still read whole, as before")
+            let edited = try files.call(scope, tool: "buddy_write_file", arguments: ["path": "data/big.csv", "content": big + "tail\n", "expectedVersion": first["version"] as! String], actor: "a", actorName: "A")
+            let after = try Data(contentsOf: root.appendingPathComponent("data/big.csv"))
+            require(edited["saved"] as? Bool == true && after == Data((big + "tail\n").utf8), "a page's version is the whole file's, so an edit after paging saves")
+            let tooBig = String(repeating: line, count: 10 * 1_048_576 / line.utf8.count + 1)
+            rejects("file_too_large") { _ = try files.call(scope, tool: "buddy_write_file", arguments: ["path": "data/huge.csv", "content": tooBig, "expectedVersion": ""], actor: "a", actorName: "A") }
+            try Data(tooBig.utf8).write(to: root.appendingPathComponent("data/huge.csv"))
+            let huge = try files.call(scope, tool: "buddy_read_file", arguments: ["path": "data/huge.csv"], actor: "a", actorName: "A")
+            require(huge["content"] == nil && huge["format"] as? String == "binary" && (huge["notice"] as? String ?? "").contains("10 MB"), "a text file over 10 MB is not read as text, and says why: \(huge)")
+            let readTool = BuddyProjectFiles.tools.first { $0["name"] as? String == "buddy_read_file" } ?? [:], writeTool = BuddyProjectFiles.tools.first { $0["name"] as? String == "buddy_write_file" } ?? [:]
+            let readProperties = (readTool["inputSchema"] as? [String: Any])?["properties"] as? [String: Any] ?? [:]
+            require(readProperties["offset"] != nil && readProperties["limit"] != nil && (readTool["description"] as? String ?? "").contains("10 MB") && (readTool["description"] as? String ?? "").contains("nextOffset")
+                    && (writeTool["description"] as? String ?? "").contains("10 MB") && !"\(BuddyProjectFiles.tools)".contains("text/code up to 1 MB"), "the tools say 10 MB and how to read on")
+        }
+        print("PASS: text files up to 10 MB: written whole, read a page at a time with offset and limit, over 10 MB refused")
     }
 }

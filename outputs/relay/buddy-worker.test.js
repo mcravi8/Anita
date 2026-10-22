@@ -244,3 +244,28 @@ test('a task pinned to an account says “Uses …” on the task and on the rep
  assert.match(html,/Uses craviott@usc\.edu/);assert.match(html,/data-worker-task="t1"/);assert.match(html,/Check &lt;my&gt; calendar/);assert.doesNotMatch(html,/<my>/);
  assert.equal(worker.taskReceipts([]),'');assert.equal(worker.taskReceipts(),'');
 });
+test('internet access is Web research alone: Set up once says so, and every agent with Web research on uses Buddy’s Chrome whatever its Mac apps setting',()=>{
+ const button=(op,label)=>`<button data-worker-op="${op}">${label}</button>`;
+ const agents=[{id:'a',name:'Ada',tools:{web:true,desktop:true}},{id:'l',name:'Lyra',tools:{web:true,desktop:false}},{id:'f',name:'Forge',tools:{desktop:false}},{id:'c',name:'Cy',tools:{web:false,desktop:true}}];
+ assert.deepEqual(worker.browserUsers(agents),['a','l','f'],'Mac apps off does not take the browser away');
+ const html=worker.setupOnce({agents,using:worker.browserUsers(agents),legacy:[],button});
+ assert.match(html,/Every agent with internet access will use the accounts you sign in to here\. Internet access is Web research in an agent’s settings; Mac apps doesn’t need to be on\./);
+ assert.match(html,/Used by Ada, Lyra, Forge\./);assert.match(html,/No browser for Cy \(internet access is off\)/);
+});
+test('Saved sign-ins lists each service sign-in as Saved or Not saved, with Replace (or Add) and Remove; the field Replace opens is empty and private',()=>{
+ const saved=worker.savedSignins({profiles:[{id:'wrds',name:'WRDS',saved:true}]});
+ assert.match(saved,/<section class="worker-saved-signins"/);assert.match(saved,/Saved sign-ins/);assert.match(saved,/<strong>WRDS<\/strong><small>Saved<\/small>/);
+ assert.match(saved,/data-saved-replace="wrds"[^>]*>Replace</);assert.match(saved,/data-saved-remove="wrds"[^>]*>Remove</);assert.doesNotMatch(saved,/<input/,'no field until Replace');
+ const none=worker.savedSignins({profiles:[{id:'wrds',name:'WRDS',saved:false}]});
+ assert.match(none,/<small>Not saved<\/small>/);assert.match(none,/data-saved-replace="wrds"[^>]*>Add</);assert.doesNotMatch(none,/data-saved-remove/,'nothing to remove');
+ const editing=worker.savedSignins({profiles:[{id:'wrds',name:'WRDS',saved:true}],editing:'wrds'});
+ const inputs=editing.match(/<input[^>]*>/g)||[];
+ assert.equal(inputs.length,2);assert.match(inputs[0],/type="text"/);assert.match(inputs[1],/type="password"/);
+ for(const i of inputs){assert.match(i,/autocomplete="off"/);assert.match(i,/spellcheck="false"/);assert.doesNotMatch(i,/\svalue=/,'the field is drawn empty, never with a value');assert.doesNotMatch(i,/data-signin-input/,'not a chat field');}
+ assert.match(editing,/data-saved-save="wrds"[^>]*>Save</);assert.match(editing,/data-saved-cancel="wrds"/);assert.match(editing,/straight to your Mac’s Keychain/);assert.doesNotMatch(editing,/data-saved-replace/);
+ const removing=worker.savedSignins({profiles:[{id:'wrds',name:'WRDS',saved:true}],removing:'wrds'});
+ assert.match(removing,/Remove the saved WRDS sign-in\?/);assert.match(removing,/data-saved-confirm-remove="wrds"/);
+ assert.match(worker.savedSignins({profiles:null}),/Checking…/);
+ assert.match(worker.savedSignins({profiles:[{id:'x',name:'A<b>',saved:true}],note:'Done <i>'}),/A&lt;b&gt;[\s\S]*Done &lt;i&gt;/);
+ assert.doesNotMatch(worker.savedSignins({profiles:[{id:'x',name:'A<b>',saved:true}]}),/<b>/);
+});

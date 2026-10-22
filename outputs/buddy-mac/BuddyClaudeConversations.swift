@@ -143,7 +143,7 @@ import Foundation
     }
     private func call(_ tool:String,args:[String: Any],run:Run,callID:String) async throws -> [String: Any] {
         guard !run.stopped,permitted(run),run.options.toolsEnabled else {throw BuddyFailure(message:"This conversation stopped or its access changed.")}
-        run.calls += 1;guard run.calls<=100 else{throw BuddyFailure(message:"This reply reached its tool limit.")}
+        run.calls += 1
         if tool=="buddy_read_chat_history",let scope=run.options.historyScope {
             return try BuddyConversationHistory.read(support:support,scope:scope,runID:run.id,args:args)
         }

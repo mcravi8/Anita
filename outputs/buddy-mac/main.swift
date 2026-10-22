@@ -58,6 +58,8 @@ import AppKit
                 return (agent["tools"] as? [String: Bool])?["projectFiles"] != false
             }
         }
+        // A chat agent named a place on the Mac the person hasn't opened to agents yet: the page shows the card at once.
+        conversations.onAccessRequest = { [weak self] _, _ in self?.deliver(["type": "folder-access"]) }
         conversations.computerPermission = { [weak self] workspace, keys in
             guard let self,!FileManager.default.fileExists(atPath:self.supportURL.appendingPathComponent("Worker/PrivateSignIn.json").path) else{return false}
             guard let state = try? self.workspaceState(), state["conversationWorkspace"] as? String == workspace, let agents = state["agents"] as? [[String: Any]], !keys.isEmpty else { return false }
@@ -212,6 +214,7 @@ import AppKit
           addProjectFolder: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'addProjectFolder'}),
           disconnectProjectFolder: folderId => window.webkit.messageHandlers.buddy.postMessage({kind: 'disconnectProjectFolder', folderId}),
           showProjectFolder: folderId => window.webkit.messageHandlers.buddy.postMessage({kind: 'showProjectFolder', folderId: folderId || null}),
+          folderAccess: payload => window.webkit.messageHandlers.buddy.postMessage({kind: 'folderAccess', payload}),
           computerStatus: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'computerStatus'}),
           setComputerAccess: enabled => window.webkit.messageHandlers.buddy.postMessage({kind: 'setComputerAccess', enabled}),
           openChatGPT: () => window.webkit.messageHandlers.buddy.postMessage({kind: 'openChatGPT'}),
@@ -590,6 +593,31 @@ import AppKit
                 try conversations.projectFiles.removeFolder(context.workspace, folderId: id)
                 await teamwork.stopFiles(workspace: context.workspace); await ai.stopFiles(workspace: context.workspace)
                 replyHandler(["disconnected": true], nil)
+                deliver(["type": "project-files-changed"])
+            } catch { replyHandler(nil, error.localizedDescription) } }
+        case "folderAccess":
+            // The person's own answers about places on the Mac: a card's Allow, Don't allow or whole home folder, and Settings. Only this page
+            // reaches it (agents have no way to), and every answer is saved as the person's.
+            Task { do {
+                let context = try workspaceContext(), payload = body["payload"] as? [String: Any] ?? [:], files = conversations.projectFiles, action = payload["action"] as? String ?? "list"
+                if action == "list" { replyHandler(try files.accessOverview(context.workspace), nil); return }
+                var result: [String: Any]
+                if action == "answer" {
+                    guard let id = payload["id"] as? String, let choice = payload["choice"] as? String else { throw BuddyFailure(message: "Choose Allow or Don’t allow.") }
+                    result = try files.answerAccess(context.workspace, id: id, choice: choice, actor: "you")
+                } else {
+                    result = try files.changeAccess(context.workspace, action: action, path: payload["path"] as? String, actor: "you")
+                    if action == "removeHome" { await teamwork.stopFiles(workspace: context.workspace); await ai.stopFiles(workspace: context.workspace) }
+                }
+                // Background and coding tasks that waited go on by themselves; a chat agent's follow-up turn is started by the page, which holds the chat.
+                let tasks = Array(Set((result["waiting"] as? [[String: Any]] ?? []).filter { !($0["taskId"] as? String ?? "").isEmpty }.compactMap { $0["requestId"] as? String }))
+                if !tasks.isEmpty {
+                    do {
+                        _ = try await BuddyWorkerClient.start(support: supportURL, workspace: context.workspace)
+                        result["resumed"] = try await BuddyWorkerClient.call(support: supportURL, payload: ["operation": "folderAccess", "workspace": context.workspace, "arguments": ["requestIds": tasks]])["resumed"] ?? []
+                    } catch { result["resumeError"] = error.localizedDescription }
+                }
+                replyHandler(result, nil)
                 deliver(["type": "project-files-changed"])
             } catch { replyHandler(nil, error.localizedDescription) } }
         case "showProjectFolder":

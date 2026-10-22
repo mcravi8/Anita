@@ -59,6 +59,16 @@ struct BuddyFailure: LocalizedError {
     private var connectorInputItems: [String: [String]] = [:]
     private let executableOverride: URL?
     var filePermission: ((String, [String]) -> Bool)?
+    /// Set by the background worker on a task's own service: a place on the Mac its file tools ask for belongs to that task (and its team
+    /// plan), so the task waits for the answer and resumes; otherwise it belongs to the chat the turn is in.
+    var accessTask: (task: String, plan: String)?
+    /// A file tool asked the person for a place on the Mac (BuddyFolderAccess): the request's id and the run it came from.
+    var onAccessRequest: ((String, String) -> Void)?
+    /// Who asks, for the card: the agent, and the chat (its own, or the group the turn is in) or the task it works in.
+    func accessAsker(agent: String, name: String, scope: BuddyProposalScope?, run: String) -> BuddyAccessAsker {
+        if let accessTask { return BuddyAccessAsker(agentId: agent, agentName: name, taskId: accessTask.task, runId: run, planId: accessTask.plan) }
+        return BuddyAccessAsker(agentId: agent, agentName: name, chat: scope?.chat ?? agent, runId: scope?.replyRunId ?? run)
+    }
     private let support: URL
     private var sessionsURL: URL { support.appendingPathComponent("conversations.json") }
     private var workingURL: URL { support.appendingPathComponent("Conversations", isDirectory: true) }
@@ -445,7 +455,7 @@ struct BuddyFailure: LocalizedError {
                 }
                 if isCancelled(runID) { finish(runID, status: "stopped"); return }
                 let fileAccess = (options.fileScope ?? options.fileContext).map { scope in filePermission?(scope.workspace, options.permissionKeys ?? [key]) == true } ?? false
-                let fileGuide = fileAccess && options.fileScope == nil ? "Shared project-file access is enabled for the group’s member workers. This coordination or synthesis turn has no file tools itself. Plan requested real file work for the authorized workers; do not mistake the absence of tools in this planning step for disabled worker access. In synthesis, rely on the supplied verified save receipts." : fileAccess ? "Project file tools are available: text/Markdown/HTML/code up to 10 MB (a big text file is read a page at a time: follow nextOffset); Word DOCX paragraph creation/edits; Excel XLSX sheet/cell/formula creation/edits; PDF creation, form filling, annotations, page rotation/appending up to 32 MB; and raw base64 byte tools for any file format up to 1 MB. Use buddy_create_document and buddy_edit_document for Office/PDF. PDFs preserve existing printed text; signed/protected documents may be preview-only. Excel formulas are recalculated by Excel on open, not by Buddy. New and saved documents have in-app previews. Work only in user-connected folders. Read existing files before editing and use their current version; if file_changed, reread and merge. Claim saved files only when the tool returns saved=true. Use buddy_list_folders to discover additional connected folders, then pass their folderId to file tools. Do not read or write unrelated files. No deletion or access outside connected folders. If a requested folder is missing, ask the user to connect it using Files → Folder & access → Connect another folder." : "Project-file access is disabled for this request. Do not invoke Buddy file tools."
+                let fileGuide = fileAccess && options.fileScope == nil ? "Shared project-file access is enabled for the group’s member workers. This coordination or synthesis turn has no file tools itself. Plan requested real file work for the authorized workers; do not mistake the absence of tools in this planning step for disabled worker access. In synthesis, rely on the supplied verified save receipts." : fileAccess ? "Project file tools are available: text/Markdown/HTML/code up to 10 MB (a big text file is read a page at a time: follow nextOffset); Word DOCX paragraph creation/edits; Excel XLSX sheet/cell/formula creation/edits; PDF creation, form filling, annotations, page rotation/appending up to 32 MB; and raw base64 byte tools for any file format up to 1 MB. Use buddy_create_document and buddy_edit_document for Office/PDF. PDFs preserve existing printed text; signed/protected documents may be preview-only. Excel formulas are recalculated by Excel on open, not by Buddy. New and saved documents have in-app previews. Work in user-connected folders and in places on the Mac the user names. Read existing files before editing and use their current version; if file_changed, reread and merge. Claim saved files only when the tool returns saved=true. Use buddy_list_folders to discover additional connected folders, then pass their folderId to file tools. \(BuddyProjectFiles.pathGuidance) Move or rename with buddy_move_file. Do not read or write unrelated files. No deletion." : "Project-file access is disabled for this request. Do not invoke Buddy file tools."
                 let proposalGuide = try (options.proposalsEnabled ? options.proposalScope : nil).map { scope in "Use buddy_build_team to create explicitly requested teams or teammates with complete editable job briefs. Use buddy_propose_agent for an unsolicited individual suggestion, which stays pending until human approval. Never claim creation or work without the actual corresponding receipt. Prefer existing registered agents; do not repropose declined suggestions unless explicitly asked. Shape IDs are diamond, sphere, hex, pill; color IDs are lilac, blue (light blue), peach, mint (green), red (autumn red), gold (yellow), cobalt (blue).\n" + BuddyTeamBuilder.guidance + "\n" + (try agentProposals.context(scope)) } ?? "Agent suggestions are unavailable in this step."
                 let previousActions = inputRecords.values.filter { $0["workspace"] as? String == options.proposalScope?.workspace && $0["chat"] as? String == options.proposalScope?.chat && ["answered", "uncertain", "completed"].contains($0["status"] as? String ?? "") }.suffix(20).map { record in
                     ["status": record["status"] ?? "uncertain", "tool": record["tool"] ?? [:], "finishedAt": record["finishedAt"] ?? NSNull(), "answeredAt": record["answeredAt"] ?? NSNull()] as [String: Any]
@@ -856,7 +866,7 @@ struct BuddyFailure: LocalizedError {
             }
             guard let scope = run["fileScope"] as? BuddyFileScope, let keys = run["permissionKeys"] as? [String], filePermission?(scope.workspace, keys) == true else { throw BuddyFileFailure(code: "access_removed", message: "Project-file access is unavailable. Do not retry file operations in this turn.") }
             let actor = run["agentId"] as? String ?? "Agent"
-            let result = try projectFiles.call(scope, tool: tool, arguments: arguments, actor: actor, actorName: run["agentName"] as? String ?? "Agent")
+            let result = try projectFiles.call(scope, tool: tool, arguments: arguments, actor: actor, actorName: run["agentName"] as? String ?? "Agent", asker: accessAsker(agent: actor, name: run["agentName"] as? String ?? "Agent", scope: run["proposalScope"] as? BuddyProposalScope, run: runID))
             if var file = result["file"] as? [String: Any] {
                 file["workspace"] = scope.workspace
                 if let warning = result["warning"] { file["warning"] = warning }
@@ -866,6 +876,7 @@ struct BuddyFailure: LocalizedError {
             }
             answerFileCall(message, result: result, success: true)
         } catch {
+            if let asked = error as? BuddyFileFailure, asked.code == "access_requested", let request = asked.request { onAccessRequest?(request, runID) }
             answerFileCall(message, result: ["code": (error as? BuddyFileFailure)?.code ?? "file_failed", "error": error.localizedDescription], success: false)
         }
     }

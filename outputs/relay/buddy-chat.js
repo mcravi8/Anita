@@ -7,7 +7,8 @@
     return state;
   }
   function active(state,target){ return Object.values(state.runs||{}).find(r=>r.target===target&&busy(r.status)); }
-  function begin(state,target,{retryOf,runId=uid(),userId=uid(),replyId=uid(),time=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}={}){
+  // `text`: a message Buddy sends for the person after their click (a folder they allowed, buddy-folder-access.js); the draft stays theirs.
+  function begin(state,target,{retryOf,runId=uid(),userId=uid(),replyId=uid(),time=new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}),text:given}={}){
     migrate(state);
     if(active(state,target))throw Error('This chat is already answering.');
     const agent=state.agents.find(a=>a.id===target);
@@ -17,10 +18,10 @@
     if(group&&(!members.length||members.length>16||members.some(a=>!a)||new Set(group.members).size!==group.members.length))throw Error('Edit this group to choose between 1 and 16 available agents.');
     const previous=retryOf&&state.runs[retryOf];
     if(retryOf&&(!previous||previous.target!==target||!(['failed','stopped'].includes(previous.status)||previous.status==='completed'&&previous.team?.partial)))throw Error('That reply cannot be retried.');
-    const text=(previous?.text??state.drafts[target]??'').trim();
+    const text=(given??previous?.text??state.drafts[target]??'').trim();
     if(!text)throw Error('Write a message first.');
     if(text.length>30000)throw Error('Keep messages under 30,000 characters.');
-    if(!retryOf&&state.attachments[target]?.length)throw Error('Remove the attachment, then choose a shared file from the folder button in the Mac app.');
+    if(!retryOf&&given===undefined&&state.attachments[target]?.length)throw Error('Remove the attachment, then choose a shared file from the folder button in the Mac app.');
     state.messages[target] ||= [];
     if(previous)userId=previous.userId;
     else state.messages[target].push({id:userId,who:'you',body:text,time,createdAt:new Date().toISOString(),live:true});
@@ -28,7 +29,7 @@
     state.messages[target].push({id:replyId,who:target,body:'',time,live:true,runId,status:'starting',...(team?{team}: {})});
     const run={runId,target,key:`${state.conversationWorkspace}:${target}`,userId,replyId,text,createdAt:new Date().toISOString(),status:'starting',...(team?{team,memberIds:[...group.members]}: {})};
     state.runs[runId]=run;
-    if(!previous)state.drafts[target]='';
+    if(!previous&&given===undefined)state.drafts[target]='';
     return {run,payload:group?{kind:'group',runId,key:run.key,text,groupId:target}:{runId,key:run.key,text,agentId:target,agent:{name:agent.name,role:agent.role,description:agent.description}}};
   }
   // A group request that agents answered for themselves has no reply of its own to show: their messages are the reply. (The run keeps them joined

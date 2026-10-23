@@ -17,7 +17,9 @@
       seen.add(e.id);return true;
     }).slice().sort((a,b)=>stamp(a.at)-stamp(b.at)||a.id.localeCompare(b.id));
     if(!activity.length)return messages;
-    const times=messages.map(m=>stamp(m.createdAt||updateTimes[m.id]||m.teamCheckedAt||state.runs?.[m.runId]?.createdAt));
+    // A task's update in the chat has no createdAt: its time is the task's (workerUpdatedAt). Read from its clock label alone, it stuck days
+    // early and every later exchange with Chief landed below the latest update.
+    const times=messages.map(m=>stamp(m.createdAt||m.workerUpdatedAt||updateTimes[m.id]||m.teamCheckedAt||state.runs?.[m.runId]?.createdAt));
     function clock(m,anchor,backwards){
       const match=String(m.time||'').match(/^(\d{1,2}):(\d{2})(?:\s*([ap])m)?$/i);if(!match||!Number.isFinite(anchor))return anchor;
       let hour=Number(match[1]);if(match[3])hour=hour%12+(match[3].toLowerCase()==='p'?12:0);if(hour>23||Number(match[2])>59)return anchor;

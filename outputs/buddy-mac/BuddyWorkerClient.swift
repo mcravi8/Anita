@@ -78,6 +78,12 @@ import AppKit
     static func call(support: URL, payload: [String: Any], timeout: Int = 8) async throws -> [String: Any] {
         try await withCheckedThrowingContinuation { c in DispatchQueue.global(qos: .utility).async { do { c.resume(returning: try BuddyWorkerWire.call(support: support, request: payload, timeout: timeout)) } catch { c.resume(throwing: error) } } }
     }
+    /// The worker's launch settings (~/Library/LaunchAgents/app.buddy.worker.plist). No ProcessType, so a normal-priority job: as a launchd
+    /// "Background" job every program an agent ran inherited background priority, and the user's S02a computation ran on the efficiency cores
+    /// while a third of the Mac sat idle (macOS cannot lift that from a program once it runs). install.py takes it out of an older file.
+    static func launchAgent(executable: URL, logs: URL) -> [String: Any] {
+        ["Label": "app.buddy.worker", "ProgramArguments": [executable.path, "--worker"], "RunAtLoad": true, "KeepAlive": ["SuccessfulExit": false], "ThrottleInterval": 30, "LimitLoadToSessionType": "Aqua", "StandardErrorPath": logs.appendingPathComponent("service-error.log").path, "Umask": 0o077]
+    }
     static func start(support: URL, workspace: String) async throws -> [String: Any] {
         if let result = try? await call(support: support, payload: ["workspace": workspace, "operation": "status"]) { return result }
         guard Bundle.main.bundleIdentifier == "app.buddy.desktop", let bundle = Bundle.main.resourceURL?.deletingLastPathComponent() else { throw BuddyWorkerFailure(message: "Start the isolated test worker explicitly.") }
@@ -87,8 +93,7 @@ import AppKit
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("app.buddy.worker.plist"), logs = support.appendingPathComponent("Worker", isDirectory: true)
         try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let plist: [String: Any] = ["Label": "app.buddy.worker", "ProgramArguments": [executable.path, "--worker"], "RunAtLoad": true, "KeepAlive": ["SuccessfulExit": false], "ThrottleInterval": 30, "ProcessType": "Background", "LimitLoadToSessionType": "Aqua", "StandardErrorPath": logs.appendingPathComponent("service-error.log").path, "Umask": 0o077]
-        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: url, options: .atomic)
+        try PropertyListSerialization.data(fromPropertyList: launchAgent(executable: executable, logs: logs), format: .xml, options: 0).write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         let domain = "gui/" + String(getuid())
         _ = try await command(["bootstrap", domain, url.path])

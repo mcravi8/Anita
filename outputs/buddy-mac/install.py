@@ -114,6 +114,20 @@ def ensure_idle():
     return commands
 
 
+def full_priority(agent):
+    """Take the launchd "Background" setting out of the worker's launch settings, which an earlier Buddy wrote: every program an agent ran
+    inherited background priority (the S02a computation ran on the efficiency cores with a third of the Mac idle). True if the file changed."""
+    if not agent.exists():
+        return False
+    values = plistlib.loads(agent.read_bytes())
+    if 'ProcessType' not in values:
+        return False
+    del values['ProcessType']
+    agent.write_bytes(plistlib.dumps(values))
+    os.chmod(agent, 0o600)
+    return True
+
+
 def update(archive, check_only=False):
     # Both extracted app and replacement/rollback bundles are inside .noindex
     # directories. They are never launched or registered from staging.
@@ -166,8 +180,9 @@ def update(archive, check_only=False):
                         previous.rename(INSTALLED)
                     raise
             finally:
+                agent = Path.home() / 'Library/LaunchAgents/app.buddy.worker.plist'
+                full_priority(agent)
                 if loaded:
-                    agent = Path.home() / 'Library/LaunchAgents/app.buddy.worker.plist'
                     subprocess.run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(agent)], check=True)
         subprocess.run([LSREGISTER, '-f', str(INSTALLED)], check=True)
         print(f'Updated Buddy {info["CFBundleShortVersionString"]} at {INSTALLED}. User data and Keychain were untouched.')

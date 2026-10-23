@@ -220,3 +220,4 @@ subprocess.run([sys.executable,str(source/'tests/test_signing.py')],check=True)
 
 subprocess.run([sys.executable,'-m','unittest','discover','-s',str(source/'tests'),'-p','test_reset_agents.py'],check=True)
 subprocess.run([sys.executable,'-m','unittest','discover','-s',str(source/'tests'),'-p','test_saved_queue.py'],check=True)
+subprocess.run([sys.executable,'-m','unittest','discover','-s',str(source/'tests'),'-p','test_worker_priority.py'],check=True)

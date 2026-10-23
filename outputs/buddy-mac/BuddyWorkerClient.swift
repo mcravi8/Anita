@@ -78,11 +78,12 @@ import AppKit
     static func call(support: URL, payload: [String: Any], timeout: Int = 8) async throws -> [String: Any] {
         try await withCheckedThrowingContinuation { c in DispatchQueue.global(qos: .utility).async { do { c.resume(returning: try BuddyWorkerWire.call(support: support, request: payload, timeout: timeout)) } catch { c.resume(throwing: error) } } }
     }
-    /// The worker's launch settings (~/Library/LaunchAgents/app.buddy.worker.plist). No ProcessType, so a normal-priority job: as a launchd
-    /// "Background" job every program an agent ran inherited background priority, and the user's S02a computation ran on the efficiency cores
-    /// while a third of the Mac sat idle (macOS cannot lift that from a program once it runs). install.py takes it out of an older file.
+    /// The worker's launch settings (~/Library/LaunchAgents/app.buddy.worker.plist). An "Interactive" job runs like an app, at normal priority,
+    /// and so does every program an agent starts. As a "Background" job they ran at background priority, and the user's S02a computation ran on
+    /// the efficiency cores while a third of the Mac sat idle (macOS cannot lift that from a program once it runs); a "Standard" job (no
+    /// ProcessType) still runs at utility priority, about three times slower for the same fit. install.py updates an older file.
     static func launchAgent(executable: URL, logs: URL) -> [String: Any] {
-        ["Label": "app.buddy.worker", "ProgramArguments": [executable.path, "--worker"], "RunAtLoad": true, "KeepAlive": ["SuccessfulExit": false], "ThrottleInterval": 30, "LimitLoadToSessionType": "Aqua", "StandardErrorPath": logs.appendingPathComponent("service-error.log").path, "Umask": 0o077]
+        ["Label": "app.buddy.worker", "ProgramArguments": [executable.path, "--worker"], "RunAtLoad": true, "KeepAlive": ["SuccessfulExit": false], "ThrottleInterval": 30, "ProcessType": "Interactive", "LimitLoadToSessionType": "Aqua", "StandardErrorPath": logs.appendingPathComponent("service-error.log").path, "Umask": 0o077]
     }
     static func start(support: URL, workspace: String) async throws -> [String: Any] {
         if let result = try? await call(support: support, payload: ["workspace": workspace, "operation": "status"]) { return result }

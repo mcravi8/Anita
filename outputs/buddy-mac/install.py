@@ -115,14 +115,15 @@ def ensure_idle():
 
 
 def full_priority(agent):
-    """Take the launchd "Background" setting out of the worker's launch settings, which an earlier Buddy wrote: every program an agent ran
-    inherited background priority (the S02a computation ran on the efficiency cores with a third of the Mac idle). True if the file changed."""
+    """Make the worker an "Interactive" launchd job, which runs like an app at normal priority, as do the programs agents start. An earlier
+    Buddy wrote "Background" (the S02a computation ran on the efficiency cores with a third of the Mac idle) or nothing ("Standard", which still
+    runs at utility priority). True if the file changed."""
     if not agent.exists():
         return False
     values = plistlib.loads(agent.read_bytes())
-    if 'ProcessType' not in values:
+    if values.get('ProcessType') == 'Interactive':
         return False
-    del values['ProcessType']
+    values['ProcessType'] = 'Interactive'
     agent.write_bytes(plistlib.dumps(values))
     os.chmod(agent, 0o600)
     return True

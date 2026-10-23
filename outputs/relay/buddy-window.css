@@ -9,5 +9,4 @@
 .buddy-native-window .shell.sidebar-compact .sidebar-header .icon-button,
 .buddy-native-window .shell.sidebar-compact .compact-chat-search{margin-top:var(--titlebar-inset,0px)}
 .buddy-native-window .main-shell,
-.buddy-native-window .project-dock,
 .buddy-native-window .modal.drawer{border-top:var(--titlebar-inset,0px) solid transparent}

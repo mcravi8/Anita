@@ -206,7 +206,25 @@
     const prior=attention(t.status)?state.messages[t.agentId].find(m=>m.workerTaskID===t.id&&attention(m.workerStatus)&&!m.workerDecision&&(m.workerAttempt===message.workerAttempt||m.id.startsWith(`worker-${t.id}-${message.workerAttempt}-`))):null;
     if(prior){if(prior.workerUpdatedAt&&prior.workerUpdatedAt>t.updatedAt)return false;Object.assign(prior,message);}else state.messages[t.agentId].push(message);return true;
   }
-  const api={labels,canResume,needsAllowance,pending,unconfirmed,authTitle,systemPause,signinWait,deliverable,deliveryID,deliverResult,taskMessage,presentation,isApproval,reviewRequest,requestTitle,plainRequest,supervisorWait,recordDecision,reconcile,reviewIds,setupOnce,accountLine,taskReceipts,browserUsers,savedSignins,runningNow,runLimitField};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
+  // Background work as the Work page lists it: one row per piece of work. The runs of one plan task (each dispatch is a new task) are one
+  // row, its latest run, with the earlier runs counted under it; other tasks are a row each. Rows that need the person come first, then what
+  // is running or waiting its turn, then what has finished. Within each, the newest first.
+  const NEEDS=new Set(['waiting_review','waiting_user','failed','interrupted']),RUNNING=new Set(['queued','starting','running','stopping','paused']);
+  function workGroups(tasks=[]){
+    const groups=new Map(),stamp=t=>Date.parse(t?.updatedAt||t?.createdAt||'')||0;
+    (Array.isArray(tasks)?tasks:[]).forEach((t,order)=>{
+      if(!t?.id)return;const key=t.planTaskId?'plan:'+t.planTaskId:'task:'+t.id;
+      const g=groups.get(key)||{key,runs:[]};g.runs.push({t,order});groups.set(key,g);
+    });
+    const rows=[...groups.values()].map(g=>{
+      const runs=g.runs.sort((a,b)=>stamp(b.t)-stamp(a.t)||b.order-a.order).map(r=>r.t),latest=runs[0];
+      const earlier=runs.slice(1),count=status=>earlier.filter(t=>t.status===status).length;
+      return {key:g.key,latest,earlier:earlier.length,finished:count('completed'),cancelled:count('cancelled'),
+        section:NEEDS.has(latest.status)?'needs':RUNNING.has(latest.status)?'running':'finished',at:stamp(latest)};
+    }).sort((a,b)=>b.at-a.at);
+    return {needs:rows.filter(r=>r.section==='needs'),running:rows.filter(r=>r.section==='running'),finished:rows.filter(r=>r.section==='finished')};
+  }
+  const api={workGroups,labels,canResume,needsAllowance,pending,unconfirmed,authTitle,systemPause,signinWait,deliverable,deliveryID,deliverResult,taskMessage,presentation,isApproval,reviewRequest,requestTitle,plainRequest,supervisorWait,recordDecision,reconcile,reviewIds,setupOnce,accountLine,taskReceipts,browserUsers,savedSignins,runningNow,runLimitField};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
   let snapshot={online:false,tasks:[],routines:[],paused:false},detail=null,view='list',routine=null,busy=false,error='',last='',preview=null;
   const drafts=new Map();
@@ -222,7 +240,32 @@
   function loadDraft(){try{return JSON.parse(localStorage.getItem(key()))||{};}catch{return {};}}
   const request=payload=>{if(!window.BuddyDesktop?.worker)throw Error('Open Buddy’s Mac app to use background work.');return window.BuddyDesktop.worker(payload);};
   const button=(op,label,extra='',primary=false)=>`<button type="button" class="${primary?'primary-button':'border-button'}" data-worker-op="${op}" ${extra} ${busy?'disabled':''}>${label}</button>`;
-  function shell(body){openDrawer('Background work',`<div class="worker-panel" data-worker-panel>${body}<p class="field-error" data-worker-error role="alert">${esc(error)}</p></div>`);document.querySelector('.modal.drawer')?.classList.add('worker-drawer');}
+  // Background work is a page of the app, not a side panel: each of its views (the list, a task, a routine, a form, the sign-ins) is drawn on
+  // it. A task opened from a chat (Review task, a receipt) or the sign-ins opened from Settings is a dialog over where the person is, so they
+  // answer it and stay there; its way back to the list goes to the page.
+  let pageBody='',where='page';
+  const onPage=()=>typeof ui!=='undefined'&&ui.view?.kind==='work';
+  const dialog=()=>where==='dialog'&&!onPage();
+  function shell(body){
+    pageBody=`<div class="worker-panel" data-worker-panel>${body}<p class="field-error" data-worker-error role="alert">${esc(error)}</p></div>`;
+    if(dialog()){openModal('Background work',pageBody);document.querySelector('#modal-root .modal')?.classList.add('worker-dialog');return;}
+    if(document.querySelector('#modal-root .modal-overlay'))closeModal();
+    if(onPage())paintPage();else navigate('work');
+  }
+  function paintPage(){
+    const layout=document.querySelector('.content-layout');if(!onPage()||!layout)return;
+    let page=layout.querySelector(':scope > [data-work-page]');
+    if(!page){layout.innerHTML=`<section class="center work-page" data-work-page aria-labelledby="work-page-title"><div class="page-scroll"><div class="work-page-inner"><div class="page-title-row"><div><h1 id="work-page-title" tabindex="-1">Background work</h1><p>What your team is doing on this Mac, one row for each piece of work.</p></div></div><div data-work-body></div></div></div></section>`;page=layout.querySelector(':scope > [data-work-page]');}
+    document.querySelectorAll('[data-action="background-work"].worker-nav').forEach(b=>b.setAttribute('aria-current','page'));
+    const at=page.querySelector('[data-work-body]');if(at._html===pageBody)return;
+    const scroller=page.querySelector('.page-scroll'),top=scroller.scrollTop,focus=at.contains(document.activeElement)?document.activeElement:null;
+    at.innerHTML=pageBody;at._html=pageBody;
+    // A redraw of the same view keeps its place; a new view starts at the top.
+    scroller.scrollTop=page.dataset.view===view?top:0;page.dataset.view=view;
+    if(focus&&!at.contains(focus))page.querySelector('h1')?.focus({preventScroll:true});
+  }
+  // The app draws the page's frame for any view it does not know; the page is put in it, as it was last drawn, or as the list.
+  window.addEventListener('buddy-view-updated',()=>{if(!onPage())return;if(pageBody)paintPage();else{view='list';list();refresh();}});
   function privateBanner(){
     const open=snapshot.privateBrowser;if(!open)return '';
     if(open.legacy)return `<section class="worker-private" role="status"><strong>An older private Chrome window may be open</strong><p>${who(open.agentId)} used it before every agent shared one Chrome. Close that window yourself, then press Done.</p>${button('finish-signin','Done','',true)}</section>`;
@@ -262,9 +305,18 @@
     else signins.note=reply?.error||'That didn’t remove it. Try again.';
     paintSignins();
   }
+  function workRow(r){
+    const t=r.latest,plan=(snapshot.plans||[]).find(p=>p?.id===t.planId),stage=(plan?.stages||[]).find(s=>s?.id===t.stageId);
+    const where=[agentName(t.agentId),t.kind==='coding'?'coding session':'',plan?(state.groups||[]).find(g=>g.id===plan.groupId)?.name||'':'',stage?`Stage ${stage.n}`:''].filter(Boolean).join(' · ');
+    const before=r.earlier?`<span class="work-earlier">${r.earlier} earlier ${r.earlier===1?'run':'runs'}${r.finished||r.cancelled?`: ${[r.finished?`${r.finished} finished`:'',r.cancelled?`${r.cancelled} cancelled`:''].filter(Boolean).join(', ')}`:''}</span>`:'';
+    const said=r.section!=='finished'&&t.progress?`<span class="work-progress">${esc(String(t.progress).slice(0,160))}</span>`:'';
+    return `<button class="work-row work-${r.section}" data-worker-task="${esc(t.id)}">${findAgent(t.agentId)?avatar(t.agentId):icon('spark')}<span class="work-copy"><strong>${esc(t.title)}</strong><small>${esc(where)}</small>${said}${before}</span><span class="work-status">${r.section==='finished'&&t.status==='completed'?icon('check'):''}${esc(labels[t.status]||t.status)}</span></button>`;
+  }
   function list(){
-    const tasks=[...snapshot.tasks].reverse();
-    shell(`<p class="worker-intro">A little work happening in the background.</p>${snapshot.scheduleError?`<p class="field-error" role="alert">${esc(snapshot.scheduleError)}</p>`:''}${privateBanner()}<div class="worker-toolbar"><span class="worker-state ${snapshot.online?'online':''}">${snapshot.online?(snapshot.paused?'Paused':'This Mac'):'Worker offline'}</span>${snapshot.online?button('new','New task','',true):button('start','Start worker','',true)}</div>${snapshot.online?runningNow({tasks:snapshot.tasks,running:snapshot.running,maxRunning:snapshot.maxRunning,agents:state.agents}):''}${tasks.length?`<div class="worker-list">${tasks.map(t=>`<button class="menu-row" data-worker-task="${esc(t.id)}">${findAgent(t.agentId)?avatar(t.agentId):icon('spark')}<span><strong>${esc(t.title)}</strong><small>${esc(agentName(t.agentId))} · ${esc(labels[t.status]||t.status)}</small></span>${icon(t.status==='completed'?'check':'chevron')}</button>`).join('')}</div>`:'<div class="worker-empty"><span>✦</span><h3>Leave something with your Buddy</h3><p>Research a topic, prepare an application, or handle an email.</p></div>'}${routineList()}<details class="worker-more"><summary>Worker settings${icon('down')}</summary>${snapshot.online?runLimitField(snapshot.maxRunning):''}<p>Uses a separate Chrome profile and task folders. The worker keeps running when you quit Buddy. This Mac needs to stay awake and online.</p><div class="worker-toolbar">${snapshot.online?button('pauseAll',snapshot.paused?'Resume queue':'Pause queue'):''}${button('refresh','Refresh')}${button('profiles','Browser sign-in')}</div><p>New tasks use the agent’s saved model. Manage connections and the starting provider for new agents in Settings.</p><button type="button" class="border-button" data-action="provider-settings">AI provider settings</button><p class="worker-caption">Credits are used before paid balance. Console funding and auto-reload settings determine what happens when credits run out.</p></details>`);
+    const groups=workGroups(snapshot.tasks),section=(name,title,rows)=>rows.length?`<section class="work-section work-section-${name}" aria-label="${title}"><h2>${title}<span>${rows.length}</span></h2><div class="work-rows">${rows.map(workRow).join('')}</div></section>`:'';
+    const any=groups.needs.length+groups.running.length+groups.finished.length;
+    const offline=snapshot.online?'':`<section class="work-offline" role="status"><p><strong>Background work is paused:</strong> Buddy’s worker isn’t running. Nothing is lost; each task continues where it stopped.</p>${button('start','Start worker','',true)}</section>`;
+    shell(`${offline}${snapshot.scheduleError?`<p class="field-error" role="alert">${esc(snapshot.scheduleError)}</p>`:''}${privateBanner()}${snapshot.online?`<div class="worker-toolbar"><span class="worker-state online">${snapshot.paused?'Paused':'This Mac'}</span>${button('new','New task','',true)}</div>${runningNow({tasks:snapshot.tasks,running:snapshot.running,maxRunning:snapshot.maxRunning,agents:state.agents})}`:''}${any?`${section('needs','Needs you',groups.needs)}${section('running','Running',groups.running)}${section('finished','Finished',groups.finished)}`:'<div class="worker-empty"><span>✦</span><h3>Leave something with your Buddy</h3><p>Research a topic, prepare an application, or handle an email.</p></div>'}${routineList()}<details class="worker-more"><summary>Worker settings${icon('down')}</summary>${snapshot.online?runLimitField(snapshot.maxRunning):''}<p>Uses a separate Chrome profile and task folders. The worker keeps running when you quit Buddy. This Mac needs to stay awake and online.</p><div class="worker-toolbar">${snapshot.online?button('pauseAll',snapshot.paused?'Resume queue':'Pause queue'):''}${button('refresh','Refresh')}${button('profiles','Browser sign-in')}</div><p>New tasks use the agent’s saved model. Manage connections and the starting provider for new agents in Settings.</p><button type="button" class="border-button" data-action="provider-settings">AI provider settings</button><p class="worker-caption">Credits are used before paid balance. Console funding and auto-reload settings determine what happens when credits run out.</p></details>`);
   }
   function routineList(){return `<details class="worker-more" ${(snapshot.routines||[]).some(r=>r.status==='needs_attention')?'open':''}><summary>Routines${(snapshot.routines||[]).length?` · ${snapshot.routines.length}`:''}${icon('down')}</summary>${(snapshot.routines||[]).map(r=>`<button class="menu-row" data-worker-routine="${esc(r.id)}">${findAgent(r.agentId)?avatar(r.agentId):icon('clock')}<span><strong>${esc(r.title)}</strong><small>${r.status==='active'?`Next ${esc(new Date(r.nextRun).toLocaleString())}`:r.status==='needs_attention'?'Needs attention':'Paused'}</small></span>${icon('chevron')}</button>`).join('')}<p>Ask a Buddy “run this every morning”, or set a time here. This Mac needs to be awake and online. Missed runs catch up once.</p>${button('new-routine','New routine')}</details>`;}
   function routineForm(r=null){
@@ -311,7 +363,7 @@
   function decided(task,r,verdict){if(recordDecision(state,task.id,{reviewId:r.id,title:requestTitle(r),verdict,by:'user'}))chatChanged();}
   function showError(e){error=String(e.message||e);const el=document.querySelector('[data-worker-error]');if(el)el.textContent=error;else showToast(error);}
   async function refresh(redraw=true){
-    const listKey=s=>JSON.stringify([s.online,s.paused,s.maxRunning,s.running,s.defaultProvider,s.privateBrowser?.agentId,s.privateBrowser?.taskId,s.tasks.map(t=>[t.id,t.title,t.agentId,t.status]),(s.routines||[]).map(r=>[r.id,r.status,r.nextRun])]);
+    const listKey=s=>JSON.stringify([s.online,s.paused,s.maxRunning,s.running,s.defaultProvider,s.privateBrowser?.agentId,s.privateBrowser?.taskId,s.tasks.map(t=>[t.id,t.title,t.agentId,t.status,t.progress||'']),(s.routines||[]).map(r=>[r.id,r.status,r.nextRun])]);
     try{const before=listKey(snapshot);snapshot=await request({operation:'status'});await deliverRoutineResults();error='';const message=document.querySelector('[data-worker-error]');if(message)message.textContent='';if(redraw&&document.querySelector('[data-worker-panel]')){if(view==='list'&&before!==listKey(snapshot))list();else if(view==='routine'&&routine&&before!==listKey(snapshot)){const r=snapshot.routines?.find(r=>r.id===routine.id);if(r)routineDetail(r);else{view='list';list();}}else if(view==='task'&&detail){const result=await request({operation:'detail',taskId:detail.id});detail=result.task;if(reconcile(state,detail))chatChanged();const live=document.querySelector('[data-worker-live]');if(live&&!(live.contains(document.activeElement)&&document.activeElement.matches('input,textarea,select'))&&last!==detailKey()){live.innerHTML=taskBody(detail);last=detailKey();}}}badge();window.BuddyActivity?.acceptWorker(snapshot);}
     catch(e){window.BuddyActivity?.workerError(e.message||e);const wasOnline=snapshot.online!==false;snapshot.online=false;if(redraw&&view==='list'){if(wasOnline)list();showError(e);}}
     // Whatever the poll found, the plan strip and the figures read it now rather than at the next full render.
@@ -352,9 +404,9 @@
   }
   function badge(){if(window.BuddyActivity){BuddyActivity.paint();return;}const count=snapshot.tasks.filter(t=>['waiting_review','waiting_user','failed','interrupted'].includes(t.status)).length+(snapshot.routines||[]).filter(r=>r.status==='needs_attention').length+(snapshot.scheduleError?1:0);document.querySelectorAll('[data-worker-badge]').forEach(el=>{el.textContent=count||'';el.hidden=!count;});}
   api.refresh=refresh;api.snapshot=()=>snapshot;api.request=request;api.pulse=()=>snapshot.pulse||{agents:{}};
-  api.open=async()=>{view='list';error='';list();await refresh();};
+  api.open=async()=>{where='page';view='list';error='';list();await refresh();};
   // The panel is drawn once more when both the worker and the saved sign-ins have answered, so a field opened after that is never redrawn away.
-  api.profiles=async()=>{view='profiles';error='';signins=freshSignins();profiles();const listed=loadSignins(false);try{snapshot=await request({operation:'start'});await listed;profiles();}catch(e){await listed;paintSignins();showError(e);}};
+  api.profiles=async()=>{where=onPage()?'page':'dialog';view='profiles';error='';signins=freshSignins();profiles();const listed=loadSignins(false);try{snapshot=await request({operation:'start'});await listed;profiles();}catch(e){await listed;paintSignins();showError(e);}};
   document.addEventListener('input',e=>{if(e.target.matches('[data-worker-update]')&&detail)drafts.set(detail.id,{...drafts.get(detail.id),update:e.target.value});if(e.target.matches('[data-worker-allowance]')&&detail)drafts.set(detail.id,{...drafts.get(detail.id),allowance:e.target.value,budgetAuthorizationID:undefined});const form=e.target.closest('#worker-new-form,#worker-routine-form');if(form){try{localStorage.setItem(key()+(form.id==='worker-routine-form'?'-routine':''),JSON.stringify({...Object.fromEntries(new FormData(form)),...(form.id==='worker-routine-form'?{weekdays:[...form.querySelectorAll('[name=weekday]:checked')].map(v=>Number(v.value))}:{})}));}catch{}}});
   // Run at once: the person's choice goes to the worker as it is made; the next free slot follows it.
   async function setRunLimit(value){if(busy)return;busy=true;error='';try{await request({operation:'maxRunning',value});await refresh();}catch(e){showError(e);}finally{busy=false;}}
@@ -378,7 +430,7 @@
     if(busy)return;busy=true;error='';
     try{
       if(routineEntry){const r=snapshot.routines?.find(r=>r.id===routineEntry.dataset.workerRoutine);if(r)routineDetail(r);}
-      else if(task){detail=(await request({operation:'detail',taskId:task.dataset.workerTask})).task;view='task';drawDetail();if(reconcile(state,detail))chatChanged();}
+      else if(task){if(!task.closest('[data-worker-panel]'))where=onPage()?'page':'dialog';detail=(await request({operation:'detail',taskId:task.dataset.workerTask})).task;view='task';drawDetail();if(reconcile(state,detail))chatChanged();}
       else if(file){preview=await request({operation:'preview',taskId:detail.id,path:file.dataset.workerFile});view='preview';shell(`${button('task-back','← Task')}<h3>${esc(preview.path)}</h3><div class="worker-document">${BuddyDocuments.preview(preview)}</div>`);}
       else {
         const operation=op.dataset.workerOp;
@@ -391,7 +443,7 @@
         else if(operation==='open-google'){await request({operation:'openGoogle'});await refresh(false);profiles();}
         else if(operation==='finish-signin'){const done=await request({operation:'finishSignIn'});await refresh(false);if(view==='profiles')profiles();else if(view==='task'){detail=(await request({operation:'detail',taskId:detail.id})).task;drawDetail();}else list();if(done?.finished===false&&done.note)showError(done.note);}
         else if(operation.startsWith('auth-')){const r=pending(detail).find(r=>r.id===op.dataset.reviewId&&r.kind==='authentication');if(!r)throw Error('This sign-in request ended. Refresh the task.');await request({operation:'review',taskId:detail.id,id:r.id,accept:operation!=='auth-decline',authAction:operation.slice(5)});await refresh();}
-        else if(operation==='back'){view='list';await refresh(false);list();}
+        else if(operation==='back'){where='page';view='list';await refresh(false);list();}
         else if(operation==='task-back'){view='task';drawDetail();}
         else if(operation==='refresh'){await refresh();}
         else if(operation==='connectClaude'||operation==='disconnectClaude'){await request({operation});await refresh();}
@@ -440,4 +492,6 @@
   // The page draws the open chat before this file has loaded, so its task messages were drawn without being read (an answered approval still
   // offered "Review task"). Draw them again now that they can be.
   if(typeof ui!=='undefined'&&ui.view?.kind==='chat'&&typeof refreshLiveChat==='function')refreshLiveChat(ui.view.target);
+  // Reopened on the Work page: the app drew its frame before this file loaded.
+  if(onPage()){view='list';list();}
 })(typeof globalThis!=='undefined'?globalThis:this);

@@ -58,9 +58,59 @@
 .plan-strip.docked .plan-error{padding:4px 0 6px 18px}
 .plan-strip.docked .plan-objective{margin-top:12px}
 .activity-note{display:block;margin-top:5px;font-size:11.5px;line-height:1.5;color:var(--warn)}
+
+/* Plan notices in the chat: a stage report, a decision, a stuck notice as cards, an authorization as one line. The card is the message, so the
+   bubble around it steps back. */
+.plan-card-message .bot-bubble{width:min(100%,640px);max-width:calc(100% - 35px);padding:0;background:transparent;border:0;box-shadow:none}
+.plan-card-message .bot-bubble>time{display:block;margin-top:6px}
+.plan-card-message .team-chat-author{margin-bottom:6px}
+.plan-card{display:flex;flex-direction:column;gap:12px;padding:16px 18px;border:1px solid var(--line);border-radius:var(--radius-card,18px);background:var(--card);color:var(--text);font-size:13.5px;line-height:1.5}
+.plan-card h3{margin:0;font-size:15.5px;line-height:1.35;font-weight:600;color:var(--text);overflow-wrap:anywhere}
+.plan-card p{margin:0;overflow-wrap:anywhere}
+.plan-card-head{display:flex;align-items:flex-start;gap:10px}
+.plan-card-head h3{flex:1;min-width:0}
+.plan-card-label{display:block;margin-bottom:4px;font:500 11.5px var(--sans);color:var(--text2)}
+.plan-card-summary{color:var(--text1)}
+.plan-card-rows{display:grid;grid-template-columns:minmax(80px,auto) minmax(0,1fr);gap:8px 14px;margin:0}
+.plan-card-rows dt{color:var(--text2);font-weight:500}
+.plan-card-rows dd{margin:0;color:var(--text1);overflow-wrap:anywhere}
+.plan-card-prose{color:var(--text1)}
+.plan-card-criteria{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.plan-card-criteria li{display:flex;align-items:flex-start;gap:8px;color:var(--text1);overflow-wrap:anywhere}
+.plan-card-check{flex-shrink:0;width:16px;height:16px;margin-top:2px;color:var(--ok)}
+.plan-card-open{flex-shrink:0;width:12px;height:12px;margin:4px 2px 0;border:1.5px solid var(--line-strong);border-radius:50%}
+.plan-card-files .saved-file-cards{margin-top:0}
+.plan-card-foot{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:4px -18px -16px;padding:12px 18px;border-top:1px solid var(--line);background:var(--soft);border-radius:0 0 var(--radius-card,18px) var(--radius-card,18px)}
+.plan-card-next{flex:1 1 220px;min-width:0;color:var(--text1);overflow-wrap:anywhere}
+.plan-card-next>span,.plan-card-note{color:var(--text2)}
+.plan-card-note{flex:1 1 200px;font-size:12.5px}
+.plan-card-settled{display:inline-flex;align-items:center;gap:6px;color:var(--ok);font-weight:500}
+.plan-card-answer{flex-basis:100%;color:var(--text1);overflow-wrap:anywhere}
+.plan-card-actions{display:flex;flex-wrap:wrap;gap:8px}
+.plan-card .primary-button,.plan-card .border-button{min-height:38px;padding:8px 16px;font-size:13px;font-weight:600}
+.plan-card .border-button{display:inline-flex;font-weight:500;color:var(--text)}
+.plan-card .small-link{min-height:38px;padding:0 6px;font-size:13px;color:var(--text1);text-decoration:underline;text-underline-offset:3px}
+.plan-card button:disabled{opacity:.5;cursor:default}
+.plan-card-badge{align-self:flex-start;display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;background:var(--soft);color:var(--text2);font-size:12px;font-weight:600}
+.plan-card-decision.open,.plan-card-stuck{border-color:var(--warn-line)}
+.plan-card-decision.open .plan-card-badge,.plan-card-stuck .plan-card-badge{background:var(--warn-bg);color:var(--warn)}
+.plan-card-decision.open .plan-card-badge::before,.plan-card-stuck .plan-card-badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.plan-card-advice{padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius-row,14px)}
+.plan-card-advice p{color:var(--text)}
+.plan-card-reply{display:flex;flex-direction:column;gap:8px}
+.plan-card-reply textarea{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--line-strong);border-radius:var(--radius-input,11px);background:var(--card);color:var(--text);font:inherit;resize:vertical}
+.plan-card-reply .primary-button{align-self:flex-start}
+.plan-status-line{display:flex;justify-content:center;margin:14px auto;max-width:560px;color:var(--text2);font-size:12.5px;line-height:1.5;text-align:center}
+.plan-status-line p{margin:0}
+.plan-status-line .plan-dot{display:inline-block;vertical-align:1px;margin-right:8px}
+.plan-status-line strong{color:var(--text1);font-weight:600}
+.plan-status-line time{margin-left:8px;font:400 11px var(--mono);color:var(--text2)}
+.plan-status-line .plan-dot{background:var(--ink)}
 @media (max-width:680px){
   .plan-strip-head{min-height:44px;padding:10px 12px}
   .plan-strip-body{max-height:50vh;padding:2px 12px 12px}
   .plan-strip .plan-authorize,.plan-actions .border-button{min-height:44px}
   .plan-stage-actions .small-link{min-height:44px}
+  .plan-card .primary-button,.plan-card .border-button,.plan-card .small-link{min-height:44px}
+  .plan-card-message .bot-bubble{max-width:calc(100% - 28px)}
 }

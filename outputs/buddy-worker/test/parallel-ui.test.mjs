@@ -37,7 +37,8 @@ test('Background work shows every task running now, and Run at once sends the pe
   const rows=await running.locator('[data-worker-task]').allInnerTexts();
   assert.equal(rows.length,2,'one row for each task running now');
   assert.match(rows[0],/Build the left half[\s\S]*Forge/);assert.match(rows[1],/Build the right half[\s\S]*Vera/);
-  assert.equal(await page.locator('.worker-list [data-worker-task]').count(),3,'the full list still has every task');
+  assert.equal(await page.locator('[data-work-page] .work-row').count(),3,'the full list still has every task, on the Background work page');
+  assert.equal(await page.locator('#modal-root .modal-overlay').count(),0,'a page, not a drawer');
   await page.locator('summary',{hasText:'Worker settings'}).click();
   const select=page.locator('[data-worker-max-running]');
   assert.equal(await select.inputValue(),'3');

@@ -1,48 +1,66 @@
-/* The project panel, docked to the right of the chat when the window has room: the plan and the files, as two tabs when there are both. The chat
-   column gives up the space; nothing covers it. The panel reads the theme's tokens (the drawer's card colour and hairlines), so light and dark
+/* Chat · Plan · Files: views of the conversation, chosen in the chat's floating header (the island). The view chosen takes the whole conversation
+   column under the header; the chat keeps its own width, and the plan and the files get the room of a page. Theme tokens only, so light and dark
    need nothing of their own. */
-.project-dock{flex:0 0 340px;width:340px;min-width:0;min-height:0;display:flex;justify-content:flex-start;overflow:hidden;background:var(--card);border-left:1px solid var(--line)}
-.project-dock-panel{flex:none;width:340px;min-height:0;display:flex;flex-direction:column}
-.project-dock-header{flex-shrink:0;display:flex;align-items:center;gap:10px;min-height:69px;padding:18px 14px 12px 20px;border-bottom:1px solid var(--line)}
-.project-dock-header h2{flex:1;min-width:0;margin:0;font-size:15px;font-weight:600;letter-spacing:-.2px;color:var(--text)}
-.project-dock-close{flex:none;width:32px;height:32px;margin-left:auto;border-radius:50%;color:var(--text3)}
-.project-dock-close:hover{color:var(--text);background:var(--soft)}
-.project-dock-body,.project-dock-section{flex:1;min-height:0;overflow-y:auto;padding:18px 20px 25px}
-.project-dock-section[hidden]{display:none}
-.project-dock:focus{outline:none}
-.project-dock:focus-visible{outline:2px solid var(--text3);outline-offset:-2px}
+.island .chat-views{flex:none;display:flex;gap:2px;margin:0 2px 0 4px;padding:3px;border-radius:999px;background:var(--soft)}
+.chat-view-tab{display:inline-flex;align-items:center;gap:6px;min-height:28px;margin:0;padding:0 12px;border:0;border-radius:999px;background:transparent;color:var(--text2);font-size:13px;font-weight:500;white-space:nowrap}
+.chat-view-tab:hover{color:var(--text)}
+.chat-view-tab[aria-selected="true"]{background:var(--card);color:var(--text);box-shadow:0 1px 2px rgb(20 20 20 / .1),0 0 0 1px var(--line)}
+.chat-view-tab:focus-visible{outline:2px solid var(--text3);outline-offset:1px}
+.chat-view-tab .plan-dot{width:7px;height:7px}
+.chat-view-tab.tone-working .plan-dot,.chat-view-tab.tone-done .plan-dot{background:var(--ok)}
+.chat-view-tab.tone-needs .plan-dot{background:var(--warn)}
+.chat-view-tab.tone-review .plan-dot{background:var(--info)}
+.chat-view-tab.tone-ready .plan-dot{background:var(--ink)}
 
-/* Plan | Files: a segmented pair, like the theme picker. The Plan tab carries the plan's live dot. */
-.project-dock-tabs{flex:1;min-width:0;display:flex;gap:2px;padding:3px;border-radius:999px;background:var(--soft)}
-.project-dock-tab{flex:1;min-width:0;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:30px;margin:0;padding:5px 12px;border:0;border-radius:999px;background:transparent;color:var(--text2);font-size:13px;font-weight:500;white-space:nowrap}
-.project-dock-tab:hover{color:var(--text)}
-.project-dock-tab[aria-selected="true"]{background:var(--card);color:var(--text);box-shadow:0 1px 2px rgb(20 20 20 / .1),0 0 0 1px var(--line)}
-.project-dock-tab:focus-visible{outline:2px solid var(--text3);outline-offset:1px}
-.project-dock-tab .plan-dot{width:7px;height:7px}
-.project-dock-tab.tone-working .plan-dot,.project-dock-tab.tone-done .plan-dot{background:var(--ok)}
-.project-dock-tab.tone-needs .plan-dot{background:var(--warn)}
-.project-dock-tab.tone-review .plan-dot{background:var(--info)}
-.project-dock-tab.tone-ready .plan-dot{background:var(--ink)}
+/* Another view shows: the messages and the composer stay in the page, out of sight, so nothing typed or streaming is lost. */
+.center.conversation[data-view-shown="plan"]>.chat-body,.center.conversation[data-view-shown="plan"]>.composer-wrap,
+.center.conversation[data-view-shown="files"]>.chat-body,.center.conversation[data-view-shown="files"]>.composer-wrap{display:none}
+.chat-pane{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:84px 32px 40px}
+.chat-pane:focus{outline:none}
+.chat-pane-inner{width:100%;max-width:820px;margin:0 auto}
+.chat-pane-title{margin:0 0 16px;font-size:20px;font-weight:600;letter-spacing:-.01em;color:var(--text);overflow-wrap:anywhere}
+.chat-pane .project-dock-body{padding:0}
 
-/* Closed: a round button at the right of the chat's header, the island's look, opens it again. */
-.center.conversation>.conversation-header>.project-dock-open{position:absolute;right:24px;top:14px;width:44px;height:44px;display:grid;place-items:center;padding:0;border:1px solid var(--line);border-radius:50%;background:var(--card);color:var(--text2);pointer-events:auto;box-shadow:0 6px 22px rgb(20 20 20 / .08),0 1px 2px rgb(20 20 20 / .05)}
-.center.conversation>.conversation-header>.project-dock-open:hover{color:var(--text);background:var(--soft)}
-.center.conversation>.conversation-header>.project-dock-open .icon{width:19px;height:19px}
-:root[data-theme=dark] .center.conversation>.conversation-header>.project-dock-open{box-shadow:0 6px 22px rgb(0 0 0 / .4),0 1px 2px rgb(0 0 0 / .3)}
+/* The plan as a page: the live line, the objective, then each stage as a card; the stage being worked on stands out. */
+.chat-pane .plan-strip.docked .plan-strip-head{padding:0 0 6px}
+.chat-pane .plan-strip.docked .plan-banner{font-size:15px;font-weight:600}
+.chat-pane .plan-objective{margin:14px 0 0;padding:16px 18px;border:1px solid var(--line);border-radius:var(--radius-card,18px);background:var(--card);font-size:14.5px;line-height:1.55}
+.chat-pane .plan-stages{margin-top:14px;gap:10px}
+.chat-pane .plan-stage{padding:16px 18px;border:1px solid var(--line);border-radius:var(--radius-card,18px);background:var(--card)}
+.chat-pane .plan-stage[data-stage-status="working"],.chat-pane .plan-stage[data-stage-status="review"]{border-color:var(--line-strong)}
+.chat-pane .plan-stage[data-stage-status="proposed"]{background:transparent;border-style:dashed}
+.chat-pane .plan-stage-head strong{font-size:15px}
+.chat-pane .plan-stage-goal{font-size:14px}
+.chat-pane .plan-done-when{font-size:13px}
+.chat-pane .plan-stage[data-stage-status="done"] .plan-done-when ul{list-style:none;padding-left:0}
+.chat-pane .plan-stage[data-stage-status="done"] .plan-done-when li::before{content:"✓";display:inline-block;width:18px;color:var(--ok);font-weight:600}
+.chat-pane .plan-tasks{margin-top:12px;gap:4px}
+.chat-pane .plan-task{min-height:44px;padding:4px 0;border-top:1px solid var(--line)}
+.chat-pane .plan-task-title{font-size:13.5px;font-weight:500}
+.chat-pane .plan-task-copy small{font-size:12px;color:var(--text2)}
+.chat-pane .plan-actions p{font-size:13px}
 
-/* Arriving, it slides in from the right like the side panels do, while the chat column gives up the room; closing, it slides back out with
-   the side panels' closing motion and the chat takes the room back. */
-@keyframes project-dock-open{from{flex-basis:0;width:0}}
-@keyframes project-dock-slide{from{transform:translateX(48px);opacity:0}}
-@keyframes project-dock-close{to{flex-basis:0;width:0}}
-@keyframes project-dock-slide-out{to{transform:translateX(48px);opacity:0}}
-.project-dock.dock-enter{animation:project-dock-open .42s cubic-bezier(.2,.8,.2,1) both}
-.project-dock.dock-enter>.project-dock-panel{animation:project-dock-slide .42s cubic-bezier(.2,.8,.2,1) both}
-.project-dock.dock-leave{pointer-events:none;animation:project-dock-close .32s cubic-bezier(.4,0,.2,1) both}
-.project-dock.dock-leave>.project-dock-panel{animation:project-dock-slide-out .32s cubic-bezier(.4,0,.2,1) both}
-/* Asked for with the folder button: its heading lights up briefly. */
-@keyframes project-dock-attention{from{background:var(--hover)}}
-.project-dock-header.dock-attention{animation:project-dock-attention .9s ease-out}
-@media(prefers-reduced-motion:reduce){
-  .project-dock.dock-enter,.project-dock.dock-enter>.project-dock-panel,.project-dock.dock-leave,.project-dock.dock-leave>.project-dock-panel,.project-dock-header.dock-attention{animation:none}
+/* The plan in the chat: one line above the composer, a segment per stage, that opens the plan view. */
+.stage-strip{display:flex;align-items:center;gap:12px;width:100%;min-height:44px;margin:0 0 10px;padding:8px 12px 8px 14px;border:1px solid var(--line);border-radius:var(--radius-row,14px);background:var(--card);color:var(--text);font:inherit;font-size:13px;text-align:left}
+.stage-strip:hover{background:var(--soft)}
+.stage-strip:focus-visible{outline:2px solid var(--line-strong);outline-offset:-2px}
+.stage-segs{flex:none;display:flex;gap:3px}
+.stage-seg{width:22px;height:6px;border-radius:3px;background:var(--track)}
+.stage-seg.done{background:var(--ok)}
+.stage-seg.now{background:var(--ink)}
+.stage-strip.tone-needs .stage-seg.now{background:var(--warn)}
+.stage-strip.tone-review .stage-seg.now{background:var(--info)}
+.stage-strip .plan-banner{flex:1;min-width:0;font-weight:500;line-height:1.4;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:1;overflow:hidden;overflow-wrap:anywhere}
+.stage-strip.tone-needs .plan-banner{color:var(--warn)}
+.stage-offline{flex:none;font-size:12px;color:var(--warn)}
+.stage-strip>.icon{flex:none;width:16px;height:16px;color:var(--text3)}
+
+@media(max-width:900px){
+  .chat-view-tab{padding:0 9px}
+  .chat-pane{padding:80px 20px 32px}
+}
+@media(max-width:680px){
+  .chat-view-tab{min-height:36px;font-size:12.5px}
+  .stage-segs{display:none}
+  .chat-pane{padding:76px 14px 28px}
 }

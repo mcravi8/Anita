@@ -346,7 +346,7 @@
   });
   document.addEventListener('keydown',e=>{
     const input=e.target.closest?.('[data-signin-input]');if(!input||e.key!=='Enter'||e.isComposing)return;
-    e.preventDefault();const holder=input.closest('[data-signin-holder]'),next=[...holder.querySelectorAll('[data-signin-input]')].find(i=>!i.value);
+    e.preventDefault();const holder=input.closest('[data-signin-holder]'),next=[...holder.querySelectorAll('[data-signin-input]')].find(i=>!i.value&&!i.closest('[hidden]'));
     if(next&&next!==input)next.focus();else send(holder.dataset.signinHolder);
   });
   document.addEventListener('change',e=>{

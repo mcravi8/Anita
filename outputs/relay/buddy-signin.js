@@ -198,7 +198,12 @@
     }
     return html;
   }
+  // Done or closed, the card leaves the chat; what came of the person's own answer is said once, as a toast (finish). An account Buddy created
+  // stays as its receipt: it is something new (the account, and where its password is kept), not the answer said again.
+  function finish(key,patch){settle(state,key,patch);if(['done','closed'].includes(patch.status)&&patch.result)showToast(patch.result);}
+  const created=m=>m.status==='done'&&m.request?.kind==='account'&&!!m.request?.receipt;
   function render(m){
+    if((m.status==='closed'||m.status==='done')&&!created(m))return '';
     const r=m.request||{},a=findAgent(r.agentId);if(!a)return '';
     const group=!!findGroup(ui.view.target),done=m.status==='closed'||m.status==='done';
     return `<div class="message bot-message signin-message ${done?'signin-ended':''}" data-signin-key="${esc(r.key||'')}">${group?avatar(a.id,true):''}<div class="bot-bubble signin-bubble">${group?`<button class="message-author" style="${authorColor(a)}" data-action="agent-info" data-id="${esc(a.id)}">${esc(a.name)}</button>`:''}${body(m)}<time>${esc(m.time||'')}</time></div></div>`;
@@ -219,7 +224,7 @@
     if(inputs.some(i=>!i.value)){(inputs.find(i=>!i.value)||inputs[0])?.focus();return;}
     // The field is emptied and let go before anything else happens; the value exists only in this call until the app has it.
     for(const i of inputs){i.value='';typing.delete(i.dataset.signinInput);}
-    busy.add(key);settle(state,key,{result:''});redraw();
+    busy.add(key);finish(key,{result:''});redraw();
     let reply;
     try{
       const signin=bridge();
@@ -229,10 +234,10 @@
     }catch(error){reply={sent:false,error:String(error?.message||error)};}
     finally{for(const k of Object.keys(values))values[k]='';busy.delete(key);}
     pinNext(key,reply);
-    if(r.kind==='credential')settle(state,key,reply?.saved?{status:'done',result:reply.resumed?`Saved — ${agentName(r.agentId)} is continuing.`:'Saved in your Keychain.'}:{result:reply?.error||'That didn’t save. Try again.'});
-    else if(reply?.signedIn)settle(state,key,{status:'done',result:'Sent — signed in'+(reply.remembered?`. Remembered for ${host(r.origin)}.`:'')});
-    else if(reply?.sent)settle(state,key,{result:reply.retry?'Sent — that didn’t work, try again':reply.chrome?'Sent — the website needs you in Buddy’s Chrome window.':'Sent — the website wants another step.',request:{reviewId:reply.reviewId,field:reply.field??null,note:reply.note,step:reply.step}});
-    else settle(state,key,{result:reply?.note||reply?.error||'That didn’t go through. Nothing was sent. Try again.',request:reply?.reviewId?{reviewId:reply.reviewId}:undefined});
+    if(r.kind==='credential')finish(key,reply?.saved?{status:'done',result:reply.resumed?`Saved — ${agentName(r.agentId)} is continuing.`:'Saved in your Keychain.'}:{result:reply?.error||'That didn’t save. Try again.'});
+    else if(reply?.signedIn)finish(key,{status:'done',result:'Sent — signed in'+(reply.remembered?`. Remembered for ${host(r.origin)}.`:'')});
+    else if(reply?.sent)finish(key,{result:reply.retry?'Sent — that didn’t work, try again':reply.chrome?'Sent — the website needs you in Buddy’s Chrome window.':'Sent — the website wants another step.',request:{reviewId:reply.reviewId,field:reply.field??null,note:reply.note,step:reply.step}});
+    else finish(key,{result:reply?.note||reply?.error||'That didn’t go through. Nothing was sent. Try again.',request:reply?.reviewId?{reviewId:reply.reviewId}:undefined});
     redraw();window.BuddyWorkerUI?.refresh?.(false);
   }
   async function choose(key,choice){
@@ -241,8 +246,8 @@
     try{
       if(!window.BuddyDesktop?.worker)throw Error('Open Buddy on this Mac to sign in.');
       await window.BuddyDesktop.worker({operation:'review',taskId:r.taskId,id:r.reviewId,accept:choice!=='decline',...(choice==='decline'?{}:{authAction:choice})});
-      settle(state,key,choice==='decline'?{status:'closed',result:`Not now. ${agentName(r.agentId)} won’t sign in.`}:{status:'sending',choice,result:choice==='saved'?'Trying your saved login…':choice==='verify'?'Getting the code from Gmail…':'Opening Buddy’s Chrome window…'});
-    }catch(error){settle(state,key,{result:String(error?.message||error)});}
+      finish(key,choice==='decline'?{status:'closed',result:`Not now. ${agentName(r.agentId)} won’t sign in.`}:{status:'sending',choice,result:choice==='saved'?'Trying your saved login…':choice==='verify'?'Getting the code from Gmail…':'Opening Buddy’s Chrome window…'});
+    }catch(error){finish(key,{result:String(error?.message||error)});}
     finally{busy.delete(key);}
     redraw();window.BuddyWorkerUI?.refresh?.(false);
   }
@@ -254,8 +259,8 @@
     catch(error){reply={done:false,note:String(error?.message||error)};}
     finally{busy.delete(key);}
     pinNext(key,reply);
-    if(reply?.done||reply?.signedIn)settle(state,key,{status:'done',result:`Done — ${agentName(r.agentId)} is continuing.`});
-    else settle(state,key,{result:reply?.note||'It isn’t finished yet. Finish the step, then press Done.',request:reply?.reviewId?{reviewId:reply.reviewId,field:reply.field??null,note:reply.note,step:reply.field?reply.field:'wait'}:{chromeOpen:reply?.reopened===true||r.chromeOpen}});
+    if(reply?.done||reply?.signedIn)finish(key,{status:'done',result:`Done — ${agentName(r.agentId)} is continuing.`});
+    else finish(key,{result:reply?.note||'It isn’t finished yet. Finish the step, then press Done.',request:reply?.reviewId?{reviewId:reply.reviewId,field:reply.field??null,note:reply.note,step:reply.field?reply.field:'wait'}:{chromeOpen:reply?.reopened===true||r.chromeOpen}});
     redraw();window.BuddyWorkerUI?.refresh?.(false);
   }
   // ✓ Create account (or Reset password) / ✗ Don't: through the sign-in bridge, the only way the app takes this answer.
@@ -267,8 +272,8 @@
     catch(error){reply={answered:false,error:String(error?.message||error)};}
     finally{busy.delete(key);}
     const site=host(r.origin);
-    if(reply?.answered)settle(state,key,allow?{status:'sending',choice:'account',result:working(r)}:{status:'closed',result:r.purpose==='reset'?`Not now. Buddy won’t reset your password on ${site}.`:`Not now. ${agentName(r.agentId)} won’t create an account on ${site}.`});
-    else settle(state,key,{result:reply?.error||'That didn’t go through. Try again.'});
+    if(reply?.answered)finish(key,allow?{status:'sending',choice:'account',result:working(r)}:{status:'closed',result:r.purpose==='reset'?`Not now. Buddy won’t reset your password on ${site}.`:`Not now. ${agentName(r.agentId)} won’t create an account on ${site}.`});
+    else finish(key,{result:reply?.error||'That didn’t go through. Try again.'});
     redraw();window.BuddyWorkerUI?.refresh?.(false);
   }
   // Skip on a sign-up Buddy stopped for money: the agent goes on without it.
@@ -279,7 +284,7 @@
     try{reply=await bridge()({action:'skip',taskId:r.taskId});}
     catch(error){reply={skipped:false,error:String(error?.message||error)};}
     finally{busy.delete(key);}
-    settle(state,key,reply?.skipped?{status:'done',result:`Skipped — ${agentName(r.agentId)} goes on without it.`}:{result:reply?.error||'That didn’t go through. Try again.'});
+    finish(key,reply?.skipped?{status:'done',result:`Skipped — ${agentName(r.agentId)} goes on without it.`}:{result:reply?.error||'That didn’t go through. Try again.'});
     redraw();window.BuddyWorkerUI?.refresh?.(false);
   }
   // The eye on a password field: shows what was typed, and hides it again.
@@ -293,15 +298,15 @@
     busy.add(key);redraw();
     // The step's own page goes with the request; the app opens it only if it is still that step's page.
     const page=stepPage(r);
-    try{await window.BuddyDesktop.worker({operation:'browser',taskId:r.taskId,...(page?{url:page}:{})});settle(state,key,{result:`Chrome is open at ${host(page)}. Finish there, then press Done.`,request:{chromeOpen:true}});}
-    catch(error){settle(state,key,{result:String(error?.message||error)});}
+    try{await window.BuddyDesktop.worker({operation:'browser',taskId:r.taskId,...(page?{url:page}:{})});finish(key,{result:`Chrome is open at ${host(page)}. Finish there, then press Done.`,request:{chromeOpen:true}});}
+    catch(error){finish(key,{result:String(error?.message||error)});}
     finally{busy.delete(key);}
     redraw();window.BuddyWorkerUI?.refresh?.(false);
   }
   // Done on a Duo push only acknowledges it: the message changes by itself when the command finishes. Its Needs item is put away too.
   function acknowledge(key){
     const r=request(key);if(!r)return;
-    settle(state,key,{acknowledged:true});
+    finish(key,{acknowledged:true});
     const [,task,command]=String(r.key).split(':'),id=`decision:mfa:${task}:${command||''}`;
     window.BuddyActivity?.markRead?.(state,[id]);window.BuddyActivity?.dismiss?.(state,[id]);
     try{window.BuddyDesktop?.worker?.({operation:'notify',ids:[id],read:true,dismissed:true});}catch{}

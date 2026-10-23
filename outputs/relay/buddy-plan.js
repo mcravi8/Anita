@@ -197,16 +197,13 @@
     }
     if(kind==='escalation'){
       const question=String(refs.question||text.replace(/\s*My recommendation:[\s\S]*$/,'')).trim(),recommendation=String(refs.recommendation||'').trim();
-      const what=CATEGORY[refs.category],status=notice?.status||'open',answer=String(refs.answer||'').trim();
+      const what=CATEGORY[refs.category],status=notice?.status||'open';
+      // Answered (or withdrawn), a question leaves the chat: only one still waiting on the person is drawn.
+      if(status!=='open')return {hidden:true};
       const advice=recommendation?`<div class="plan-card-advice"><span class="plan-card-label">${esc(message.whoName||'Chief')} recommends</span><p>${esc(recommendation)}</p></div>`:'';
-      let foot;
-      if(status==='answered')foot=`<div class="plan-card-foot"><span class="plan-card-settled">${check}You answered</span>${answer?`<span class="plan-card-answer">${esc(short(answer,220))}</span>`:''}</div>`;
-      else if(status!=='open')foot='';
-      else{
-        const open=!!reply?.open,id=esc(notice?.id||'');
-        foot=`<div class="plan-card-foot plan-card-decide">${recommendation?`<button type="button" class="primary-button" data-plan-answer="approve" data-notice="${id}"${off}>Approve</button><button type="button" class="border-button" data-plan-answer="disapprove" data-notice="${id}"${off}>Disapprove</button>`:''}<button type="button" class="${recommendation?'small-link':'primary-button'}" data-plan-answer="reply" data-notice="${id}" aria-expanded="${open}"${off}>Reply</button><span class="plan-card-note">The team keeps working on the rest meanwhile.</span></div>${open?`<form class="plan-card-reply" data-plan-reply="${id}"><label><span class="plan-card-label">Your answer</span><textarea rows="3" maxlength="2000" data-plan-reply-text="${id}">${esc(reply?.draft||'')}</textarea></label><button type="submit" class="primary-button"${off}>Send answer</button></form>`:''}`;
-      }
-      return {label:'Decision',html:`<article class="plan-card plan-card-decision${status==='open'?' open':''}"><span class="plan-card-badge">${status==='open'?`Needs your decision${what?` · ${esc(what)}`:''}`:'Your decision'}</span><h3>${esc(question)}</h3>${advice}${foot}</article>`};
+      const open=!!reply?.open,id=esc(notice?.id||'');
+      const foot=`<div class="plan-card-foot plan-card-decide">${recommendation?`<button type="button" class="primary-button" data-plan-answer="approve" data-notice="${id}"${off}>Approve</button><button type="button" class="border-button" data-plan-answer="disapprove" data-notice="${id}"${off}>Disapprove</button>`:''}<button type="button" class="${recommendation?'small-link':'primary-button'}" data-plan-answer="reply" data-notice="${id}" aria-expanded="${open}"${off}>Reply</button><span class="plan-card-note">The team keeps working on the rest meanwhile.</span></div>${open?`<form class="plan-card-reply" data-plan-reply="${id}"><label><span class="plan-card-label">Your answer</span><textarea rows="3" maxlength="2000" data-plan-reply-text="${id}">${esc(reply?.draft||'')}</textarea></label><button type="submit" class="primary-button"${off}>Send answer</button></form>`:''}`;
+      return {label:'Decision',html:`<article class="plan-card plan-card-decision open"><span class="plan-card-badge">Needs your decision${what?` · ${esc(what)}`:''}</span><h3>${esc(question)}</h3>${advice}${foot}</article>`};
     }
     if(kind==='stuck')return {label:'Stuck',html:`<article class="plan-card plan-card-stuck"><span class="plan-card-badge">The team is stuck</span><p>${esc(text.replace(/\s*Tell me how to proceed\.?\s*$/,''))}</p><div class="plan-card-foot"><button type="button" class="primary-button" data-plan-answer="chat">Tell ${esc(message.whoName||'Chief')} how to go on</button></div></article>`};
     return null;
@@ -364,7 +361,7 @@
   async function answer(plan,noticeId,text){
     const said=String(text||'').trim().slice(0,2000);if(!said)return;
     await send(plan,{action:'answer',planId:plan.id,escalationId:noticeId,answer:said,quote:said});
-    if(!failures.has(plan.id))replies.delete(noticeId);
+    if(!failures.has(plan.id)){replies.delete(noticeId);showToast(`Sent to ${(typeof findAgent==='function'&&findAgent(plan.supervisorId)?.name)||'Chief'}.`);}
     redrawCards(true);
   }
   // The cards in the chat follow the plan: a stage started, a question answered, buttons off while a tap is on its way.
@@ -440,6 +437,7 @@
       const files=deliverablesOf(m),agent=typeof findAgent==='function'?findAgent(m.who):null,group=!!agent&&typeof findGroup==='function'&&!!findGroup(ui.view?.target);
       const plan=current().plans.find(p=>p?.id===m.planId),noticeId=String(m.id||'').replace(/^plan-notice-/,'');
       const card=plan?noticeCard(plan,{...m,whoName:agent?.name},{filesHTML:root.BuddyFiles?.cards?.(files)||'',markdown:s=>BuddyMarkdown.render(s),busy,reply:replies.get(noticeId)}):null;
+      if(card?.hidden)return '';
       if(card?.line)return `<div class="message plan-status-line" data-plan-card="${esc(plan.id)}"><p><span class="plan-dot" aria-hidden="true"></span>${card.html}${m.time?`<time>${esc(m.time)}</time>`:''}</p></div>`;
       if(card){
         const author=group?(typeof authorColor==='function'?`<button type="button" class="message-author" style="${authorColor(agent)}" data-action="agent-info" data-id="${esc(agent.id)}">${esc(agent.name)}</button>`:`<strong>${esc(agent.name)}</strong>`):'';

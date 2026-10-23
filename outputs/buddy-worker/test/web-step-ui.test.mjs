@@ -61,7 +61,7 @@ test('a CAPTCHA or a sign-in on a web page names the site and the account, Open 
   assert.equal(await message.getByRole('button',{name:'Open the page'}).count(),1,'and stays, to show the page again');
   await page.evaluate(()=>{replies.done=[{done:true,checked:false}];});
   await message.getByRole('button',{name:'Done'}).click();
-  await message.getByText('Done — Chief is continuing.').waitFor();
+  await message.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Done — Chief is continuing.'}).waitFor();
   assert.deepEqual(await page.evaluate(()=>calls),[{action:'done',taskId:'t1'}]);
   // A sign-in for the task's account says the account in its title.
   const signin={key:'step:t2:c1',kind:'step',taskId:'t2',agentId:'chief',need:'signin',url:'https://mail.google.com/mail/',origin:'https://mail.google.com',account:'craviott@usc.edu',instruction:'Sign in to craviott@usc.edu in Buddy’s Chrome, then press Done.',chromeOpen:false};
@@ -88,7 +88,7 @@ test('a coding task’s blocked download asks to save the file from that page in
   assert.deepEqual(await page.evaluate(()=>ops.filter(o=>o.operation==='browser')),[{operation:'browser',taskId:'t3',url:ARTICLE}]);
   await page.evaluate(()=>{replies.done=[{done:true,checked:false}];});
   await message.getByRole('button',{name:'Done'}).click();
-  await message.getByText('Done — Chief is continuing.').waitFor();
+  await message.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Done — Chief is continuing.'}).waitFor();
   assert.deepEqual(await page.evaluate(()=>calls),[{action:'done',taskId:'t3'}]);
   assert.deepEqual(errors,[]);
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}

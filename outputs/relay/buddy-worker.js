@@ -18,8 +18,9 @@
   // message of its own there (buddy-signin.js); the task's own message would only say it again.
   // An account an agent wants Buddy to create (or a password to reset) is asked in the chat too, and so is a sign-up stopped for money.
   const signinWait=t=>t?.status==='waiting_review'&&pending(t).length>0&&pending(t).every(r=>r.kind==='authentication'||r.kind==='account')||t?.status==='waiting_user'&&t.stopCause!=='review.parked'&&['signin','captcha','verification','credential','file','payment'].includes(t.checkpoint?.need);
-  // A coding command waiting on the team supervisor's review is the supervisor's to answer, not the person's: it posts nothing in the chat.
-  const supervisorWait=t=>t?.status==='waiting_review'&&pending(t).length>0&&pending(t).every(r=>r.route==='supervisor');
+  // A coding command waiting on the team supervisor's review is the supervisor's to answer, not the person's: it posts nothing in the chat. So
+  // is a question a task put to its supervisor (a checkpoint sent to Chief, "Waiting for Chief: …"): it is not a detail the person owes.
+  const supervisorWait=t=>t?.status==='waiting_review'&&pending(t).length>0&&pending(t).every(r=>r.route==='supervisor')||t?.status==='waiting_user'&&t.stopCause==='checkpoint.supervisor';
   const deliverable=t=>(['completed','failed','interrupted','waiting_review','waiting_user'].includes(t?.status)||systemPause(t))&&t?.quiet!==true&&!signinWait(t)&&!supervisorWait(t);
   const deliveryID=t=>`worker-${t.id}-${Number(t.attempt)||0}-${t.status}${['waiting_review','waiting_user'].includes(t.status)?'-'+encodeURIComponent(t.attentionKey||t.progress||''):''}`;
   const attention=status=>['waiting_review','waiting_user'].includes(status);
@@ -83,7 +84,8 @@
     if(t.status==='waiting_review')return 'I need your approval to continue.';
     if(t.status==='waiting_user'&&(/private|sign.?in/i.test(t.progress||'')||t.signInOrigin))return 'Please sign in in Buddy’s Chrome window, then press Done.';
     const progress=String(t.progress||'').split('\n')[0].trim();
-    const brief=progress.length<=160&&!/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b|\b\d\d:\d\d:\d\dZ\b/i.test(progress)?progress:'';
+    // A line the worker writes while a task runs ("Working on your request") says nothing about what the task is waiting for.
+    const brief=progress.length<=160&&!/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b|\b\d\d:\d\d:\d\dZ\b/i.test(progress)&&!/^(Queued|Working on (your request|the website))\.?$/i.test(progress)?progress:'';
     if(t.status==='waiting_user')return brief||'I need a detail from you to continue.';
     if(t.status==='completed')return t.result;
     if(t.status==='paused'){const why=brief.replace(/^paused[:.]?\s*/i,'');return `**${String(t.title||'This task').slice(0,90)}** is paused. ${why?why[0].toUpperCase()+why.slice(1):'Open the task for details.'}`;}
@@ -185,16 +187,19 @@
     }
     return changed;
   }
-  function presentation(state,m){
+  // An approval or a question is in the chat only while it waits on the person. Once it is answered (on the task's page, or by the supervisor),
+  // or its task has moved on (it runs again, was cancelled or finished, or now waits on the supervisor), it leaves the chat; the task's page
+  // keeps what was decided, and the message keeps it too (its body is the decision line). `tasks` are the tasks as the worker's last status
+  // listed them, or null when that is not known: a waiting message then stays until a newer one about its task arrives.
+  function presentation(state,m,tasks=tasksNow(state)){
     if(!m.workerTaskID)return {body:m.body,hidden:false};
-    const d=m.workerDecision;
-    if(d){
-      const line=decisionLine(d),reason=d.reason?`${plain(d.byName)||(d.by==='supervisor'?'The supervisor':'You')}: ${d.reason}`:'';
-      return {body:line,hidden:false,link:false,decided:true,tooltip:[line.replace(/`/g,''),reason].filter(Boolean).join('\n'),...(reason?{details:reason}:{})};
-    }
-    const messages=state.messages[m.who]||[],index=messages.indexOf(m);
-    const superseded=attention(m.workerStatus)&&index>=0&&messages.slice(index+1).some(n=>n.workerTaskID===m.workerTaskID);
-    return {body:attention(m.workerStatus)?taskMessage({status:m.workerStatus,progress:m.body}):m.body,hidden:superseded};
+    if(m.workerDecision)return {body:decisionLine(m.workerDecision),hidden:true,decided:true};
+    const messages=state.messages[m.who]||[],index=messages.indexOf(m),asks=attention(m.workerStatus);
+    const superseded=asks&&index>=0&&messages.slice(index+1).some(n=>n.workerTaskID===m.workerTaskID);
+    const t=asks&&Array.isArray(tasks)?tasks.find(x=>x?.id===m.workerTaskID):null;
+    const sameRun=t&&(typeof m.workerAttempt!=='number'||(Number(t.attempt)||0)===m.workerAttempt);
+    const moved=asks&&Array.isArray(tasks)&&!(sameRun&&t.status===m.workerStatus&&deliverable(t));
+    return {body:asks?taskMessage({status:m.workerStatus,progress:m.body}):m.body,hidden:superseded||moved};
   }
   function deliverResult(state,t){
     if(!t||t.workspace!==state.conversationWorkspace||!state.agents.some(a=>a.id===t.agentId)||!deliverable(t))return false;
@@ -224,9 +229,30 @@
     }).sort((a,b)=>b.at-a.at);
     return {needs:rows.filter(r=>r.section==='needs'),running:rows.filter(r=>r.section==='running'),finished:rows.filter(r=>r.section==='finished')};
   }
+  // The tasks the worker's last status listed, for the chat's waiting messages (set by the page below; null in a test, or before it is known).
+  let tasksNow=()=>null;
   const api={workGroups,labels,canResume,needsAllowance,pending,unconfirmed,authTitle,systemPause,signinWait,deliverable,deliveryID,deliverResult,taskMessage,presentation,isApproval,reviewRequest,requestTitle,plainRequest,supervisorWait,recordDecision,reconcile,reviewIds,setupOnce,accountLine,taskReceipts,browserUsers,savedSignins,runningNow,runLimitField};root.BuddyWorkerUI=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
   let snapshot={online:false,tasks:[],routines:[],paused:false},detail=null,view='list',routine=null,busy=false,error='',last='',preview=null;
+  tasksNow=s=>snapshot.online===true&&Array.isArray(snapshot.tasks)&&(!snapshot.workspace||snapshot.workspace===s?.conversationWorkspace)?snapshot.tasks:null;
+  // The chat list's line under a name reads the latest message still in the chat: a request that has left it (answered, or its task moved
+  // on) is not what the chat says now. chatSummary (app.js) reads the chat's messages from the workspace, so for that one call it is handed
+  // them without the trailing ones that draw nothing.
+  if(typeof window.chatSummary==='function'){
+    const summary=window.chatSummary;
+    window.chatSummary=function(target){
+      const list=state.messages?.[target];if(!Array.isArray(list)||typeof window.messageHTML!=='function')return summary.apply(this,arguments);
+      let end=list.length;while(end>0&&list[end-1]?.who&&!window.messageHTML(list[end-1]))end--;
+      if(end===list.length)return summary.apply(this,arguments);
+      state.messages[target]=list.slice(0,end);try{return summary.apply(this,arguments);}finally{state.messages[target]=list;}
+    };
+  }
+  // A poll can settle what a waiting message asked (its task moved on): the open chat drops the message then, not at its next redraw.
+  window.addEventListener('buddy-worker-snapshot',()=>{
+    if(typeof ui==='undefined'||ui.view?.kind!=='chat'||typeof refreshLiveChat!=='function')return;
+    const drawn=new Set([...document.querySelectorAll('#messages > [data-chat-item]')].map(e=>e.dataset.chatItem));
+    if((state.messages[ui.view.target]||[]).some(m=>m?.workerTaskID&&attention(m.workerStatus)&&drawn.has(m.id)&&presentation(state,m).hidden))refreshLiveChat(ui.view.target);
+  });
   const drafts=new Map();
   // Saved sign-ins (Browser sign-in): the page knows only which are saved. What is typed lives in its field alone, until Save hands it to the
   // app's sign-in bridge; it never goes into the workspace, drafts, browser storage or the worker bridge.

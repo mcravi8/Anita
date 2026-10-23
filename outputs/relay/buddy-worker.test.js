@@ -178,24 +178,24 @@ test('what was asked is named in one short line',()=>{
  for(const r of [commandReview,browserReview,{tool:{name:'A '.repeat(200)}},{tool:{arguments:{command:'x'.repeat(5000)}}}]){const line=worker.requestTitle(r);assert.equal(line.includes('\n'),false);assert.ok(line.length<=80,line);}
 });
 
-test('the approval message in the chat changes to what was decided, in place, and stays that way after a reload',()=>{
+test('an answered approval leaves the chat, and its message keeps what was decided, also after a reload',()=>{
  const s={conversationWorkspace:'w',agents:[{id:'coder'}],messages:{}},t={id:'code',kind:'coding',workspace:'w',agentId:'coder',title:'Fetch the S&P history',status:'waiting_review',attempt:1,progress:'A coding command needs network access',attentionKey:'cmd',updatedAt:'2026-10-20T10:00:00Z',reviews:[commandReview]};
  assert.equal(worker.deliverResult(s,t),true);
  const m=s.messages.coder[0];assert.equal(worker.presentation(s,m).body,'I need your approval to continue.');assert.notEqual(worker.presentation(s,m).link,false,'the Review task link is there while it waits');
  assert.equal(worker.recordDecision(s,'code',{reviewId:'cmd',title:worker.requestTitle(commandReview),verdict:'approved',by:'user'}),true);
  assert.equal(s.messages.coder.length,1,'the same message, not a second one');
- assert.equal(worker.presentation(s,m).body,'Request to run `curl … data/SPX_History.csv` — approved');assert.equal(worker.presentation(s,m).link,false,'Review task goes away');
+ assert.equal(worker.presentation(s,m).hidden,true,'answered, it leaves the chat');assert.equal(worker.presentation(s,m).body,'Request to run `curl … data/SPX_History.csv` — approved');
  assert.equal(m.body,'Request to run `curl … data/SPX_History.csv` — approved','the chat list preview reads it too');
- const reloaded=JSON.parse(JSON.stringify(s));assert.equal(worker.presentation(reloaded,reloaded.messages.coder[0]).body,'Request to run `curl … data/SPX_History.csv` — approved');
+ const reloaded=JSON.parse(JSON.stringify(s));assert.equal(worker.presentation(reloaded,reloaded.messages.coder[0]).body,'Request to run `curl … data/SPX_History.csv` — approved');assert.equal(worker.presentation(reloaded,reloaded.messages.coder[0]).hidden,true);
  assert.equal(worker.recordDecision(s,'code',{reviewId:'cmd',title:'x',verdict:'disapproved',by:'user'}),false,'answered once');
- // The next approval in the same run gets its own message; the decided one stays as the record.
+ // The next approval in the same run gets its own message; the decided one keeps its record.
  const next={...commandReview,id:'cmd2',tool:{...commandReview.tool,arguments:{command:'npm test'}}};
  assert.equal(worker.deliverResult(s,{...t,attentionKey:'cmd2',updatedAt:'2026-10-20T10:01:00Z',reviews:[{...commandReview,status:'answered'},next]}),true);
  assert.equal(s.messages.coder.length,2);assert.equal(worker.presentation(s,s.messages.coder[0]).body,'Request to run `curl … data/SPX_History.csv` — approved');
  assert.equal(worker.recordDecision(s,'code',{reviewId:'cmd2',title:worker.requestTitle(next),verdict:'disapproved',by:'user'}),true);
  assert.equal(worker.presentation(s,s.messages.coder[1]).body,'Request to run `npm test` — disapproved');
  assert.equal(worker.deliverResult(s,{...t,status:'completed',result:'Saved the history.',updatedAt:'2026-10-20T10:02:00Z'}),true);
- assert.deepEqual(s.messages.coder.map(m=>worker.presentation(s,m).hidden),[false,false,false],'decisions stay in the chat after the result arrives');
+ assert.deepEqual(s.messages.coder.map(m=>worker.presentation(s,m).hidden),[true,true,false],'what was asked has left; the result is what stays');
 });
 
 test('a message saved before review ids were kept still finds its review from its delivery id',()=>{
@@ -212,7 +212,8 @@ test('an answer the supervisor gave is read from the review record, with its rea
  assert.equal(worker.presentation(s,s.messages.coder[0]).body,'I need your approval to continue.');
  assert.equal(worker.reconcile(s,{...t,status:'running',reviews:[{...commandReview,status:'answered',answeredBy:'supervisor',answeredByName:'Chief',answerReason:'A read-only download of public prices.',answeredAt:'2026-10-20T10:00:30Z'}]}),true);
  const p=worker.presentation(s,s.messages.coder[0]);
- assert.equal(p.body,'Request to run `curl … data/SPX_History.csv` — approved by Chief');assert.match(p.details,/A read-only download of public prices\./);assert.equal(p.link,false);
+ assert.equal(p.body,'Request to run `curl … data/SPX_History.csv` — approved by Chief');assert.equal(p.hidden,true,'answered by Chief, it leaves the chat');
+ assert.equal(s.messages.coder[0].workerDecision.reason,'A read-only download of public prices.','the message keeps why');
  assert.equal(worker.reconcile(s,{...t,status:'running',reviews:[{...commandReview,status:'answered',answeredBy:'supervisor',answeredByName:'Chief',answerReason:'A read-only download of public prices.'}]}),false,'nothing new, nothing changed');
  const s2={conversationWorkspace:'w',agents:[{id:'coder'}],messages:{}};worker.deliverResult(s2,t);
  assert.equal(worker.reconcile(s2,{...t,status:'running',reviews:[{...commandReview,status:'cancelled',answeredBy:'supervisor',answeredByName:'Chief',answerReason:'It writes outside the project.'}]}),true);
@@ -300,4 +301,25 @@ test('the Work page has one row per piece of work: a plan task’s runs are one 
  assert.deepEqual(g.finished.map(r=>r.latest.id),['c1']);
  assert.deepEqual(worker.workGroups([]),{needs:[],running:[],finished:[]});
  assert.deepEqual(worker.workGroups([{title:'no id'},null]),{needs:[],running:[],finished:[]},'only real tasks count');
+});
+
+test('a waiting approval or question stays in the chat only while its task still waits on the person',()=>{
+ const s={conversationWorkspace:'w',agents:[{id:'forge'}],messages:{}},t={id:'job',workspace:'w',agentId:'forge',title:'Run S02c',status:'waiting_user',attempt:2,progress:'Which RunPod account should I use?',updatedAt:'2026-10-23T21:30:00Z'};
+ assert.equal(worker.deliverResult(s,t),true);const m=s.messages.forge[0];
+ const shown=tasks=>!worker.presentation(s,m,tasks).hidden;
+ assert.equal(shown(null),true,'with no status yet it stays');
+ assert.equal(shown([{...t}]),true,'while the task waits on the person');
+ assert.equal(shown([{...t,status:'running'}]),false,'answered: the task runs again');
+ assert.equal(shown([{...t,status:'cancelled'}]),false,'the task was cancelled');
+ assert.equal(shown([{...t,status:'completed'}]),false);
+ assert.equal(shown([{...t,attempt:3}]),false,'a newer run of the task is not what this asked');
+ assert.equal(shown([]),false,'a task the worker no longer lists waits on no one');
+ assert.equal(shown([{...t,stopCause:'checkpoint.supervisor',progress:'Waiting for Chief: Which RunPod path?'}]),false,'a question for Chief is not the person’s');
+ assert.equal(worker.deliverable({...t,stopCause:'checkpoint.supervisor'}),false,'and posts nothing in the chat');
+});
+
+test('a task waiting on the person never shows the worker’s running line as what it needs',()=>{
+ assert.equal(worker.taskMessage({status:'waiting_user',progress:'Working on your request'}),'I need a detail from you to continue.');
+ assert.equal(worker.taskMessage({status:'waiting_user',progress:'Queued'}),'I need a detail from you to continue.');
+ assert.equal(worker.taskMessage({status:'waiting_user',progress:'Which RunPod account should I use?'}),'Which RunPod account should I use?');
 });

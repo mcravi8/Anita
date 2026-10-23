@@ -121,7 +121,7 @@ test('a wrong password says “that didn’t work” and keeps the field for the
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
 });
 
-test('a step done in Buddy’s Chrome window ends with Done: still unfinished says so and keeps the button; finished continues; a Duo push is acknowledged and clears by itself',{skip,timeout:90000},async()=>{
+test('a step done in Buddy’s Chrome window ends with Done: still unfinished says so and keeps the button; finished, it leaves the chat; a Duo push is acknowledged and leaves by itself',{skip,timeout:90000},async()=>{
  const directory=await mkdtemp(path.join(tmpdir(),'buddy-signin-done-'));let context;
  try{
   const opened=await open(directory);context=opened.context;const {page,errors}=opened;
@@ -135,9 +135,9 @@ test('a step done in Buddy’s Chrome window ends with Done: still unfinished sa
   await message.getByText(/It still isn’t finished/).waitFor();
   assert.equal(await message.getByRole('button',{name:'Done'}).isEnabled(),true,'the Done button stays');
   await message.getByRole('button',{name:'Done'}).click();
-  await message.getByText('Done — Ada is continuing.').waitFor();
+  await message.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Done — Ada is continuing.'}).waitFor();
   assert.deepEqual(await page.evaluate(()=>calls),[{action:'done',taskId:'t2'},{action:'done',taskId:'t2'}]);
-  assert.equal(await message.getByRole('button').count(),0,'nothing left to press');
+  assert.equal(await message.count(),0,'done, the request has left the chat');
   // The Needs item opens this chat at the request.
   await page.evaluate(()=>navigate('chat','bo'));
   await page.getByRole('button',{name:/^Notifications:/}).click();
@@ -151,7 +151,7 @@ test('a step done in Buddy’s Chrome window ends with Done: still unfinished sa
   await push.getByText('Thanks. This updates by itself when the command finishes.').waitFor();
   assert.deepEqual(await page.evaluate(()=>ops.filter(o=>o.operation==='notify').at(-1)),{operation:'notify',ids:['decision:mfa:t3:cmd1'],read:true,dismissed:true},'its Needs item is put away');
   await snapshot(page,{tasks:[{id:'t3',agentId:'ada',title:'Extract',status:'completed',updatedAt:'2026-10-20T09:01:00Z'}],signinRequests:[],decisions:[]});
-  await push.getByText('The WRDS step is over.').waitFor();
+  await push.waitFor({state:'detached'});   // the command ended: the request leaves the chat
   assert.deepEqual(errors,[]);
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
 });

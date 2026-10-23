@@ -82,7 +82,9 @@
     html+=`<small class="access-assurance">Asked once: your answer is kept in Files › Folder & access, where you can change it. Keys, passwords and system files stay private either way.</small>`;
     return html;
   }
+  // Answered (here, in Settings, or ended), the card leaves the chat: only a request still open, or on its way, is drawn.
   function render(m){
+    if(!['open','sending'].includes(m.status))return '';
     const a=findAgent(m.who)||findAgent(m.request?.agentId);if(!a)return '';
     const group=!!findGroup(ui.view.target),done=m.status!=='open';
     return `<div class="message bot-message access-message ${done?'access-ended':''}" data-access-request="${esc(m.request?.id||'')}">${group?avatar(a.id,true):''}<div class="bot-bubble access-bubble">${group?`<button class="message-author" style="${authorColor(a)}" data-action="agent-info" data-id="${esc(a.id)}">${esc(a.name)}</button>`:''}${body(m)}<time>${esc(m.time||'')}</time></div></div>`;
@@ -118,7 +120,8 @@
   async function answer(id,choice){
     if(busy.has(id))return;
     busy.add(id);settle(state,id,{status:'sending',result:''});redraw();
-    try{const reply=await bridge()({action:'answer',id,choice});busy.delete(id);apply(reply,id,choice);if(reply?.resumeError)showToast(reply.resumeError);}
+    try{const reply=await bridge()({action:'answer',id,choice});busy.delete(id);apply(reply,id,choice);
+      const said=messages(state,id).find(m=>m.result)?.result;showToast(reply?.resumeError||said||(choice==='deny'?'Not allowed.':'Allowed.'));}
     catch(error){busy.delete(id);settle(state,id,{status:'open',result:String(error?.message||error)});redraw();}
     refresh(true);
   }

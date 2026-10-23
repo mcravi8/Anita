@@ -73,6 +73,13 @@
       default:return {label:'Waiting',tone:'idle'};
     }
   }
+  // The way to what waits for the person: a question Chief asked is answered on its card in the team chat, so the button opens the chat
+  // there; anything else is listed in the notifications.
+  function needsButton(plan){
+    const asked=(Array.isArray(plan?.notices)?plan.notices:[]).find(n=>n?.kind==='escalation'&&(n.status||'open')==='open'&&n.chat!==false&&n.id);
+    if(asked&&plan.groupId)return `<button type="button" class="small-link plan-needs" data-action="chat" data-id="${esc(plan.groupId)}" data-plan-notice-open="${esc(asked.id)}">Answer in chat</button>`;
+    return '<button type="button" class="small-link plan-needs" data-activity-open>See what needs you</button>';
+  }
   // What waits for the person: an open question Chief escalated, then any task held for them.
   function needsList(plan,names){
     const out=[];
@@ -267,7 +274,7 @@
     if(docked)open=true;
     const line=`<span class="plan-dot" aria-hidden="true"></span><span class="plan-banner">${esc(banner(plan,pulse,names,now))}</span>`;
     const head=docked?`<div class="plan-strip-head">${line}</div>`:`<button type="button" class="plan-strip-head" data-plan-toggle aria-expanded="${open}" aria-controls="${body}">${line}${chevron}</button>`;
-    return `<section class="plan-strip tone-${TONE[state]||'idle'}${open?' open':''}${docked?' docked':''}${offline?' offline':''}" data-plan-strip="${esc(plan.id)}" data-plan-state="${esc(state)}" aria-label="Team plan">${head}${error?`<p class="plan-error" role="alert">${esc(error)}</p>`:''}<div class="plan-strip-body" id="${body}"${open?'':' hidden'}>${offline?'<p class="plan-offline">Background work is offline, so this may be out of date.</p>':''}${plan.objective?`<p class="plan-objective"><span>Objective</span>${esc(plan.objective)}</p>`:''}${state==='needs_you'?'<button type="button" class="small-link plan-needs" data-activity-open>See what needs you</button>':''}<ol class="plan-stages">${stagesOf(plan).map(stage).join('')}</ol>${footer}</div></section>`;
+    return `<section class="plan-strip tone-${TONE[state]||'idle'}${open?' open':''}${docked?' docked':''}${offline?' offline':''}" data-plan-strip="${esc(plan.id)}" data-plan-state="${esc(state)}" aria-label="Team plan">${head}${error?`<p class="plan-error" role="alert">${esc(error)}</p>`:''}<div class="plan-strip-body" id="${body}"${open?'':' hidden'}>${offline?'<p class="plan-offline">Background work is offline, so this may be out of date.</p>':''}${plan.objective?`<p class="plan-objective"><span>Objective</span>${esc(plan.objective)}</p>`:''}${state==='needs_you'?needsButton(plan):''}<ol class="plan-stages">${stagesOf(plan).map(stage).join('')}</ol>${footer}</div></section>`;
   }
 
   // The plan in one line above the chat's composer: a segment for each stage (done, being worked on, still to come) and, in plain words, what
@@ -367,6 +374,21 @@
     const fresh=drawnFor!==target;if(sig===drawn&&!fresh&&!force)return;
     drawn=sig;drawnFor=target;if(!fresh||force)refreshLiveChat(target);
   }
+  // A question's card, opened from its notification or from the plan view: once the chat is open, its Chat view shows and the card comes
+  // into view with its first answer button focused.
+  document.addEventListener('click',e=>{
+    const id=e.target.closest?.('[data-plan-notice-open]')?.dataset.planNoticeOpen;if(!id)return;
+    const until=Date.now()+2500;let shown=false;
+    const reach=()=>{
+      // The drawer closes with a short animation, and the chat cannot take focus until it has gone.
+      if((document.getElementById('app')?.inert||document.querySelector('.modal-overlay'))&&Date.now()<until)return setTimeout(reach,50);
+      if(!shown){shown=true;root.BuddyProjectDock?.show?.('chat');}
+      const card=[...document.querySelectorAll('[data-plan-answer][data-notice]')].find(x=>x.dataset.notice===id)?.closest('.plan-card');
+      if(!card){if(Date.now()<until)setTimeout(reach,50);return;}
+      card.scrollIntoView({block:'center'});card.querySelector('button:not([disabled])')?.focus({preventScroll:true});
+    };
+    setTimeout(reach,30);
+  });
   document.addEventListener('click',async e=>{
     const el=e.target.closest?.('[data-plan-toggle],[data-plan-authorize],[data-plan-change],[data-plan-stop],[data-plan-answer]');if(!el)return;
     const id=el.closest('[data-plan-strip]')?.dataset.planStrip||el.closest('[data-plan-card]')?.dataset.planCard,plan=current().plans.find(p=>p.id===id);if(!plan)return;

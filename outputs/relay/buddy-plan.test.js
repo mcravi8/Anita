@@ -221,3 +221,14 @@ test('plan notices read as cards: a stage report with its criteria, rows and wha
  assert.equal(P.noticeCard(null,msg(holding.notices[0])),null,'a notice whose plan is not known stays a plain message');
  assert.equal(P.noticeCard(holding,{...msg(holding.notices[0]),noticeKind:'proposal'}),null);
 });
+
+test('a question waiting for the person is answered from the plan view in one step: the button opens the team chat at its card',()=>{
+ const asking=active([task('t1','done'),task('t2','pending'),task('t3','pending')],{state:'needs_you',needsYou:1},
+  {notices:[{id:'N1',kind:'escalation',status:'open',text:'May we change the November 12 restriction? My recommendation: approve.',chat:true,refs:{question:'May we change the November 12 restriction?'}}]});
+ const html=P.stripHTML(asking,pulse({}),names,{open:true,now:NOW});
+ assert.match(html,/<button type="button" class="small-link plan-needs" data-action="chat" data-id="team" data-plan-notice-open="N1">Answer in chat<\/button>/);
+ assert.doesNotMatch(html,/data-activity-open/);
+ // Waiting for the person without a question card (a task held for them) still lists what needs them.
+ const held=active([task('t1','blocked',{blockedOn:'user'}),task('t2','pending'),task('t3','pending')],{state:'needs_you',needsYou:1});
+ assert.match(P.stripHTML(held,pulse({}),names,{open:true,now:NOW}),/data-activity-open>See what needs you/);
+});

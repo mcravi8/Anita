@@ -160,3 +160,15 @@ test('a task waiting for a sign-in is a Needs card that opens the agent’s chat
  assert.equal(items.some(i=>i.id==='decision:review:r1'),false,'Chief answers the routine command while the lane is online');
  assert.equal(A.collect(people,{workspace:'w',tasks:[],decisions:[routine],supervisorLane:{online:false}},{},now).some(i=>i.id==='decision:review:r1'),true,'with the lane offline the person sees it');
 });
+test('a decision Chief forwarded about the plan opens the team chat at its card, where it is answered',()=>{
+ // The user's S04a question: its notification said Answer but opened the background task, which has nowhere to answer, and the plan view's
+ // "See what needs you" opened the notifications again.
+ const decision={id:'escalation:run:waiting:task:1',kind:'escalation',status:'open',audience:'user',agentId:'chief',title:'Chief needs your decision',question:'May we change the November 12 restriction?',createdAt:'2026-10-23T16:55:18Z',taskId:'task',
+  payload:{noticeId:'N1',planId:'p1',category:'objective',taskId:'task'}};
+ const worker={workspace:'w',decisions:[decision],plans:[{id:'p1',groupId:'team'}]};
+ const item=A.collect(state,worker)[0];
+ assert.equal(item.kind,'needs');assert.equal(item.chatTarget,'team');assert.equal(item.focusNotice,'N1');assert.equal(item.actionLabel,'Answer in chat');
+ // A plan this workspace no longer shows keeps the task as before.
+ const elsewhere=A.collect(state,{...worker,plans:[{id:'p1',groupId:'gone'}]})[0];
+ assert.equal(elsewhere.chatTarget,undefined);assert.equal(elsewhere.taskId,'task');
+});

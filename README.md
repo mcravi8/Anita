@@ -36,6 +36,15 @@ password. It runs on your ChatGPT subscription or your Claude API key.
   private field in the chat and only to the page that asked for it. Your WRDS sign-in is
   kept in your Mac's Keychain, and Duo or any other step you take outside the chat ends
   with a Done button.
+- **Use any web service, with cleanup that can't be forgotten.** Connect a service once
+  (RunPod, say): its address, how its key is sent, whether it can charge you money, and
+  the key, which stays in your Mac's Keychain. Agents call it through Buddy and never see
+  the key. Reading is free; a change on a service that can charge money comes to you as
+  one card with the exact request, the agent's reason and its cost estimate. Anything it
+  creates that bills by the hour is a lease Buddy deletes itself: when the agent is done,
+  when the task ends, after the hours you approved, and after a restart. A machine it
+  rents is reached over Buddy's own SSH key: agents upload project folders, run a command
+  and bring results back without overwriting anything.
 - **Keep each task on the right account.** Name an account for a task ("use my USC
   account") and Buddy opens every Google page of that task as that account, and stops
   instead of acting as another one.

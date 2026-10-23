@@ -53,7 +53,7 @@
     }
     const T={open:1,eyeH:1,happy:0,work:0,sx:1,sy:1,tilt:0,by:0};
     if(mode==='ready')T.sy=calm?1:1+.015*Math.sin(t*1.6+M.ph);
-    else if(mode==='working'){T.work=1;T.eyeH=.88;T.sy=calm?1:1+.015*Math.sin(t*6+M.ph);M.prog+=dt/4.2;if(M.prog>1.15)M.prog=0;}
+    else if(mode==='working'){T.work=1;T.eyeH=.88;T.sy=calm?1:1+.015*Math.sin(t*6+M.ph);M.prog=(M.prog+dt/LAP)%1;}
     else if(mode==='needs'){T.eyeH=1.15;if(t>=M.nextHop){if(!calm){S.by.v-=1.4;S.sy.v+=1;}M.nextHop=t+1.7;M.pulseT=t;}}
     else if(mode==='done')T.happy=1;
     else if(mode==='stuck'){T.tilt=.13;T.eyeH=.75;}
@@ -102,7 +102,7 @@
     const r=m.r;
     if(X.rings&&r.work>.01){
       const band=Math.exp(-Math.pow((EV.dB-.05)/X.bw,2));
-      if(band>.04){let fr=(Math.atan2(v0-r.y,u0-r.x)+Math.PI/2)/TAU;fr-=Math.floor(fr);const lag=r.prog-fr,vv=band*r.work*(lag>=0?.5+.5*Math.exp(-lag*14):.07);if(vv>ACC.v){ACC.v=vv;ACC.col=r.ink;}}
+      if(band>.04){let fr=(Math.atan2(v0-r.y,u0-r.x)+Math.PI/2)/TAU;fr-=Math.floor(fr);const vv=band*r.work*trail(r.prog,fr);if(vv>ACC.v){ACC.v=vv;ACC.col=r.ink;}}
     }
     if(r.pulse<1){const pv=Math.exp(-Math.pow((EV.dB-.03-r.pulse*.45)/.05,2))*(1-r.pulse);if(pv>ACC.v){ACC.v=pv;ACC.col=r.ink;}}
   }
@@ -125,13 +125,17 @@
     CELL.f=f;CELL.H=H;CELL.maxB=maxB;
     return CELL;
   }
-  // A group's ring sweeps on its own clock while any member works, so it always closes the circle and shows at full strength. It used to show
-  // the members' average progress and strength, so one of four working stopped it at a quarter and two at half.
-  function groupSweep(R,t){const c=(t/4.2)%1.15;return {group:R.reduce((s,r)=>Math.max(s,r.work),0),gprog:Math.min(1,c)};}
+  // A working ring is a light that goes round and round at one pace, its tail fading behind it over the faint track: it never fills up and
+  // starts again (it used to fill in 4.2 s, hold, and jump back to empty). `head` and `at` are fractions of the circle from the top.
+  const LAP=3;
+  function trail(head,at){const lag=((head-at)%1+1)%1;return .08+.92*Math.exp(-lag*4);}
+  // A group's ring goes round on its own clock while any member works, at full strength. It used to show the members' average progress and
+  // strength, so one of four working stopped it at a quarter and two at half.
+  function groupSweep(R,t){return {group:R.reduce((s,r)=>Math.max(s,r.work),0),gprog:(t/LAP)%1};}
   function groupRing(X,u0,v0,radius){
     if(!(X.group>.01))return;
     const d=Math.hypot(u0,v0),band=Math.exp(-Math.pow((d-radius)/X.bw,2));
-    if(band>.04){let fr=(Math.atan2(v0,u0)+Math.PI/2)/TAU;fr-=Math.floor(fr);const lag=X.gprog-fr,vv=band*X.group*(lag>=0?.5+.5*Math.exp(-lag*14):.07);if(vv>ACC.v){ACC.v=vv;ACC.col=NEU;}}
+    if(band>.04){let fr=(Math.atan2(v0,u0)+Math.PI/2)/TAU;fr-=Math.floor(fr);const vv=band*X.group*trail(X.gprog,fr);if(vv>ACC.v){ACC.v=vv;ACC.col=NEU;}}
   }
   function drawAv(c,n,es,R,X,t){
     const h=(n-1)/2,sp=300/(n-1),edge=.6/h;
@@ -441,7 +445,7 @@
   }
   function stop(){cancelAnimationFrame(raf);timers.forEach(clearTimeout);timers=[];started=false;if(io)io.disconnect();if(mo)mo.disconnect();io=mo=null;observed.clear();visible.clear();fresh.clear();}
 
-  const engine={mkSim,stepSim,mkR,prep,evalM,drawAv,gridFor,headCells,sdBox,sdHex,eyeSD,setDark,HUD,HUD_ORDER,EYEDX,hash,easeIO,rnd,sst,TAU,groupSweep};
+  const engine={mkSim,stepSim,mkR,prep,evalM,drawAv,gridFor,headCells,sdBox,sdHex,eyeSD,setDark,HUD,HUD_ORDER,EYEDX,hash,easeIO,rnd,sst,TAU,groupSweep,trail,LAP};
   const hovered=()=>hoverId;
   const api={hovered,extend,now:()=>clock,sim:id=>sims[id]||null,avatarHTML,logoHTML,slotHTML,slotAvatarHTML,fieldHTML,setMode,getMode,setFocus,handoff,setGroupWork,poke,configure,setDark,start,stop,normShape,normColor,INK,SHAPES,LEGACY_SHAPE,LEGACY_COLOR,engine};
   if(typeof module!=='undefined'&&module.exports)module.exports=api;

@@ -97,7 +97,7 @@ test('a change waiting for the person’s OK is a card that asks for it, and a r
  const answered=A.collect(state,{workspace:'w',tasks:[],decisions:[]});assert.equal(answered.length,0,'once answered, the card is gone');
 });
 
-test('Needs you lists what needs the person; what waits for the supervisor shows only if Chief has not picked it up',()=>{
+test('Needs you lists what needs the person; what waits for the supervisor shows only while the supervisor lane is offline',()=>{
  const now=Date.parse('2026-10-19T12:00:00Z'),at=minutes=>new Date(now-minutes*60000).toISOString();
  const people={...state,agents:[{id:'chief',name:'Chief'},{id:'inbox',name:'Inbox'}]};
  const forUser={id:'signin:t1',kind:'signin',audience:'user',agentId:'inbox',taskId:'t1',title:'Sign in',question:'Choose how to sign in.',createdAt:at(2)};
@@ -111,10 +111,12 @@ test('Needs you lists what needs the person; what waits for the supervisor shows
  assert.match(offline.find(i=>i.id==='decision:result:t3:1').note,/^Chief hasn’t picked this up yet/);
  assert.equal(offline.find(i=>i.id==='decision:signin:t1').note,undefined,'a request for the person carries no such label');
  assert.equal(ids(A.collect(people,worker(undefined),{},now)).includes('decision:result:t3:1'),true,'and when the app does not report the lane at all');
- const stale=A.collect(people,worker({online:true},[{...forChief,createdAt:at(16)}]),{},now);
- assert.deepEqual(ids(stale),['decision:result:t3:1'],'shown once it has been open for more than 15 minutes');assert.match(stale[0].note,/hasn’t picked this up yet/);
- assert.deepEqual(ids(A.collect(people,worker({online:true},[{...forChief,createdAt:at(14)}]),{},now)),[],'but not before');
- assert.deepEqual(ids(A.collect(people,worker({online:true},[{...forChief,createdAt:''}]),{},now)),['decision:result:t3:1'],'an item whose age is unknown is shown');
+ // The user's list on 23 October: a result Chief never picked up (its S01 task had been waived) and a run Chief gave up on four days earlier
+ // sat in Needs you because they were over 15 minutes old. While the lane runs, what is Chief's stays Chief's, however old; one Chief cannot
+ // move reaches the person as a "the team is stuck" notice.
+ assert.deepEqual(ids(A.collect(people,worker({online:true},[{...forChief,createdAt:at(16)}]),{},now)),[],'not shown once it has been open for more than 15 minutes');
+ assert.deepEqual(ids(A.collect(people,worker({online:true},[{...forChief,createdAt:at(4*24*60)}]),{},now)),[],'nor days later');
+ assert.deepEqual(ids(A.collect(people,worker({online:true},[{...forChief,createdAt:''}]),{},now)),[],'nor when its age is unknown');
  const counted=A.collect(people,worker({online:true}),{},now);assert.equal(A.unreadCounts(counted).needs,2,'the badges count only what is listed');
  const named={...people,agents:[...people.agents,{id:'mira',name:'Mira'}]};
  assert.match(A.collect(named,{workspace:'w',tasks:[{id:'t3',agentId:'inbox',status:'completed',supervisorId:'mira'}],decisions:[forChief],supervisorLane:{online:false}},{},now).find(i=>i.id==='decision:result:t3:1').note,/^Mira hasn’t picked this up yet/,'named after the task’s own supervisor');
@@ -171,4 +173,17 @@ test('a decision Chief forwarded about the plan opens the team chat at its card,
  // A plan this workspace no longer shows keeps the task as before.
  const elsewhere=A.collect(state,{...worker,plans:[{id:'p1',groupId:'gone'}]})[0];
  assert.equal(elsewhere.chatTarget,undefined);assert.equal(elsewhere.taskId,'task');
+});
+test('Buddy’s own preference-learning hiccup is not something that needs the person; the bell counts what needs them, read or not',()=>{
+ // The user's bell on 23 October said 8: all of them finished tasks, while the decisions waiting for them had been read and were not counted.
+ const memory=A.collect(state,{},{workspace:'w',checks:[{id:'m',agentId:'chief',kind:'memory',status:'failed',error:'A learned rule lacked an exact, non-credential user-message source. Existing instructions were kept.'}]});
+ assert.equal(memory.length,1);assert.equal(memory[0].kind,'finished','a failed preference check is listed under Finished');
+ const overview=A.collect(state,{},{workspace:'w',checks:[{id:'o',agentId:'chief',kind:'overview',status:'failed',error:'A team update referenced work outside its actual check-in.'}]});
+ assert.equal(overview[0].kind,'needs','a failed team update still needs a look');
+ const done=n=>({id:'d'+n,workspace:'w',agentId:'inbox',title:'Done '+n,status:'completed',updatedAt:'2026-10-23T10:0'+n+':00Z'});
+ const ask={id:'escalation:x',kind:'escalation',status:'open',audience:'user',agentId:'chief',title:'Chief needs your decision',question:'Review the draft?',createdAt:'2026-10-23T10:00:00Z',taskId:'',payload:{}};
+ const s=structuredClone(state),items=A.collect(s,{workspace:'w',tasks:[done(1),done(2),done(3)],decisions:[ask]});
+ A.markRead(s,items.filter(i=>i.kind==='needs').map(i=>i.id));
+ assert.deepEqual(A.bell(A.collect(s,{workspace:'w',tasks:[done(1),done(2),done(3)],decisions:[ask]})),{needs:1,finished:3},'the decision counts though it was read; finished work does not add to the number');
+ assert.deepEqual(A.bell(A.collect(s,{workspace:'w',tasks:[done(1)],decisions:[]})),{needs:0,finished:1},'with nothing needing the person, finished work is only a dot');
 });

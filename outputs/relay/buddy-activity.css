@@ -5,3 +5,6 @@
 .activity-entry{border-bottom:1px solid var(--line);padding:5px 0 13px}.activity-entry>.activity-item{border:0;padding-bottom:7px}.activity-description{display:block;margin-top:6px;font-size:12px;line-height:1.6;color:var(--text1);overflow-wrap:anywhere}.activity-entry-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 3px 0 43px;font-size:10px;color:var(--text2)}.activity-entry-footer button{font-size:11px;padding:6px 0}.activity-toolbar{margin-bottom:10px}.activity-toolbar p{font-size:11px;line-height:1.6;color:var(--text2);margin:0 0 9px}.activity-toolbar>button{display:block;margin-left:auto}
 
 .activity-entry-actions,.activity-toolbar-actions{display:inline-flex;gap:14px;flex-wrap:wrap}
+
+/* Nothing needs the person, but finished work is unread: a dot, no number. */
+.activity-nav>[data-activity-count].only-finished{min-width:8px;width:8px;height:8px;padding:0;top:4px;right:3px}

@@ -241,20 +241,24 @@
   }
 
   function membersOf(groupId){return (cfg.group(groupId)?.members||[]).slice(0,4).map(id=>cfg.agent(id)).filter(Boolean);}
+  // A figure in the chat's floating header is a still picture of who the chat is with: drawn from a pose that is never stepped (no blinking,
+  // glancing, breathing or working ring), whatever the agent is doing. The sidebar and the messages keep the live figures.
+  let restPose=null;
+  const rest=()=>restPose||(restPose=mkSim());
   function paintCanvas(el,t,dpr){
     // CSS decides how big the figure is drawn (a row, a header, a hero); data-size is only the default.
-    const kind=el.dataset.fig,size=el.clientWidth||+el.dataset.size||34;
+    const kind=el.dataset.fig,size=el.clientWidth||+el.dataset.size||34,still=!!el.closest('.island');
     let R,X;
     if(kind==='group'){
       const mem=membersOf(el.dataset.figId);if(!mem.length)return;
-      R=mem.map((a,k)=>mkR(sim(a.id),normShape(a.avatarShape),normColor(a.avatarColor),HUD[k],t));
+      R=mem.map((a,k)=>mkR(still?rest():sim(a.id),normShape(a.avatarShape),normColor(a.avatarColor),HUD[k],t));
       X={order:HUD_ORDER.filter(k=>k<R.length),rings:false,...groupSweep(R,t),amb:size>100?.28:0,clean:size<=100};
     }else{
       let shape,color,M,pos={x:0,y:0,s:1.12};
       if(kind==='agent'){
         const a=el.dataset.figId?cfg.agent(el.dataset.figId):null;
         if(el.dataset.figId&&!a)return;
-        shape=normShape(a?a.avatarShape:el.dataset.shape);color=normColor(a?a.avatarColor:el.dataset.color);M=sim(a?a.id:'anon');
+        shape=normShape(a?a.avatarShape:el.dataset.shape);color=normColor(a?a.avatarColor:el.dataset.color);M=still?rest():sim(a?a.id:'anon');
       }else{shape='pill';color='graphite';M=sim('logo');pos={x:0,y:.02,s:1.32};}
       R=[mkR(M,shape,color,pos,t)];
       X={order:[0],rings:true,group:0,amb:size>100?.25:0,clean:size<=100};
@@ -405,6 +409,9 @@
     const ids=new Set([...cfg.agentIds(),...Object.keys(sims)]);
     if(extensions.length)call('frame',{clock,dt,calm,ids:cfg.agentIds(),cfg,sim,getMode:id=>modes[id]||'ready',hoverId});
     for(const id of ids){
+      // Buddy's own logo (the sidebar's header and its workspace button) is a mark, not a character: it keeps its resting pose, with no
+      // blinking, glancing, breathing or bounce.
+      if(id==='logo')continue;
       const M=sim(id),f=focus[id],mode=modes[id]||'ready',known=!!cfg.agent(id);
       let fv=f==='user'?[0,0]:f&&f!==id?vec(id,f):null;
       const sp=slotPos['row:'+id];

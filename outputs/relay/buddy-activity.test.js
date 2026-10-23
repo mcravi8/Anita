@@ -187,3 +187,13 @@ test('Buddy’s own preference-learning hiccup is not something that needs the p
  assert.deepEqual(A.bell(A.collect(s,{workspace:'w',tasks:[done(1),done(2),done(3)],decisions:[ask]})),{needs:1,finished:3},'the decision counts though it was read; finished work does not add to the number');
  assert.deepEqual(A.bell(A.collect(s,{workspace:'w',tasks:[done(1)],decisions:[]})),{needs:0,finished:1},'with nothing needing the person, finished work is only a dot');
 });
+
+test('a task waiting for its command on a leased machine is listed as working, and a request that can cost money is the person’s',()=>{
+ const A=require('./buddy-activity');
+ const state={conversationWorkspace:'w',agents:[{id:'forge',name:'Forge'}],groups:[]};
+ const worker={workspace:'w',decisions:[{id:'review:svc-1',kind:'review',agentId:'forge',taskId:'t1',title:'Allow a request to RunPod? At most $7.68',question:'Forge wants to send POST /pods to RunPod, which can charge you money. Approve or Disapprove in the task.',audience:'user',actionLabel:'Review',createdAt:'2026-10-23T20:00:00Z'}],
+  tasks:[{id:'t2',agentId:'forge',title:'C1 replications',status:'paused',blockedBy:'remote',progress:'Running on 203.0.113.7 for 12 min',attempt:1,updatedAt:'2026-10-23T20:01:00Z'}]};
+ const items=A.collect(state,worker);
+ assert.ok(items.some(i=>i.kind==='needs'&&i.title==='Allow a request to RunPod? At most $7.68'&&i.taskId==='t1'),'Needs you lists the request with the most it can cost');
+ assert.ok(items.some(i=>i.kind==='working'&&i.taskId==='t2'&&/Running on 203\.0\.113\.7/.test(i.description)),'the waiting task is working');
+});

@@ -74,3 +74,13 @@
   .work-page .page-scroll{padding-top:18px}
   .work-row{padding:12px 14px;gap:10px}
 }
+
+/* A request to a connected service (or files for a leased machine): the facts one per line, and the exact body. */
+.worker-review-facts{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:3px;font-size:12.5px;line-height:1.5;color:var(--text2)}
+.worker-review-body{margin:6px 0 0;max-height:180px;overflow:auto;padding:8px 10px;border-radius:8px;background:var(--hover,rgba(0,0,0,.04));font-size:11.5px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere}
+/* What a task created on connected services, in its details. */
+.worker-leases{display:flex;flex-direction:column;gap:6px;margin:8px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+.worker-leases strong{font-size:13px}
+.worker-leases ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+.worker-leases li{display:flex;flex-direction:column;gap:2px;font-size:12.5px}
+.worker-leases small{color:var(--text3);overflow-wrap:anywhere}

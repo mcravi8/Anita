@@ -301,3 +301,40 @@ test('the Work page has one row per piece of work: a plan task’s runs are one 
  assert.deepEqual(worker.workGroups([]),{needs:[],running:[],finished:[]});
  assert.deepEqual(worker.workGroups([{title:'no id'},null]),{needs:[],running:[],finished:[]},'only real tasks count');
 });
+
+// Connected services (RunPod first): the card a person approves for a request that can cost money, and for files leaving the Mac.
+const runpodReview=(extra={})=>({id:'svc-1',kind:'service',status:'pending',route:'user',questions:[{id:'operation',question:'Allow this request to RunPod?',options:[{label:'Accept'},{label:'Decline'}]}],
+ request:{agent:'Forge',service:'RunPod',baseUrl:'https://rest.runpod.io/v2',charges:true,method:'POST',path:'/pods',query:{},body:'{\n  "cpu" : {\n    "vcpuCount" : 32\n  }\n}',reason:'Run the 800 C1 replications on 32 vCPUs instead of this Mac.',
+  cost:{perHour:1.28,maxHours:6,maxCostUSD:7.68},lease:{resource:'/id',teardown:'DELETE /pods/{id}',maxHours:6},uploads:[{path:'stages/S02c_review',files:214,bytes:3400000}]},
+ tool:{name:'POST /pods on RunPod',service:'RunPod',arguments:{request:'POST https://rest.runpod.io/v2/pods'}},...extra});
+test('a request to a service that can charge money reads as one plain card: who, what, the exact request, the cost estimate, the cleanup, the uploads and why',()=>{
+ const said=worker.plainRequest(runpodReview());
+ assert.equal(said.what,'send a POST request to RunPod');
+ assert.equal(said.why,'Run the 800 C1 replications on 32 vCPUs instead of this Mac.');
+ assert.equal(said.caution,'RunPod can charge you money.');
+ assert.deepEqual(said.facts,['Request: POST https://rest.runpod.io/v2/pods',
+  'Cost (Forge’s estimate): $1.28 an hour, for at most 6 hours: at most $7.68',
+  'Cleanup: Buddy calls DELETE /pods/{id} when Forge is done, when the task ends, and after 6 hours at the latest',
+  'Uploads to it: stages/S02c_review (214 files, 3.4 MB)']);
+ assert.match(said.body,/"vcpuCount" : 32/);
+ assert.equal(worker.isApproval(runpodReview()),true,'answered with Approve and Disapprove');
+ assert.equal(worker.requestTitle(runpodReview()),'Send a POST request to RunPod');
+ assert.deepEqual(worker.reviewRequest('t1',runpodReview(),{},'approve'),{operation:'review',taskId:'t1',id:'svc-1',answers:{operation:['Accept']},cancel:false,accept:true});
+ assert.equal(worker.taskMessage({status:'waiting_review',reviews:[runpodReview()]}),'I need your OK for a request to RunPod: at most $7.68.');
+ assert.equal(worker.taskMessage({status:'waiting_review',progress:'Waiting for your OK for a request to RunPod: at most $7.68'}),'I need your OK for a request to RunPod: at most $7.68.','the chat says it from the progress Buddy wrote');
+ assert.equal(worker.taskMessage({status:'waiting_review',progress:'A coding command needs network access'}),'I need your approval to continue.','other reviews read as before');
+ assert.equal(worker.taskMessage({status:'waiting_review',progress:'I need your OK for a request to RunPod: at most $7.68.'}),'I need your OK for a request to RunPod: at most $7.68.','drawn again, it reads the same');
+ // A service that can't charge money says nothing about money; its review is the supervisor's and posts nothing in the chat.
+ const notes=runpodReview({route:'supervisor',request:{...runpodReview().request,service:'Notes',charges:false,cost:undefined,lease:undefined,uploads:[]}});
+ assert.equal(worker.plainRequest(notes).caution,'');assert.equal(worker.supervisorWait({status:'waiting_review',reviews:[notes]}),true);
+ const upload={id:'up-1',kind:'upload',status:'pending',route:'user',questions:[{id:'operation',question:'Send these files to the machine?',options:[{label:'Accept'},{label:'Decline'}]}],upload:{agent:'Forge',host:'203.0.113.7',lease:'RunPod pod01abc',files:[{path:'extra/params.json',files:1,bytes:180}],reason:'The run’s parameters.'}};
+ assert.deepEqual(worker.plainRequest(upload),{what:'send 1 project file to 203.0.113.7',why:'The run’s parameters.',caution:'These files leave this Mac.',facts:['To: RunPod pod01abc','Sends: extra/params.json (1 files, 180 bytes)']});
+ assert.equal(worker.taskMessage({status:'waiting_review',reviews:[upload]}),'I need your OK to send project files to 203.0.113.7.');
+});
+test('a coding task waiting for its own command on a leased machine is running, not paused: one plain message, and nobody is asked anything',()=>{
+ const t={id:'c1',kind:'coding',workspace:'w',agentId:'a',title:'C1 replications',status:'paused',blockedBy:'remote',stopCause:'remote.running',attempt:2,progress:'Running on 203.0.113.7 for 12 min · 37 result files there · Buddy continues when it ends',updatedAt:'2026-10-23T20:00:00Z'};
+ assert.equal(worker.label(t),'Running remotely');assert.equal(worker.systemPause(t),false);assert.equal(worker.remoteWait(t),true);
+ const s={conversationWorkspace:'w',agents:[{id:'a'}],messages:{}};
+ assert.equal(worker.deliverResult(s,t),true);assert.equal(s.messages.a[0].body,'**C1 replications** is running on a remote machine. I’ll continue when it’s done.');
+ assert.equal(worker.workGroups([t]).running.length,1,'listed under Running in Background work');
+});

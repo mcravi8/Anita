@@ -92,14 +92,27 @@ test('reduced motion drops the idle life but keeps every signal of state',()=>{
   assert.ok(Math.abs(M.S.lx.x-.5)<.02,'gaze toward the user or another agent is information, so it stays');
 });
 
-test('a working group\'s ring always closes the circle, however many of its members are working',()=>{
-  // One of four members working used to cap the sweep at a quarter, two at half: the ring showed the members' average progress.
+test('a working group\'s ring goes round and round at full strength, however many of its members are working, without starting again',()=>{
+  // One of four members working used to cap the sweep at a quarter, two at half: the ring showed the members' average progress. Then it
+  // filled up, held and jumped back to empty; now its light goes round continuously.
   const members=working=>[0,1,2,3].map(k=>({work:k<working?1:0,prog:k<working?.6:0}));
   for(const working of [1,2,3,4]){
-    let most=0,least=1;for(let t=0;t<12;t+=.02){const g=E.groupSweep(members(working),t);most=Math.max(most,g.gprog);least=Math.min(least,g.gprog);}
-    assert.equal(most,1,`${working} working: the sweep goes all the way round`);
-    assert.ok(least<.02,`${working} working: and starts again from the top`);
+    let most=0,least=1,jump=0,prev=E.groupSweep(members(working),0).gprog;
+    for(let t=.02;t<12;t+=.02){const g=E.groupSweep(members(working),t).gprog;most=Math.max(most,g);least=Math.min(least,g);const step=((g-prev)%1+1)%1;jump=Math.max(jump,step);prev=g;}
+    assert.ok(most>.99&&least<.01,`${working} working: the light goes all the way round`);
+    assert.ok(jump<.02,`${working} working: it moves at one pace, never jumping back to the start (largest step ${jump})`);
     assert.equal(E.groupSweep(members(working),1).group,1,`${working} working: the ring shows at full strength`);
   }
   assert.equal(E.groupSweep(members(0),1).group,0,'nobody working: no ring');
+});
+
+test('the working light is brightest where it is, fades behind it, and the track never goes dark',()=>{
+  assert.ok(Math.abs(E.trail(.5,.5)-1)<1e-9,'full at the light itself');
+  assert.ok(E.trail(.5,.4)>E.trail(.5,.25)&&E.trail(.5,.25)>E.trail(.5,.6),'it fades behind the light, and just ahead of it is the dimmest');
+  for(let at=0;at<1;at+=.01)assert.ok(E.trail(.3,at)>=.08,'the faint track shows all the way round');
+  assert.ok(Math.abs(E.trail(.02,.98)-E.trail(1.02,.98))<1e-9,'the same light after a full lap');
+  // A single agent's ring goes round the same way, and never resets while it works.
+  const M=E.mkSim(),pos=[];for(let t=0;t<9;t+=.05){E.stepSim(M,'working',null,t,.05,0,false,false);pos.push(M.prog);}
+  assert.ok(pos.every(p=>p>=0&&p<1));
+  assert.ok(pos.slice(1).every((p,i)=>((p-pos[i])%1+1)%1<.03),'one pace, all the way round');
 });

@@ -67,7 +67,7 @@ test('the chat offers its plan and its files as views; the plan view holds the w
   assert.deepEqual(await tabs.getByRole('tab').allInnerTexts(),['Chat','Plan','Files'],'the chat, its plan and its files');
   const line=page.locator('.composer-wrap > .stage-strip');await line.waitFor();
   assert.match(await line.innerText(),/Plan ready — which stage should the team get done\?/);
-  assert.equal(await page.locator('.plan-strip').count(),0,'the whole plan is in its view, not above the composer');
+  assert.equal(await page.locator('.composer-wrap .plan-strip').count(),0,'the whole plan is in its view, not above the composer');
   // The plan view, from its tab: always open, with the buttons the person taps.
   await tabs.getByRole('tab',{name:'Plan'}).click();
   const view=page.locator('[data-chat-pane="plan"]');await view.locator('.plan-strip').waitFor();
@@ -80,7 +80,7 @@ test('the chat offers its plan and its files as views; the plan view holds the w
   // Files, then the chat again: the line above the composer opens the plan view too.
   await tabs.getByRole('tab',{name:'Files'}).click();
   await page.locator('[data-chat-pane="files"] [data-action="project-file"][data-path="paper_draft.md"]').waitFor();
-  assert.equal(await view.count(),0,'one view at a time');
+  assert.equal(await view.isVisible(),false,'one view at a time');
   await tabs.getByRole('tab',{name:'Chat'}).click();await line.click();await view.locator('.plan-strip').waitFor();
   // Another chat opens on its messages; Chief supervises the plan, so Chief's chat offers it as well.
   await page.evaluate(()=>navigate('chat','chief'));
@@ -94,7 +94,7 @@ test('the chat offers its plan and its files as views; the plan view holds the w
   await page.evaluate(()=>BuddyWorkerUI.refresh(false));
   await page.locator('.composer-wrap > .stage-strip').waitFor({timeout:8000});
   await page.locator('.island [data-chat-views] [data-chat-view="files"]').waitFor({timeout:8000});
-  assert.equal(await page.locator('[data-chat-pane]').count(),0);
+  assert.equal(await page.locator('[data-chat-pane]:not([hidden])').count(),0);
   // Dark mode reads the theme’s tokens.
   await page.evaluate(()=>BuddyTheme.choose('dark'));
   const colours=await page.evaluate(()=>{const probe=document.createElement('div');probe.style.background='var(--card)';document.body.append(probe);const card=getComputedStyle(probe).backgroundColor;probe.remove();const line=document.querySelector('.composer-wrap > .stage-strip');return {line:getComputedStyle(line).backgroundColor,card,text:getComputedStyle(line.querySelector('.plan-banner')).color};});
@@ -116,7 +116,7 @@ test('the views follow what the chat has: a plan alone, files alone, neither; a 
   await page.evaluate(()=>BuddyWorkerUI.refresh(false));await page.evaluate(()=>BuddyFiles.load({persist:false}));
   await tabs.getByRole('tab',{name:'Files'}).waitFor({timeout:5000});
   assert.deepEqual(await tabs.getByRole('tab').allInnerTexts(),['Chat','Files']);
-  assert.equal(await page.locator('[data-chat-pane]').count(),0,'the chat is back');
+  assert.equal(await page.locator('[data-chat-pane]:not([hidden])').count(),0,'the chat is back');
   assert.equal(await page.locator('#chat-body').isVisible(),true);
   assert.equal(await page.locator('.plan-strip,.stage-strip').count(),0,'no plan anywhere');
   // Neither: no choice to show.

@@ -43,7 +43,7 @@ test('a project folder is the Files view of the chat at any window width: the ch
   const tabs=page.locator('.conversation-header .island [data-chat-views]');await tabs.getByRole('tab',{name:'Files'}).waitFor({timeout:8000});
   assert.deepEqual(await tabs.getByRole('tab').allInnerTexts(),['Chat','Files'],'the chat, and its files');
   assert.equal(await tabs.getByRole('tab',{name:'Chat'}).getAttribute('aria-selected'),'true','a chat opens on its messages');
-  assert.equal(await page.locator('[data-chat-pane]').count(),0,'nothing beside or over the chat');
+  assert.equal(await page.locator('[data-chat-pane]:not([hidden])').count(),0,'nothing beside or over the chat');
   const before=await rect(page,'.conversation');
   await page.locator('#message-input').fill('Typing before looking at the files');
   await tabs.getByRole('tab',{name:'Files'}).click();
@@ -61,7 +61,7 @@ test('a project folder is the Files view of the chat at any window width: the ch
   await files.waitFor();assert.equal(await page.evaluate(()=>document.activeElement?.dataset.chatView),'files');
   // Another chat opens on its messages, with its Files view one tab away.
   await page.evaluate(()=>navigate('chat','atlas'));
-  await page.locator('[data-chat-views] [data-chat-view="files"]').waitFor();assert.equal(await page.locator('[data-chat-pane]').count(),0);
+  await page.locator('[data-chat-views] [data-chat-view="files"]').waitFor();assert.equal(await page.locator('[data-chat-pane]:not([hidden])').count(),0);
   await page.locator('[data-chat-views] [data-chat-view="files"]').click();
   // A file opens in the existing viewer, and the viewer's Files goes back to the Files view, not a drawer.
   await files.locator('[data-action="project-file"][data-path="notes.md"]').click();

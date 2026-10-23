@@ -146,6 +146,64 @@
     const ref=notice.refs?.stageId||Number(String(notice.text||'').match(/^\s*Stage\s+(\d+)\b/i)?.[1]);
     return ref?stageDeliverables(state,plan,ref):[];
   }
+  // A stage report as the plan writes it: Chief's report, then, after an empty line, what comes next ("Next is Stage 3 — …" or "That was the
+  // last stage…"). A report written as labelled lines ("Outputs: …", "Issues: …") reads as rows; anything else stays prose.
+  const labelled=/^\s*([A-Z][A-Za-z ]{1,24}):\s+(\S[\s\S]*)$/;
+  function splitReport(text){
+    const t=String(text||'').trim(),cut=t.search(/\n\s*\n(?=\s*(?:Next is Stage \d+|That was the last stage))/);
+    const report=(cut>=0?t.slice(0,cut):t).trim(),lines=report.split('\n').map(l=>l.trim()).filter(Boolean),rows=lines.map(l=>l.match(labelled)).filter(Boolean);
+    const structured=rows.length>=2&&rows.length>=lines.length-1,lead=structured&&!labelled.test(lines[0])?lines[0]:'';
+    return {summary:lead,rows:structured?rows.map(r=>({label:r[1].trim(),text:r[2].trim()})):[],prose:structured?'':report};
+  }
+  const noticeOf=(plan,message)=>(Array.isArray(plan?.notices)?plan.notices:[]).find(n=>'plan-notice-'+n?.id===message?.id)||null;
+  const stageOfNotice=(plan,notice,text)=>{
+    const ref=notice?.refs?.stageId,n=Number(String(text||'').match(/^\s*Stage\s+(\d+)\b/i)?.[1]);
+    return stagesOf(plan).find(s=>ref?s.id===ref:Number(s.n)===n)||null;
+  };
+  const CATEGORY={credential:'a sign-in',money_out:'money',third_party:'something sent in your name',objective:'a change to the plan',personal_fact:'something only you know'};
+  const check='<svg class="plan-card-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  // What comes after a finished stage, said once the person has chosen: started, done, or the choice to make, with its two buttons.
+  function aheadHTML(plan,stage,{busy=false}={}){
+    const next=stage&&stagesOf(plan).find(s=>Number(s.n)===Number(stage.n)+1);
+    if(!next)return `<div class="plan-card-foot"><span>That was the last stage of the plan.</span></div>`;
+    const title=`<span class="plan-card-next"><span>Next ·</span> Stage ${Number(next.n)} — ${esc(next.title)}</span>`;
+    const started=next.status==='done'?`Stage ${Number(next.n)} is done`:scopeActive(plan)&&Number(plan.scope.through)>=Number(next.n)||['approved','working','review'].includes(next.status)?`Stage ${Number(next.n)} started`:'';
+    if(started)return `<div class="plan-card-foot">${title}<span class="plan-card-settled">${check}${started}</span></div>`;
+    const choosing=['draft','holding'].includes(plan.status),off=busy?' disabled':'';
+    return `<div class="plan-card-foot">${title}${choosing?`<span class="plan-card-actions"><button type="button" class="border-button" data-plan-change="${Number(next.n)}"${off}>Change plan</button><button type="button" class="primary-button" data-plan-authorize="${Number(next.n)}"${off}>Get stage ${Number(next.n)} done</button></span>`:''}</div>`;
+  }
+  // A plan notice as a card in the chat: a stage report, a question for the person, a stuck notice, or (an authorization) one status line. A
+  // notice whose plan is no longer known, or of another kind, is null and stays a plain message.
+  function noticeCard(plan,message,{filesHTML='',markdown=s=>`<p>${esc(s)}</p>`,busy=false,reply=null}={}){
+    if(!plan||!message?.planNotice)return null;
+    const kind=message.noticeKind,text=String(message.body||'').trim(),notice=noticeOf(plan,message),refs=notice?.refs||{},off=busy?' disabled':'';
+    if(kind==='authorized'){
+      const m=text.match(/^(.*?\bauthorized)\.\s+The team is working on (.+?)\.\s+I['’]ll report/i);
+      return {line:true,html:m?`<strong>${esc(m[1])}</strong><span> · working on ${esc(m[2])}</span>`:`<span>${esc(short(text,160))}</span>`};
+    }
+    if(kind==='stage_report'){
+      const stage=stageOfNotice(plan,notice,text),{summary,rows,prose}=splitReport(text),done=stage?.status==='done';
+      const criteria=Array.isArray(stage?.acceptance)&&stage.acceptance.length?`<div class="plan-card-section"><span class="plan-card-label">Done when</span><ul class="plan-card-criteria">${stage.acceptance.map(a=>`<li class="${done?'met':''}">${done?check:'<span class="plan-card-open" aria-hidden="true"></span>'}<span>${esc(a)}</span></li>`).join('')}</ul></div>`:'';
+      const body=rows.length?`${summary?`<p class="plan-card-summary">${esc(summary)}</p>`:''}<dl class="plan-card-rows">${rows.map(r=>`<dt>${esc(r.label)}</dt><dd>${esc(r.text)}</dd>`).join('')}</dl>`:prose?`<div class="reply-markdown plan-card-prose">${markdown(prose)}</div>`:'';
+      const head=stage?`<header class="plan-card-head"><h3>Stage ${Number(stage.n)} · ${esc(stage.title)}</h3>${done?`<span class="plan-chip done">Done</span>`:''}</header>`:'';
+      return {label:'Stage report',html:`<article class="plan-card plan-card-report">${head}${body}${criteria}${filesHTML?`<div class="plan-card-section plan-card-files"><span class="plan-card-label">Files</span>${filesHTML}</div>`:''}${stage?aheadHTML(plan,stage,{busy}):''}</article>`};
+    }
+    if(kind==='escalation'){
+      const question=String(refs.question||text.replace(/\s*My recommendation:[\s\S]*$/,'')).trim(),recommendation=String(refs.recommendation||'').trim();
+      const what=CATEGORY[refs.category],status=notice?.status||'open',answer=String(refs.answer||'').trim();
+      const advice=recommendation?`<div class="plan-card-advice"><span class="plan-card-label">${esc(message.whoName||'Chief')} recommends</span><p>${esc(recommendation)}</p></div>`:'';
+      let foot;
+      if(status==='answered')foot=`<div class="plan-card-foot"><span class="plan-card-settled">${check}You answered</span>${answer?`<span class="plan-card-answer">${esc(short(answer,220))}</span>`:''}</div>`;
+      else if(status!=='open')foot='';
+      else{
+        const open=!!reply?.open,id=esc(notice?.id||'');
+        foot=`<div class="plan-card-foot plan-card-decide">${recommendation?`<button type="button" class="primary-button" data-plan-answer="approve" data-notice="${id}"${off}>Approve</button><button type="button" class="border-button" data-plan-answer="disapprove" data-notice="${id}"${off}>Disapprove</button>`:''}<button type="button" class="${recommendation?'small-link':'primary-button'}" data-plan-answer="reply" data-notice="${id}" aria-expanded="${open}"${off}>Reply</button><span class="plan-card-note">The team keeps working on the rest meanwhile.</span></div>${open?`<form class="plan-card-reply" data-plan-reply="${id}"><label><span class="plan-card-label">Your answer</span><textarea rows="3" maxlength="2000" data-plan-reply-text="${id}">${esc(reply?.draft||'')}</textarea></label><button type="submit" class="primary-button"${off}>Send answer</button></form>`:''}`;
+      }
+      return {label:'Decision',html:`<article class="plan-card plan-card-decision${status==='open'?' open':''}"><span class="plan-card-badge">${status==='open'?`Needs your decision${what?` · ${esc(what)}`:''}`:'Your decision'}</span><h3>${esc(question)}</h3>${advice}${foot}</article>`};
+    }
+    if(kind==='stuck')return {label:'Stuck',html:`<article class="plan-card plan-card-stuck"><span class="plan-card-badge">The team is stuck</span><p>${esc(text.replace(/\s*Tell me how to proceed\.?\s*$/,''))}</p><div class="plan-card-foot"><button type="button" class="primary-button" data-plan-answer="chat">Tell ${esc(message.whoName||'Chief')} how to go on</button></div></article>`};
+    return null;
+  }
   // Notices the plan marks for the chat, not yet in it: each goes to the group's chat, or to the supervisor's own chat for a plan with no group.
   // A stage report brings the files that stage's work saved, so the deliverables are in the chat without anyone asking for them.
   function noticeTarget(state,plan){
@@ -212,7 +270,16 @@
     return `<section class="plan-strip tone-${TONE[state]||'idle'}${open?' open':''}${docked?' docked':''}${offline?' offline':''}" data-plan-strip="${esc(plan.id)}" data-plan-state="${esc(state)}" aria-label="Team plan">${head}${error?`<p class="plan-error" role="alert">${esc(error)}</p>`:''}<div class="plan-strip-body" id="${body}"${open?'':' hidden'}>${offline?'<p class="plan-offline">Background work is offline, so this may be out of date.</p>':''}${plan.objective?`<p class="plan-objective"><span>Objective</span>${esc(plan.objective)}</p>`:''}${state==='needs_you'?'<button type="button" class="small-link plan-needs" data-activity-open>See what needs you</button>':''}<ol class="plan-stages">${stagesOf(plan).map(stage).join('')}</ol>${footer}</div></section>`;
   }
 
-  const api={planFor,stageChip,taskChip,banner,noticesToDeliver,deliverNotices,stripHTML,currentStage,replyOutcome,tone,stageDeliverables,noticeFiles};
+  // The plan in one line above the chat's composer: a segment for each stage (done, being worked on, still to come) and, in plain words, what
+  // is happening now. It opens the plan view, where the whole plan and its buttons are.
+  function stageStripHTML(plan,pulse,names,{now=Date.now(),offline=false}={}){
+    if(!plan)return '';
+    const said=banner(plan,pulse,names,now),seg=s=>`<span class="stage-seg${s.status==='done'?' done':['approved','working','review'].includes(s.status)?' now':''}"></span>`;
+    const arrow='<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m10 7 5 5-5 5"/></svg>';
+    return `<button type="button" class="stage-strip tone-${TONE[runState(plan)]||'idle'}${offline?' offline':''}" data-chat-view="plan" data-stage-strip="${esc(plan.id)}" aria-label="Open the plan. ${esc(said)}"><span class="stage-segs" aria-hidden="true">${stagesOf(plan).map(seg).join('')}</span><span class="plan-banner">${esc(said)}</span>${offline?'<span class="stage-offline">May be out of date</span>':''}${arrow}</button>`;
+  }
+
+  const api={planFor,stageChip,taskChip,banner,noticesToDeliver,deliverNotices,stripHTML,stageStripHTML,currentStage,replyOutcome,tone,stageDeliverables,noticeFiles,splitReport,noticeCard};
   root.BuddyPlan=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
 
@@ -229,12 +296,12 @@
     for(const name of ['data-plan-toggle','data-plan-authorize','data-plan-change','data-plan-stop'])if(el?.hasAttribute?.(name)){const v=el.getAttribute(name);return v?`[${name}="${CSS.escape(v)}"]`:`[${name}]`;}
     return null;
   }
-  // The plan of the chat on screen, if it has one (the project panel shows it when there is room).
+  // The plan of the chat on screen, if it has one (the chat then offers its plan view).
   const active=()=>typeof ui!=='undefined'&&ui.view?.kind==='chat'?planFor(state,ui.view,current().plans):null;
-  // Same pattern as the setup offer: the strip sits at the top of the composer area and is redrawn only when what it says changes. While the
-  // project panel beside the chat has a place for the plan, the strip is there instead, open, and not above the composer.
+  // Same pattern as the setup offer: redrawn only when what it says changes. In the plan view the whole plan is in the view's slot, open; in the
+  // chat it is one line at the top of the composer area that opens that view.
   function mount(){
-    const strips=[...document.querySelectorAll('.plan-strip')];
+    const strips=[...document.querySelectorAll('.plan-strip,.stage-strip')];
     const inChat=typeof ui!=='undefined'&&ui.view?.kind==='chat',slot=inChat?document.querySelector('[data-project-plan-slot]'):null;
     const wrap=inChat?slot||document.querySelector('.composer-wrap'):null,docked=!!slot;
     const {snapshot,plans}=current(),plan=wrap?planFor(state,ui.view,plans):null,old=strips.find(el=>el.parentElement===wrap);
@@ -242,14 +309,17 @@
     if(!plan)return;
     // A refusal stays on the strip until the next tap, or until the plan itself moves on.
     if(failures.has(plan.id)&&failures.get(plan.id).state!==keyOf(plan))failures.delete(plan.id);
-    const html=stripHTML(plan,root.BuddyWorkerUI?.pulse?.(),names(),{open:isOpen(plan),docked,busy,offline:snapshot.online===false,error:failures.get(plan.id)?.message||''});
+    const offline=snapshot.online===false,pulse=root.BuddyWorkerUI?.pulse?.();
+    const html=docked?stripHTML(plan,pulse,names(),{open:true,docked,busy,offline,error:failures.get(plan.id)?.message||''}):stageStripHTML(plan,pulse,names(),{offline});
     if(old&&shown.get(old)===html)return;
     const chat=document.getElementById('chat-body'),bottom=!!chat&&chat.scrollHeight-chat.scrollTop-chat.clientHeight<120;
     const focus=old&&old.contains(document.activeElement)?focusKey(document.activeElement):null,scroll=old?.querySelector('.plan-strip-body')?.scrollTop||0;
+    const had=!!old&&(old.contains(document.activeElement)||document.activeElement===document.body);
     const holder=document.createElement('div');holder.innerHTML=html;const next=holder.firstElementChild;shown.set(next,html);
     if(old)old.replaceWith(next);else wrap.insertAdjacentElement('afterbegin',next);
     const inner=next.querySelector('.plan-strip-body');if(inner)inner.scrollTop=scroll;
-    if(focus)next.querySelector(focus)?.focus({preventScroll:true});
+    // A button that went with the redraw (a stage now started) leaves focus in the view, not on the page.
+    if(focus&&next.querySelector(focus))next.querySelector(focus).focus({preventScroll:true});else if(had&&docked)next.closest('[data-chat-pane]')?.focus({preventScroll:true});
     if(bottom)chat.scrollTop=chat.scrollHeight;
   }
   function deliver(){
@@ -257,7 +327,9 @@
     const targets=deliverNotices(state,plans,item=>root.BuddyDrop?.notice?.(state,item));if(!targets.length)return;
     save();for(const target of new Set(targets))refreshLiveChat(target);
   }
+  // A change is said in the chat: from the plan view, the chat comes back for it.
   function change(n){
+    root.BuddyProjectDock?.show?.('chat');
     const input=document.getElementById('message-input');if(!input)return;
     input.value=`Stage ${n}: `+input.value.replace(/^Stage \d+:\s*/,'');
     input.dispatchEvent(new Event('input'));input.focus();input.setSelectionRange(input.value.length,input.value.length);
@@ -274,18 +346,52 @@
     }else if(!outcome.ok){failures.set(args.planId,{message:outcome.message,state:keyOf(plan)});showToast(outcome.message);}
     await root.BuddyWorkerUI.refresh(false);
   }
+  // A question for the person, answered from its card in the chat: Approve and Disapprove say so in plain words, Reply sends what they write.
+  // Each is their own tap, sent as their answer, exactly as their reply in the chat would be.
+  const replies=new Map();
+  const answers={approve:advice=>`Approved. Go ahead${advice?` with your recommendation: ${advice}`:'.'}`,disapprove:()=>'Not approved. Don’t go ahead with that; find another way or ask me again.'};
+  async function answer(plan,noticeId,text){
+    const said=String(text||'').trim().slice(0,2000);if(!said)return;
+    await send(plan,{action:'answer',planId:plan.id,escalationId:noticeId,answer:said,quote:said});
+    if(!failures.has(plan.id))replies.delete(noticeId);
+    redrawCards(true);
+  }
+  // The cards in the chat follow the plan: a stage started, a question answered, buttons off while a tap is on its way.
+  let drawn='',drawnFor='';
+  function redrawCards(force=false){
+    if(typeof ui==='undefined'||ui.view?.kind!=='chat'||typeof refreshLiveChat!=='function')return;
+    const target=ui.view.target,ids=new Set((state.messages?.[target]||[]).filter(m=>m?.planNotice).map(m=>m.planId));if(!ids.size)return;
+    const plans=current().plans.filter(p=>ids.has(p?.id));
+    const sig=JSON.stringify([busy,plans.map(p=>[p.id,p.status,p.scope,stagesOf(p).map(s=>s.status),(p.notices||[]).map(n=>[n.id,n.status,n.refs?.answer||''])])]);
+    // A chat just drawn already shows what the plan says; only a change after that draws its cards again.
+    const fresh=drawnFor!==target;if(sig===drawn&&!fresh&&!force)return;
+    drawn=sig;drawnFor=target;if(!fresh||force)refreshLiveChat(target);
+  }
   document.addEventListener('click',async e=>{
-    const el=e.target.closest?.('[data-plan-toggle],[data-plan-authorize],[data-plan-change],[data-plan-stop]');if(!el)return;
-    const id=el.closest('.plan-strip')?.dataset.planStrip,plan=current().plans.find(p=>p.id===id);if(!plan)return;
+    const el=e.target.closest?.('[data-plan-toggle],[data-plan-authorize],[data-plan-change],[data-plan-stop],[data-plan-answer]');if(!el)return;
+    const id=el.closest('[data-plan-strip]')?.dataset.planStrip||el.closest('[data-plan-card]')?.dataset.planCard,plan=current().plans.find(p=>p.id===id);if(!plan)return;
     if(el.hasAttribute('data-plan-toggle')){chosen.set(keyOf(plan),!isOpen(plan));mount();return;}
     if(el.hasAttribute('data-plan-change')){change(Number(el.dataset.planChange));return;}
+    if(el.dataset.planAnswer==='chat'){document.getElementById('message-input')?.focus();return;}
+    if(el.dataset.planAnswer==='reply'){
+      const n=el.dataset.notice,r=replies.get(n)||{open:false,draft:''};replies.set(n,{...r,open:!r.open});redrawCards(true);
+      if(!r.open)document.querySelector(`[data-plan-reply-text="${CSS.escape(n)}"]`)?.focus();
+      return;
+    }
     if(busy||el.disabled)return;
     // The tap is the person's own decision; its words are the button's.
     if(el.hasAttribute('data-plan-authorize'))await send(plan,{action:'authorize',planId:plan.id,through:Number(el.dataset.planAuthorize),quote:el.textContent.trim()});
     else if(el.hasAttribute('data-plan-stop')&&confirm('Stop this plan? Nothing new will start and work in progress is paused. You can choose a stage again later.'))await send(plan,{action:'stop',planId:plan.id});
+    else if(el.dataset.planAnswer in answers){const n=noticeOf(plan,{id:'plan-notice-'+el.dataset.notice});if(n)await answer(plan,n.id,answers[el.dataset.planAnswer](String(n.refs?.recommendation||'').trim()));}
   });
-  root.addEventListener('buddy-view-updated',mount);
-  root.addEventListener('buddy-worker-snapshot',()=>{deliver();mount();});
+  document.addEventListener('input',e=>{const n=e.target?.dataset?.planReplyText;if(n!==undefined)replies.set(n,{...(replies.get(n)||{}),open:true,draft:e.target.value});});
+  document.addEventListener('submit',async e=>{
+    const form=e.target.closest?.('[data-plan-reply]');if(!form)return;e.preventDefault();
+    const plan=current().plans.find(p=>p.id===form.closest('[data-plan-card]')?.dataset.planCard);if(!plan||busy)return;
+    await answer(plan,form.dataset.planReply,form.querySelector('textarea')?.value);
+  });
+  root.addEventListener('buddy-view-updated',()=>{mount();redrawCards();});
+  root.addEventListener('buddy-worker-snapshot',()=>{deliver();mount();redrawCards();});
   // A stage report brings its stage's files. One delivered before they were kept with it is drawn with them too, read from the plan; what was
   // saved stays as it was. A chat is drawn again for every streamed word, so they are looked up once per status reply (each brings new plan
   // objects, and with them any new results).
@@ -299,13 +405,21 @@
     if(!known.has(m.id))known.set(m.id,noticeFiles(state,plan,notice));
     return known.get(m.id);
   }
-  // In a group, a plan notice is Chief's message: shown under Chief's name and figure, like each member's own message in the group.
+  // In a group, a plan notice is Chief's message: shown under Chief's name and figure, like each member's own message in the group. A notice
+  // of a known plan is a card (a stage report, a decision, a stuck notice) or, for an authorization, one status line.
   if(typeof root.messageHTML==='function'){
     const original=root.messageHTML;
     root.messageHTML=function(m){
       if(!m?.planNotice)return original.apply(this,arguments);
-      const files=deliverablesOf(m),agent=typeof findAgent==='function'?findAgent(m.who):null;
-      if(!agent||typeof findGroup!=='function'||!findGroup(ui.view?.target))return original.call(this,files.length&&!m.files?.length?{...m,files}:m);
+      const files=deliverablesOf(m),agent=typeof findAgent==='function'?findAgent(m.who):null,group=!!agent&&typeof findGroup==='function'&&!!findGroup(ui.view?.target);
+      const plan=current().plans.find(p=>p?.id===m.planId),noticeId=String(m.id||'').replace(/^plan-notice-/,'');
+      const card=plan?noticeCard(plan,{...m,whoName:agent?.name},{filesHTML:root.BuddyFiles?.cards?.(files)||'',markdown:s=>BuddyMarkdown.render(s),busy,reply:replies.get(noticeId)}):null;
+      if(card?.line)return `<div class="message plan-status-line" data-plan-card="${esc(plan.id)}"><p><span class="plan-dot" aria-hidden="true"></span>${card.html}${m.time?`<time>${esc(m.time)}</time>`:''}</p></div>`;
+      if(card){
+        const author=group?(typeof authorColor==='function'?`<button type="button" class="message-author" style="${authorColor(agent)}" data-action="agent-info" data-id="${esc(agent.id)}">${esc(agent.name)}</button>`:`<strong>${esc(agent.name)}</strong>`):'';
+        return `<div class="message bot-message plan-notice plan-card-message${group?' team-chat-contribution':''}" data-plan-card="${esc(plan.id)}">${group?avatar(agent.id,true):''}<div class="bot-bubble">${group?`<div class="team-chat-author">${author}<span>${esc(card.label)}</span></div>`:''}${card.html}<time>${esc(m.time||'')}</time></div></div>`;
+      }
+      if(!agent||!group)return original.call(this,files.length&&!m.files?.length?{...m,files}:m);
       const author=typeof authorColor==='function'?`<button type="button" class="message-author" style="${authorColor(agent)}" data-action="agent-info" data-id="${esc(agent.id)}">${esc(agent.name)}</button>`:`<strong>${esc(agent.name)}</strong>`;
       return `<div class="message bot-message team-chat-contribution plan-notice">${avatar(agent.id,true)}<div class="bot-bubble"><div class="team-chat-author">${author}<span>Team plan</span></div><div class="reply-markdown">${BuddyMarkdown.render(m.body)}</div>${root.BuddyFiles?.cards?.(files)||''}<time>${esc(m.time||'')}</time></div></div>`;
     };

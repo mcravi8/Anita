@@ -59,104 +59,70 @@ async function open(directory,{width=1440,folder=project,plans=[draftPlan()],mes
 }
 const planArgs=page=>page.evaluate(()=>ops.filter(o=>o.operation==='plan').map(({requestId,...rest})=>rest));
 
-test('the panel holds the plan and the files at a wide window; closed, the plan card is back above the composer; the choice survives a reload',{skip,timeout:120000},async()=>{
+test('the chat offers its plan and its files as views; the plan view holds the whole plan and its buttons, the chat one line that opens it',{skip,timeout:120000},async()=>{
  const directory=await mkdtemp(path.join(tmpdir(),'buddy-project-sidebar-'));let context;
  try{
-  const opened=await open(directory,{reducedMotion:'no-preference'});context=opened.context;let {page,errors}=opened;
-  const dock=page.locator('[data-project-dock]');await dock.locator('.plan-strip').waitFor({timeout:8000});await dock.getByRole('tab',{name:'Files'}).waitFor({timeout:8000});
-  assert.deepEqual(await dock.getByRole('tab').allInnerTexts(),['Plan','Files'],'two tabs: the plan and the files');
-  assert.equal(await dock.getByRole('tab',{name:'Plan'}).getAttribute('aria-selected'),'true','the plan first');
-  await dock.getByText('Finish the directed-research paper').waitFor();await dock.getByText('Check every citation').waitFor();
-  assert.equal(await page.locator('.composer-wrap > .plan-strip').count(),0,'the plan is not shown twice');
-  assert.equal(await dock.locator('[data-plan-toggle]').count(),0,'in the panel the plan is always open');
-  const d=await dock.boundingBox(),composer=await page.locator('.composer').boundingBox();assert.ok(composer.x+composer.width<=d.x,'beside the chat, not over it');
-  // Files, then back.
-  await dock.getByRole('tab',{name:'Files'}).click();
-  await dock.locator('[data-action="project-file"][data-path="paper_draft.md"]').waitFor();
-  assert.equal(await dock.locator('.plan-strip').isVisible(),false);
-  assert.equal(await page.evaluate(()=>state.projectSidebar.tab),'files','the tab chosen is remembered');
-  await dock.getByRole('tab',{name:'Plan'}).click();await dock.locator('.plan-strip').waitFor();
-  // The stage button in the panel sends what the card sends: same handler, same words.
-  await dock.getByRole('button',{name:'Get stage 1 done',exact:true}).click();
-  await dock.getByRole('alert').filter({hasText:'Authorizing a stage needs the user’s own words.'}).waitFor({timeout:8000});
-  await dock.getByRole('button',{name:'Change stage 2',exact:true}).click();
-  assert.equal(await page.locator('#message-input').inputValue(),'Stage 2: ');await page.locator('#message-input').fill('');
-  // Close: it slides away, the plan card is back above the composer, and the open button takes its place in the header.
-  await dock.locator('[data-project-dock-close]').click();
-  assert.equal(await page.locator('.project-dock.dock-leave').evaluate(e=>getComputedStyle(e).animationName),'project-dock-close','it slides out');
-  await page.waitForFunction(()=>!document.querySelector('.project-dock'));
-  const card=page.locator('.composer-wrap > .plan-strip');await card.waitFor();
-  const opener=page.locator('.conversation-header [data-project-dock-open]');await opener.waitFor();
-  assert.equal(await page.evaluate(()=>document.activeElement?.matches('[data-project-dock-open]')),true,'focus moves to the open button');
-  assert.equal(await page.evaluate(()=>state.projectSidebar.closed),true);
-  assert.equal(await card.locator('[data-plan-toggle]').getAttribute('aria-expanded'),'true','a draft opens by itself, as before');
-  await card.getByRole('button',{name:'Get stage 1 done',exact:true}).click();
-  await page.waitForFunction(()=>ops.filter(o=>o.operation==='plan').length===2);
-  const [fromPanel,fromCard]=await planArgs(page);
-  assert.deepEqual(fromPanel,{operation:'plan',arguments:{action:'authorize',planId:'p1',through:1,quote:'Get stage 1 done'}});
-  assert.deepEqual(fromCard,fromPanel,'the panel and the card send the same request');
-  // Files stay one button away: the folder button opens the Files drawer while the panel is closed.
-  await page.evaluate(()=>setIsland(true));
-  await page.locator('.header-tools [data-action="workspace-details"][data-section="files"]').click();
-  await page.locator('.modal.drawer [data-project-list] [data-path="paper_draft.md"]').waitFor({timeout:5000});
-  await page.evaluate(()=>closeModal());
-  // Another chat: still closed.
-  await page.evaluate(()=>navigate('chat','chief'));await page.locator('.composer-wrap > .plan-strip').waitFor();
-  assert.equal(await page.locator('.project-dock').count(),0,'closed in every chat');
-  await page.locator('.conversation-header [data-project-dock-open]').waitFor();
+  const opened=await open(directory);context=opened.context;let {page,errors}=opened;
+  const tabs=page.locator('.island [data-chat-views]');await tabs.getByRole('tab',{name:'Files'}).waitFor({timeout:8000});
+  assert.deepEqual(await tabs.getByRole('tab').allInnerTexts(),['Chat','Plan','Files'],'the chat, its plan and its files');
+  const line=page.locator('.composer-wrap > .stage-strip');await line.waitFor();
+  assert.match(await line.innerText(),/Plan ready — which stage should the team get done\?/);
+  assert.equal(await page.locator('.plan-strip').count(),0,'the whole plan is in its view, not above the composer');
+  // The plan view, from its tab: always open, with the buttons the person taps.
+  await tabs.getByRole('tab',{name:'Plan'}).click();
+  const view=page.locator('[data-chat-pane="plan"]');await view.locator('.plan-strip').waitFor();
+  await view.getByText('Finish the directed-research paper').waitFor();await view.getByText('Check every citation').waitFor();
+  assert.equal(await view.locator('[data-plan-toggle]').count(),0,'in its view the plan is always open');
+  assert.equal(await page.locator('.composer').isVisible(),false,'the plan takes the chat’s place');
+  await view.getByRole('button',{name:'Get stage 1 done',exact:true}).click();
+  await view.getByRole('alert').filter({hasText:'Authorizing a stage needs the user’s own words.'}).waitFor({timeout:8000});
+  assert.deepEqual(await planArgs(page),[{operation:'plan',arguments:{action:'authorize',planId:'p1',through:1,quote:'Get stage 1 done'}}]);
+  // Files, then the chat again: the line above the composer opens the plan view too.
+  await tabs.getByRole('tab',{name:'Files'}).click();
+  await page.locator('[data-chat-pane="files"] [data-action="project-file"][data-path="paper_draft.md"]').waitFor();
+  assert.equal(await view.count(),0,'one view at a time');
+  await tabs.getByRole('tab',{name:'Chat'}).click();await line.click();await view.locator('.plan-strip').waitFor();
+  // Another chat opens on its messages; Chief supervises the plan, so Chief's chat offers it as well.
+  await page.evaluate(()=>navigate('chat','chief'));
+  await page.locator('.composer-wrap > .stage-strip').waitFor();
+  assert.equal(await page.locator('[data-chat-view="chat"][role="tab"]').getAttribute('aria-selected'),'true');
   await page.evaluate(()=>navigate('chat','team'));
-  // A relaunch: the Mac app hands the page what was saved, and the panel stays closed.
-  const last=await page.evaluate(()=>saved.at(-1));assert.equal(JSON.parse(last).projectSidebar.closed,true);
+  // A relaunch: the chat opens on its messages, with the views offered again.
+  const last=await page.evaluate(()=>saved.at(-1));
   await context.addInitScript(bridge,{initial:last,folder:project,plans:[draftPlan()]});
   await page.reload();await page.waitForFunction(()=>!!window.BuddyPlan&&!!window.BuddyWorkerUI);
   await page.evaluate(()=>BuddyWorkerUI.refresh(false));
-  await page.locator('.composer-wrap > .plan-strip').waitFor({timeout:8000});
-  await page.locator('.conversation-header [data-project-dock-open]').waitFor();
-  await page.waitForFunction(()=>fileCalls.some(c=>c[0]==='projectFiles'));await page.waitForTimeout(400);
-  assert.equal(await page.locator('.project-dock').count(),0,'still closed after the reload');
-  // Open again: it slides in, with the plan, and the card above the composer goes.
-  await page.locator('.conversation-header [data-project-dock-open]').click();
-  await dock.locator('.plan-strip').waitFor();
-  assert.equal(await dock.evaluate(e=>getComputedStyle(e).animationName),'project-dock-open','it slides in');
-  assert.equal(await page.locator('.composer-wrap > .plan-strip').count(),0);
-  assert.equal(await page.locator('[data-project-dock-open]').count(),0,'the open button goes while it is open');
-  assert.equal(await page.evaluate(()=>state.projectSidebar.closed),false);
-  assert.equal(await page.evaluate(()=>!!document.activeElement?.closest('[data-project-dock]')),true,'focus moves into the panel');
-  assert.equal(await dock.getByRole('tab',{name:'Files'}).getAttribute('aria-selected'),'false');
+  await page.locator('.composer-wrap > .stage-strip').waitFor({timeout:8000});
+  await page.locator('.island [data-chat-views] [data-chat-view="files"]').waitFor({timeout:8000});
+  assert.equal(await page.locator('[data-chat-pane]').count(),0);
   // Dark mode reads the theme’s tokens.
   await page.evaluate(()=>BuddyTheme.choose('dark'));
-  const colours=await page.evaluate(()=>{const probe=document.createElement('div');probe.style.background='var(--card)';document.body.append(probe);const card=getComputedStyle(probe).backgroundColor;probe.remove();return {panel:getComputedStyle(document.querySelector('[data-project-dock]')).backgroundColor,card,text:getComputedStyle(document.querySelector('[data-project-dock] .plan-banner')).color};});
-  assert.equal(colours.panel,colours.card);assert.equal(colours.card,'rgb(31, 31, 29)');assert.notEqual(colours.text,'rgb(20, 20, 20)','light text on the dark panel');
+  const colours=await page.evaluate(()=>{const probe=document.createElement('div');probe.style.background='var(--card)';document.body.append(probe);const card=getComputedStyle(probe).backgroundColor;probe.remove();const line=document.querySelector('.composer-wrap > .stage-strip');return {line:getComputedStyle(line).backgroundColor,card,text:getComputedStyle(line.querySelector('.plan-banner')).color};});
+  assert.equal(colours.line,colours.card);assert.equal(colours.card,'rgb(31, 31, 29)');assert.notEqual(colours.text,'rgb(20, 20, 20)','light text in dark mode');
   assert.deepEqual(errors,[]);
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
 });
 
-test('a plan with no folder gets the panel with the plan alone; a folder with no plan, the files alone; too narrow, neither',{skip,timeout:90000},async()=>{
+test('the views follow what the chat has: a plan alone, files alone, neither; a view that goes away gives back the chat',{skip,timeout:90000},async()=>{
  const directory=await mkdtemp(path.join(tmpdir(),'buddy-project-sidebar-'));let context;
  try{
   const opened=await open(directory,{folder:null});context=opened.context;const {page,errors}=opened;
-  const dock=page.locator('[data-project-dock]');await dock.locator('.plan-strip').waitFor({timeout:8000});
+  const tabs=page.locator('.island [data-chat-views]');await tabs.getByRole('tab',{name:'Plan'}).waitFor({timeout:8000});
   await page.waitForFunction(()=>fileCalls.some(c=>c[0]==='projectFiles'));await page.waitForTimeout(400);
-  assert.equal(await dock.getByRole('tab').count(),0,'one section, no tabs');
-  assert.equal(await dock.locator('.project-dock-header h2').innerText(),'Plan');
-  assert.equal(await dock.locator('[data-project-dock-body]').count(),0,'no files without a folder');
-  assert.equal(await page.locator('.composer-wrap > .plan-strip').count(),0);
-  // A folder, and the plan is gone: the files alone.
+  assert.deepEqual(await tabs.getByRole('tab').allInnerTexts(),['Chat','Plan'],'a plan with no folder: no Files view');
+  await tabs.getByRole('tab',{name:'Plan'}).click();await page.locator('[data-chat-pane="plan"] .plan-strip').waitFor();
+  // A folder, and the plan is gone: the plan view gives back the chat, and the files are offered.
   await page.evaluate(v=>{window.folderValue=v;window.plansValue=[];},project);
   await page.evaluate(()=>BuddyWorkerUI.refresh(false));await page.evaluate(()=>BuddyFiles.load({persist:false}));
-  await dock.locator('[data-path="paper_draft.md"]').waitFor({timeout:5000});
-  assert.equal(await dock.locator('.plan-strip').count(),0);assert.equal(await dock.getByRole('tab').count(),0);
-  assert.equal(await dock.locator('.project-dock-header h2').innerText(),'Files');
-  assert.equal(await page.locator('.plan-strip').count(),0,'no plan anywhere');
-  // Too narrow: no panel and no open button; the plan card is above the composer.
-  await page.evaluate(p=>{window.plansValue=[p];},draftPlan());await page.evaluate(()=>BuddyWorkerUI.refresh(false));
-  await dock.locator('.plan-strip').waitFor();
-  await page.setViewportSize({width:1200,height:900});
-  await page.waitForFunction(()=>!document.querySelector('[data-project-dock]'));
-  await page.locator('.composer-wrap > .plan-strip').waitFor();
-  assert.equal(await page.locator('[data-project-dock-open]').count(),0,'nothing to open when it would not fit');
-  await page.setViewportSize({width:1440,height:900});await dock.locator('.plan-strip').waitFor();
-  assert.equal(await page.locator('.composer-wrap > .plan-strip').count(),0);
+  await tabs.getByRole('tab',{name:'Files'}).waitFor({timeout:5000});
+  assert.deepEqual(await tabs.getByRole('tab').allInnerTexts(),['Chat','Files']);
+  assert.equal(await page.locator('[data-chat-pane]').count(),0,'the chat is back');
+  assert.equal(await page.locator('#chat-body').isVisible(),true);
+  assert.equal(await page.locator('.plan-strip,.stage-strip').count(),0,'no plan anywhere');
+  // Neither: no choice to show.
+  await page.evaluate(()=>{window.folderValue=null;});await page.evaluate(()=>BuddyFiles.load({persist:false}).catch(()=>{}));
+  await page.evaluate(()=>BuddyProjectDock.lost());
+  assert.equal(await page.locator('[data-chat-views]').count(),0);
   assert.deepEqual(errors,[]);
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
 });

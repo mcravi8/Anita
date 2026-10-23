@@ -186,3 +186,38 @@ test('the plan strip names every teammate working at once, and each of their tas
  // With one at work it reads as it always did.
  assert.equal(P.banner(p,pulse({lyra:{state:'working',taskId:'w1'}}),names,NOW),'Working on Stage 1 of 3 — 0 of 3 tasks done — Lyra is working on “Task t1” (30 min), plus 2 more');
 });
+
+test('plan notices read as cards: a stage report with its criteria, rows and what comes next; a decision with its recommendation; an authorization as one line',()=>{
+ const report='Acceptance: S01 PASS, independently signed off by Vera.\nOutputs: stages/S01_protocol/ contains spec_v1.sha256 and acceptance.md.\nDecision: Preserve frozen protocols because the rendering input is unchanged.\nIssues: No remaining S01 blockers.';
+ const holding=plan('holding',{state:'stage_done'},{scope:{...scope,status:'achieved'},stages:[stage(1,'done',[task('t1','done')]),stage(2,'proposed'),stage(3,'proposed')],
+  notices:[{id:'r1',kind:'stage_report',text:report+'\n\nNext is Stage 2 — Build: Goal of stage 2. Say “get stage 2 done”, or tell me what to change.',chat:true,status:'open',refs:{stageId:'s1'}},
+   {id:'e1',kind:'escalation',text:'Approve the recommended suspension? My recommendation: Suspend S02a recovery until runtime access is back. The team keeps working on the rest meanwhile.',chat:true,status:'open',refs:{question:'Approve the recommended suspension?',recommendation:'Suspend S02a recovery until runtime access is back',category:'objective'}},
+   {id:'a1',kind:'authorized',text:'Stage 2 authorized. The team is working on Stage 2 — Build. I\'ll report when it\'s done. I\'ll only interrupt you for sign-ins.',chat:true,status:'open'}]});
+ const msg=n=>({id:'plan-notice-'+n.id,planNotice:true,planId:'p1',noticeKind:n.kind,body:n.text,whoName:'Chief'});
+ assert.deepEqual(P.splitReport(holding.notices[0].text).rows.map(r=>r.label),['Acceptance','Outputs','Decision','Issues'],'labelled lines become rows, without the line about what comes next');
+ assert.equal(P.splitReport('Stage 1 — Research is done.').prose,'Stage 1 — Research is done.','a report in prose stays prose');
+ const card=P.noticeCard(holding,msg(holding.notices[0]));
+ assert.equal(card.label,'Stage report');
+ assert.match(card.html,/<h3>Stage 1 · Research<\/h3><span class="plan-chip done">Done<\/span>/);
+ assert.match(card.html,/<dt>Issues<\/dt><dd>No remaining S01 blockers.<\/dd>/);
+ assert.match(card.html,/class="met"><svg[^>]*>.*?<\/svg><span>Criterion 1a<\/span>/,'its stage’s criteria, met');
+ assert.match(card.html,/data-plan-authorize="2"[^>]*>Get stage 2 done</,'the next stage is the person’s choice, on the card');
+ assert.doesNotMatch(card.html,/Next is Stage 2/,'the plan’s sentence about what comes next is the footer, not part of the report');
+ const started={...holding,status:'active',scope:{...scope,through:2},stages:[stage(1,'done'),stage(2,'working'),stage(3,'proposed')]};
+ assert.match(P.noticeCard(started,msg(holding.notices[0])).html,/Stage 2 started/,'once chosen, the card says so instead of asking again');
+ assert.doesNotMatch(P.noticeCard(started,msg(holding.notices[0])).html,/data-plan-authorize/);
+ const decision=P.noticeCard(holding,msg(holding.notices[1]));
+ assert.match(decision.html,/Needs your decision · a change to the plan/);
+ assert.match(decision.html,/<h3>Approve the recommended suspension\?<\/h3>/);
+ assert.match(decision.html,/Chief recommends<\/span><p>Suspend S02a recovery until runtime access is back<\/p>/);
+ assert.match(decision.html,/data-plan-answer="approve" data-notice="e1"/);
+ const answered={...holding,notices:holding.notices.map(n=>n.id==='e1'?{...n,status:'answered',refs:{...n.refs,answer:'Approved. Go ahead.'}}:n)};
+ const done=P.noticeCard(answered,msg(holding.notices[1])).html;
+ assert.match(done,/You answered<\/span><span class="plan-card-answer">Approved. Go ahead.<\/span>/);
+ assert.doesNotMatch(done,/data-plan-answer/,'an answered question has no buttons');
+ assert.match(P.noticeCard(holding,msg(holding.notices[1]),{reply:{open:true,draft:'Wait until Monday'}}).html,/<textarea[^>]*>Wait until Monday<\/textarea>/,'a reply being written is kept');
+ const line=P.noticeCard(holding,msg(holding.notices[2]));
+ assert.equal(line.line,true);assert.equal(line.html,'<strong>Stage 2 authorized</strong><span> · working on Stage 2 — Build</span>');
+ assert.equal(P.noticeCard(null,msg(holding.notices[0])),null,'a notice whose plan is not known stays a plain message');
+ assert.equal(P.noticeCard(holding,{...msg(holding.notices[0]),noticeKind:'proposal'}),null);
+});

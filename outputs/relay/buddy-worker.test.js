@@ -287,3 +287,17 @@ test('Background work lists every task running now with its agent, and Run at on
  assert.match(worker.runLimitField(undefined),/<option value="3" selected>/,'three until the person chooses');
  assert.match(worker.runLimitField(9),/<option value="3" selected>/,'anything outside 1 to 6 shows the default');
 });
+
+test('the Work page has one row per piece of work: a plan task’s runs are one row, what needs the person first',()=>{
+ const at=m=>new Date(Date.parse('2026-10-22T12:00:00Z')-m*60000).toISOString();
+ const run=(id,status,m,extra={})=>({id,title:'S02a outstanding acceptance',agentId:'forge',status,planId:'p1',planTaskId:'t3',updatedAt:at(m),...extra});
+ const tasks=[run('o1','completed',600),run('o2','completed',500),run('o3','cancelled',300,{agentId:'lyra'}),run('w3','running',2),
+  {id:'q1',title:'Find the 2015 data',agentId:'lyra',status:'waiting_user',updatedAt:at(30)},{id:'c1',title:'Containment',agentId:'forge',status:'completed',planTaskId:'t4',updatedAt:at(120)},
+  {id:'x1',title:'Old note',agentId:'chief',status:'failed',updatedAt:at(900)}];
+ const g=worker.workGroups(tasks);
+ assert.deepEqual(g.needs.map(r=>r.latest.id),['q1','x1'],'waiting for the person, and stopped, newest first');
+ assert.deepEqual(g.running.map(r=>[r.latest.id,r.earlier,r.finished,r.cancelled]),[['w3',3,2,1]],'the plan task’s latest run, with its earlier runs counted');
+ assert.deepEqual(g.finished.map(r=>r.latest.id),['c1']);
+ assert.deepEqual(worker.workGroups([]),{needs:[],running:[],finished:[]});
+ assert.deepEqual(worker.workGroups([{title:'no id'},null]),{needs:[],running:[],finished:[]},'only real tasks count');
+});

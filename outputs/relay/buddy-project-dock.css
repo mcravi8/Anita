@@ -1,10 +1,12 @@
 /* Chat · Plan · Files: views of the conversation, chosen in the chat's floating header (the island). The view chosen takes the whole conversation
    column under the header; the chat keeps its own width, and the plan and the files get the room of a page. Theme tokens only, so light and dark
    need nothing of their own. */
-.island .chat-views{flex:none;display:flex;gap:2px;margin:0 2px 0 4px;padding:3px;border-radius:999px;background:var(--soft)}
-.chat-view-tab{display:inline-flex;align-items:center;gap:6px;min-height:28px;margin:0;padding:0 12px;border:0;border-radius:999px;background:transparent;color:var(--text2);font-size:13px;font-weight:500;white-space:nowrap}
+.island .chat-views{position:relative;flex:none;display:flex;gap:2px;margin:0 2px 0 4px;padding:3px;border-radius:999px;background:var(--soft)}
+/* The selector: one piece under the chosen tab, gliding to the next with the same motion as the views. */
+.chat-views-thumb{position:absolute;top:3px;left:0;height:calc(100% - 6px);border-radius:999px;background:var(--card);box-shadow:0 1px 2px rgb(20 20 20 / .1),0 0 0 1px var(--line);pointer-events:none;transition:transform .42s cubic-bezier(.32,.72,0,1),width .42s cubic-bezier(.32,.72,0,1)}
+.chat-view-tab{position:relative;z-index:1;display:inline-flex;align-items:center;gap:6px;min-height:28px;margin:0;padding:0 12px;border:0;border-radius:999px;background:transparent;color:var(--text2);font-size:13px;font-weight:500;white-space:nowrap;transition:color .42s cubic-bezier(.32,.72,0,1)}
 .chat-view-tab:hover{color:var(--text)}
-.chat-view-tab[aria-selected="true"]{background:var(--card);color:var(--text);box-shadow:0 1px 2px rgb(20 20 20 / .1),0 0 0 1px var(--line)}
+.chat-view-tab[aria-selected="true"]{color:var(--text)}
 .chat-view-tab:focus-visible{outline:2px solid var(--text3);outline-offset:1px}
 .chat-view-tab .plan-dot{width:7px;height:7px}
 .chat-view-tab.tone-working .plan-dot,.chat-view-tab.tone-done .plan-dot{background:var(--ok)}
@@ -12,10 +14,15 @@
 .chat-view-tab.tone-review .plan-dot{background:var(--info)}
 .chat-view-tab.tone-ready .plan-dot{background:var(--ink)}
 
-/* Another view shows: the messages and the composer stay in the page, out of sight, so nothing typed or streaming is lost. */
+/* Another view shows: the messages and the composer stay in place, out of sight, so nothing typed, streaming or scrolled is lost; the plan and
+   the files lie over the whole column, under the floating header. While two views slide past each other both show, and nothing outside the
+   column does. */
 .center.conversation[data-view-shown="plan"]>.chat-body,.center.conversation[data-view-shown="plan"]>.composer-wrap,
-.center.conversation[data-view-shown="files"]>.chat-body,.center.conversation[data-view-shown="files"]>.composer-wrap{display:none}
-.chat-pane{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:84px 32px 40px}
+.center.conversation[data-view-shown="files"]>.chat-body,.center.conversation[data-view-shown="files"]>.composer-wrap{visibility:hidden}
+.center.conversation[data-view-sliding]>.chat-body,.center.conversation[data-view-sliding]>.composer-wrap{visibility:visible}
+.center.conversation[data-view-sliding]{overflow:clip}
+.chat-pane{position:absolute;inset:0;z-index:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:84px 32px 40px;background:var(--bg)}
+.chat-pane[hidden]{display:none}
 .chat-pane:focus{outline:none}
 .chat-pane-inner{width:100%;max-width:820px;margin:0 auto}
 .chat-pane-title{margin:0 0 16px;font-size:20px;font-weight:600;letter-spacing:-.01em;color:var(--text);overflow-wrap:anywhere}

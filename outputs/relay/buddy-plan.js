@@ -301,25 +301,29 @@
   // Same pattern as the setup offer: redrawn only when what it says changes. In the plan view the whole plan is in the view's slot, open; in the
   // chat it is one line at the top of the composer area that opens that view.
   function mount(){
-    const strips=[...document.querySelectorAll('.plan-strip,.stage-strip')];
-    const inChat=typeof ui!=='undefined'&&ui.view?.kind==='chat',slot=inChat?document.querySelector('[data-project-plan-slot]'):null;
-    const wrap=inChat?slot||document.querySelector('.composer-wrap'):null,docked=!!slot;
-    const {snapshot,plans}=current(),plan=wrap?planFor(state,ui.view,plans):null,old=strips.find(el=>el.parentElement===wrap);
-    for(const el of strips)if(el!==old||!plan)el.remove();
+    const inChat=typeof ui!=='undefined'&&ui.view?.kind==='chat';
+    const {snapshot,plans}=current(),plan=inChat?planFor(state,ui.view,plans):null;
+    // Both places are kept while the chat is on screen, so moving between the chat and its plan view never draws either again.
+    const slot=inChat?document.querySelector('[data-project-plan-slot]'):null,wrap=inChat?document.querySelector('.composer-wrap'):null;
+    for(const el of document.querySelectorAll('.plan-strip,.stage-strip'))if(!plan||el.parentElement!==slot&&el.parentElement!==wrap)el.remove();
     if(!plan)return;
     // A refusal stays on the strip until the next tap, or until the plan itself moves on.
     if(failures.has(plan.id)&&failures.get(plan.id).state!==keyOf(plan))failures.delete(plan.id);
     const offline=snapshot.online===false,pulse=root.BuddyWorkerUI?.pulse?.();
-    const html=docked?stripHTML(plan,pulse,names(),{open:true,docked,busy,offline,error:failures.get(plan.id)?.message||''}):stageStripHTML(plan,pulse,names(),{offline});
+    if(slot)place(slot,stripHTML(plan,pulse,names(),{open:true,docked:true,busy,offline,error:failures.get(plan.id)?.message||''}),true);
+    if(wrap)place(wrap,stageStripHTML(plan,pulse,names(),{offline}),false);
+  }
+  function place(host,html,docked){
+    const old=[...host.children].find(el=>el.matches('.plan-strip,.stage-strip'));
     if(old&&shown.get(old)===html)return;
-    const chat=document.getElementById('chat-body'),bottom=!!chat&&chat.scrollHeight-chat.scrollTop-chat.clientHeight<120;
+    const chat=document.getElementById('chat-body'),bottom=!docked&&!!chat&&chat.scrollHeight-chat.scrollTop-chat.clientHeight<120;
     const focus=old&&old.contains(document.activeElement)?focusKey(document.activeElement):null,scroll=old?.querySelector('.plan-strip-body')?.scrollTop||0;
-    const had=!!old&&(old.contains(document.activeElement)||document.activeElement===document.body);
+    const view=host.closest('[data-chat-pane]'),had=docked&&!!old&&!!view&&!view.hidden&&(old.contains(document.activeElement)||document.activeElement===document.body);
     const holder=document.createElement('div');holder.innerHTML=html;const next=holder.firstElementChild;shown.set(next,html);
-    if(old)old.replaceWith(next);else wrap.insertAdjacentElement('afterbegin',next);
+    if(old)old.replaceWith(next);else host.insertAdjacentElement('afterbegin',next);
     const inner=next.querySelector('.plan-strip-body');if(inner)inner.scrollTop=scroll;
     // A button that went with the redraw (a stage now started) leaves focus in the view, not on the page.
-    if(focus&&next.querySelector(focus))next.querySelector(focus).focus({preventScroll:true});else if(had&&docked)next.closest('[data-chat-pane]')?.focus({preventScroll:true});
+    if(focus&&next.querySelector(focus))next.querySelector(focus).focus({preventScroll:true});else if(had)view.focus({preventScroll:true});
     if(bottom)chat.scrollTop=chat.scrollHeight;
   }
   function deliver(){

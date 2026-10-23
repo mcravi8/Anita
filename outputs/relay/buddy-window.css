@@ -10,3 +10,23 @@
 .buddy-native-window .shell.sidebar-compact .compact-chat-search{margin-top:var(--titlebar-inset,0px)}
 .buddy-native-window .main-shell,
 .buddy-native-window .modal.drawer{border-top:var(--titlebar-inset,0px) solid transparent}
+/* The strip already keeps the first row clear of the window buttons, so the header adds only a little room of its own under it: the logo line
+   sits just below the strip, level with the chat's floating header and with the bar at the top of the other pages, instead of a band further
+   down. Everything in the header band moves up by
+   the same 16px, wide and as a rail, so the two stay on one grid (buddy-sidebar-motion.css); the chat's messages, the fade they scroll under,
+   and the Plan and Files views follow the floating header up by its 10px. */
+@media(min-width:681px){
+  .buddy-native-window .sidebar-header,.buddy-native-window .shell.sidebar-compact .sidebar-header{padding-top:4px;min-height:62px}
+  .buddy-native-window .sidebar-header .sidebar-layout-toggle,.buddy-native-window .sidebar-header [data-action="new-chat"],
+  .buddy-native-window .sidebar-header .activity-nav,.buddy-native-window .sidebar-header .pending-suggestions-button{top:8px}
+  .buddy-native-window .sidebar .compact-chat-search{top:62px}
+  .buddy-native-window .shell.sidebar-compact .sidebar-header .activity-nav,.buddy-native-window .shell.sidebar-compact .sidebar-header [data-action="new-chat"]{top:42px}
+  .buddy-native-window .shell.sidebar-compact .sidebar-header .sidebar-layout-toggle,.buddy-native-window .shell.sidebar-compact .sidebar-header .pending-suggestions-button,
+  .buddy-native-window .shell.sidebar-compact .sidebar .compact-chat-search{top:76px}
+}
+.buddy-native-window .center.conversation>.conversation-header{padding-top:4px}
+.buddy-native-window .secondary-header{padding-top:8px;padding-bottom:8px}
+.buddy-native-window .center.conversation>.chat-body{padding-top:74px}
+.buddy-native-window .center.conversation::before{height:74px}
+.buddy-native-window .chat-pane{padding-top:74px}
+@media(max-width:900px){.buddy-native-window .chat-pane{padding-top:70px}}

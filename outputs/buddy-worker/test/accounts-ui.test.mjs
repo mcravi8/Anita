@@ -90,7 +90,7 @@ test('Don’t closes the card and says so; a reset asks in its own words',{skip,
   const second=page.locator('[data-signin-key="account:t1:a2"]');await second.waitFor({timeout:8000});
   await page.evaluate(()=>{replies.account=[{answered:true,allow:false,reviewId:'a2'}];});
   await second.getByRole('button',{name:'Don’t'}).click();
-  await second.getByText('Not now. JobApply won’t create an account on second.example.').waitFor();
+  await second.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Not now. JobApply won’t create an account on second.example.'}).waitFor();
   assert.deepEqual(await page.evaluate(()=>calls.at(-1)),{action:'account',taskId:'t1',reviewId:'a2',allow:false});
   const reset=page.locator('[data-signin-key="account:t1:a3"]');
   await reset.getByText('JobApply wants to reset your password on reset.example through your email — is that fine?',{exact:true}).waitFor();
@@ -119,7 +119,7 @@ test('a sign-up Buddy stopped for money: what it asks for, Open the page and Ski
   assert.deepEqual(await page.evaluate(()=>ops.filter(o=>o.operation==='browser')),[{operation:'browser',taskId:'t2',url:'https://trial.example/join'}]);
   await page.evaluate(()=>{replies.skip=[{skipped:true}];});
   await card.getByRole('button',{name:'Skip'}).click();
-  await card.getByText('Skipped — JobApply goes on without it.').waitFor();
+  await card.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Skipped — JobApply goes on without it.'}).waitFor();
   assert.deepEqual(await page.evaluate(()=>calls.at(-1)),{action:'skip',taskId:'t2'});
   assert.deepEqual(errors,[]);
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
@@ -149,7 +149,7 @@ test('a sign-in that asks for both: the email filled in, the password with an ey
   assert.equal(await card.getByLabel('Password',{exact:true}).getAttribute('type'),'password');
   await page.evaluate(()=>{replies.secret=[{sent:true,signedIn:true,remembered:true}];});
   await card.getByRole('button',{name:'Send'}).click();
-  await card.getByText('Sent — signed in. Remembered for jobs.ubs.com.').waitFor();
+  await card.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Sent — signed in. Remembered for jobs.ubs.com.'}).waitFor();
   assert.deepEqual(await page.evaluate(()=>calls.at(-1)),{action:'secret',taskId:'t1',reviewId:'r1',value:SECRET,username:EMAIL,remember:true});
   assert.deepEqual(await nowhere(page,SECRET),[],'what was typed is nowhere on the page');
   // A password field alone has the eye and the same line.

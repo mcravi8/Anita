@@ -212,9 +212,7 @@ test('plan notices read as cards: a stage report with its criteria, rows and wha
  assert.match(decision.html,/Chief recommends<\/span><p>Suspend S02a recovery until runtime access is back<\/p>/);
  assert.match(decision.html,/data-plan-answer="approve" data-notice="e1"/);
  const answered={...holding,notices:holding.notices.map(n=>n.id==='e1'?{...n,status:'answered',refs:{...n.refs,answer:'Approved. Go ahead.'}}:n)};
- const done=P.noticeCard(answered,msg(holding.notices[1])).html;
- assert.match(done,/You answered<\/span><span class="plan-card-answer">Approved. Go ahead.<\/span>/);
- assert.doesNotMatch(done,/data-plan-answer/,'an answered question has no buttons');
+ assert.deepEqual(P.noticeCard(answered,msg(holding.notices[1])),{hidden:true},'answered, the question leaves the chat');
  assert.match(P.noticeCard(holding,msg(holding.notices[1]),{reply:{open:true,draft:'Wait until Monday'}}).html,/<textarea[^>]*>Wait until Monday<\/textarea>/,'a reply being written is kept');
  const line=P.noticeCard(holding,msg(holding.notices[2]));
  assert.equal(line.line,true);assert.equal(line.html,'<strong>Stage 2 authorized</strong><span> · working on Stage 2 — Build</span>');

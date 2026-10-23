@@ -139,10 +139,11 @@ test('a stage report and a decision are cards in the chat; the next stage and th
   assert.match(await decision.innerText(),/Needs your decision · a change to the plan/);
   assert.match(await decision.innerText(),/Chief recommends\s+Suspend S02a recovery until runtime access is back/);
   await decision.getByRole('button',{name:'Approve',exact:true}).dblclick();
-  await decision.getByText('You answered').waitFor({timeout:8000});
+  // Answered, the question leaves the chat, and a toast says the answer went.
+  await decision.waitFor({state:'detached',timeout:8000});await page.locator('#toast').filter({hasText:'Sent to Chief.'}).waitFor({timeout:8000});
   const answers=await page.evaluate(()=>operations.filter(o=>o.operation==='plan'&&o.arguments.action==='answer').map(o=>o.arguments));
   assert.deepEqual(answers,[{action:'answer',planId:'p1',escalationId:'e1',answer:'Approved. Go ahead with your recommendation: Suspend S02a recovery until runtime access is back',quote:'Approved. Go ahead with your recommendation: Suspend S02a recovery until runtime access is back'}],'one answer, the person’s own');
-  assert.equal(await decision.getByRole('button').count(),0,'an answered question has no buttons');
+  assert.equal(await page.locator('#messages [data-chat-item="plan-notice-e1"]').count(),0,'the answered question is not in the chat');
   // A question with no recommendation is answered in words.
   const question=page.locator('#messages [data-chat-item="plan-notice-e2"] .plan-card-decision');
   await question.getByRole('button',{name:'Reply',exact:true}).click();
@@ -150,7 +151,7 @@ test('a stage report and a decision are cards in the chat; the next stage and th
   await box.fill('Use 2015, the year the paper uses.');
   await page.evaluate(()=>refreshLiveChat('team'));assert.equal(await question.locator('textarea').inputValue(),'Use 2015, the year the paper uses.','what is written survives a redraw');
   await question.getByRole('button',{name:'Send answer',exact:true}).click();
-  await question.getByText('Use 2015, the year the paper uses.').waitFor({timeout:8000});
+  await question.waitFor({state:'detached',timeout:8000});
   assert.equal(await page.evaluate(()=>operations.filter(o=>o.operation==='plan'&&o.arguments.action==='answer').at(-1).arguments.answer),'Use 2015, the year the paper uses.');
   assert.deepEqual(errors,[]);
  }finally{await context?.close();await rm(dir,{recursive:true,force:true});}

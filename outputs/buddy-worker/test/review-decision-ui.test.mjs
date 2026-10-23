@@ -41,10 +41,12 @@ async function open(directory,options={}){
  await page.locator('.reply-content').filter({hasText:'need your approval'}).waitFor({timeout:8000});
  return {context,page,errors};
 }
-const line=page=>page.locator('#messages .reply-content').first().innerText();
+// Answered, the request leaves the chat; the saved message keeps what was decided (the task's page says it too).
+const asked=page=>page.locator('#messages [data-chat-item^="worker-code-task-"]');
+const recorded=page=>page.evaluate(()=>state.messages.coder[0].body);
 const reviewCalls=page=>page.evaluate(()=>calls.filter(c=>c.operation==='review'));
 
-test('an approval is two buttons; Approve sends what Approve once + Continue sent, once, and the chat message then reads approved, after a reload too',{skip,timeout:60000},async()=>{
+test('an approval is two buttons; Approve sends what Approve once + Continue sent, once, and the request then leaves the chat, after a reload too',{skip,timeout:60000},async()=>{
  const directory=await mkdtemp(path.join(tmpdir(),'buddy-review-ui-'));let context;
  try{
   const opened=await open(directory);context=opened.context;const {page,errors}=opened;
@@ -58,24 +60,23 @@ test('an approval is two buttons; Approve sends what Approve once + Continue sen
   await page.waitForFunction(()=>calls.some(c=>c.operation==='review'));await page.waitForTimeout(500);
   assert.deepEqual(await reviewCalls(page),[{operation:'review',taskId:'code-task',id:'cmd',answers:{command:['Accept']},cancel:false,accept:true}],'one answer, the same body the old Accept + Continue sent');
   await page.evaluate(()=>closeModal());
-  await page.waitForFunction(()=>/— approved$/.test(document.querySelector('#messages .reply-content')?.innerText||''));
-  assert.equal(await line(page),'Request to run curl … data/SPX_History.csv — approved');
+  await page.waitForFunction(()=>/— approved$/.test(state.messages.coder[0]?.body||''));await asked(page).waitFor({state:'detached'});
+  assert.equal(await recorded(page),'Request to run `curl … data/SPX_History.csv` — approved','the message keeps what was decided');
   assert.equal(await page.getByRole('button',{name:'Review task'}).count(),0,'Review task is gone once answered');
   assert.equal(await page.evaluate(()=>state.messages.coder.length),1,'the same message, changed in place');
-  assert.ok(await page.locator('#messages .reply-content p').first().evaluate(p=>p.getClientRects().length===1&&p.getBoundingClientRect().height<=parseFloat(getComputedStyle(p).lineHeight)*1.2),'one line');
   await page.evaluate(()=>render());
-  assert.equal(await line(page),'Request to run curl … data/SPX_History.csv — approved','a re-render keeps it');
+  assert.equal(await asked(page).count(),0,'a re-render does not bring it back');
   // A reload: the Mac app hands the page what was last saved.
   const last=await page.evaluate(()=>saved.at(-1));assert.match(last,/— approved/);
   await page.addInitScript(raw=>{window.BuddyDesktop={initialState:raw,saveState:async()=>({saved:true}),worker:async p=>p.operation==='status'?{online:true,paused:false,tasks:[],routines:[],decisions:[]}:p.operation==='notify'?{notifications:{}}:{task:null}};},last);
-  await page.reload();await page.waitForFunction(()=>!!window.BuddyWorkerUI&&!!document.querySelector('#messages .reply-content'));
-  assert.equal(await line(page),'Request to run curl … data/SPX_History.csv — approved','a reload keeps it');
+  await page.reload();await page.waitForFunction(()=>!!window.BuddyWorkerUI&&!!document.querySelector('#messages'));
+  assert.equal(await asked(page).count(),0,'nor a reload');
   assert.equal(await page.getByRole('button',{name:'Review task'}).count(),0);
   assert.deepEqual(errors,[]);
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
 });
 
-test('Disapprove sends what Cancel action sent and the chat message reads disapproved',{skip,timeout:60000},async()=>{
+test('Disapprove sends what Cancel action sent and the request leaves the chat',{skip,timeout:60000},async()=>{
  const directory=await mkdtemp(path.join(tmpdir(),'buddy-review-ui-'));let context;
  try{
   const opened=await open(directory);context=opened.context;const {page,errors}=opened;
@@ -85,29 +86,24 @@ test('Disapprove sends what Cancel action sent and the chat message reads disapp
   await page.waitForFunction(()=>calls.some(c=>c.operation==='review'));
   assert.deepEqual(await reviewCalls(page),[{operation:'review',taskId:'code-task',id:'cmd',answers:{},cancel:true,accept:false}],'the same body the old Cancel action sent');
   await page.evaluate(()=>closeModal());
-  await page.waitForFunction(()=>/— disapproved$/.test(document.querySelector('#messages .reply-content')?.innerText||''));
-  assert.equal(await line(page),'Request to run curl … data/SPX_History.csv — disapproved');
+  await page.waitForFunction(()=>/— disapproved$/.test(state.messages.coder[0]?.body||''));await asked(page).waitFor({state:'detached'});
+  assert.equal(await recorded(page),'Request to run `curl … data/SPX_History.csv` — disapproved');
   assert.equal(await page.getByRole('button',{name:'Review task'}).count(),0);
-  await page.evaluate(()=>render());assert.equal(await line(page),'Request to run curl … data/SPX_History.csv — disapproved');
   assert.deepEqual(errors,[]);
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
 });
 
-test('an approval the supervisor gave reads approved by Chief, with the reason on hover and under Details',{skip,timeout:60000},async()=>{
+test('an approval the supervisor gave leaves the chat, and the message keeps that Chief answered and why',{skip,timeout:60000},async()=>{
  const directory=await mkdtemp(path.join(tmpdir(),'buddy-review-ui-'));let context;
  try{
   const opened=await open(directory,{agents:[['coder','Coder'],['chief','Chief']]});context=opened.context;const {page,errors}=opened;
   await page.evaluate(()=>{fixtureTask={...fixtureTask,status:'running',progress:'Running the approved operation',attentionKey:'Running the approved operation',updatedAt:'2026-10-20T10:00:20Z',reviews:fixtureTask.reviews.map(r=>({...r,status:'answered',answeredBy:'supervisor',answeredByName:'Chief',answerReason:'A read-only download of public prices into the project.',answeredAt:'2026-10-20T10:00:19Z'}))};});
   await page.evaluate(()=>BuddyWorkerUI.refresh(false));
-  await page.waitForFunction(()=>/approved by Chief$/.test(document.querySelector('#messages .reply-content')?.innerText||''),null,{timeout:8000});
-  assert.equal(await line(page),'Request to run curl … data/SPX_History.csv — approved by Chief');
+  await page.waitForFunction(()=>/approved by Chief$/.test(state.messages.coder[0]?.body||''),null,{timeout:8000});await asked(page).waitFor({state:'detached'});
+  assert.equal(await recorded(page),'Request to run `curl … data/SPX_History.csv` — approved by Chief','answered by Chief, it leaves the chat; the message keeps who answered');
+  assert.equal(await page.evaluate(()=>state.messages.coder[0].workerDecision.reason),'A read-only download of public prices into the project.','and why');
   assert.equal(await page.getByRole('button',{name:'Review task'}).count(),0);
   assert.equal(await page.evaluate(()=>calls.some(c=>c.operation==='review')),false,'the page answered nothing itself');
-  const bubble=page.locator('#messages .bot-bubble').first();
-  assert.match(await bubble.getAttribute('title'),/Chief: A read-only download of public prices into the project\./,'the reason on hover');
-  await bubble.locator('details > summary').click();
-  assert.match(await bubble.locator('details').innerText(),/A read-only download of public prices into the project\./,'and under Details');
-  await page.evaluate(()=>render());assert.equal(await line(page),'Request to run curl … data/SPX_History.csv — approved by Chief');
   assert.match(await page.evaluate(()=>saved.at(-1)),/approved by Chief/,'saved with the chat');
   assert.deepEqual(errors,[]);
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
@@ -144,8 +140,8 @@ test('a command Buddy assessed reads as one plain line of what and why, with the
   await page.waitForFunction(()=>calls.some(c=>c.operation==='review'));
   assert.deepEqual(await reviewCalls(page),[{operation:'review',taskId:'code-task',id:'cmd',answers:{command:['Accept']},cancel:false,accept:true}],'the same answer as before');
   await page.evaluate(()=>closeModal());
-  await page.waitForFunction(()=>/— approved$/.test(document.querySelector('#messages .reply-content')?.innerText||''));
-  assert.equal(await line(page),'Download 2 files from download.documentfoundation.org and arxiv.org — approved');
+  await page.waitForFunction(()=>/— approved$/.test(state.messages.coder[0]?.body||''));await asked(page).waitFor({state:'detached'});
+  assert.equal(await recorded(page),'Download 2 files from download.documentfoundation.org and arxiv.org — approved');
   assert.deepEqual(errors,[]);
  }finally{await context?.close();await rm(directory,{recursive:true,force:true});}
 });

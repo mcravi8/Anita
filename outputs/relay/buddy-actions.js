@@ -77,7 +77,10 @@
     const questions=r.questions||[],quick=questions.length===1&&questions[0].options?.length&&!questions[0].isOther;
     return `<section class="action-review" data-tool-input="${esc(r.id)}" aria-label="${esc(heading)}" aria-busy="${busy}"><header>${agent?avatar(agent.id,true):''}<div><strong>${esc(heading)}</strong><small>${esc(r.agentName||agent?.name||'Agent')} needs your review</small></div></header>${details(r)}<form data-tool-input-form="${esc(r.id)}">${questions.map((q,i)=>`<fieldset ${busy?'disabled':''}><legend>${esc(q.question)}</legend>${quick?`<div class="action-choices">${q.options.map((o,index)=>`<button type="button" class="${o.label.toLowerCase()==='accept'?'primary-button':'border-button'}" data-input-choice="${esc(r.id)}" data-question="${esc(q.id)}" data-option="${index}" title="${esc(o.description||'')}">${esc(choiceLabel(r,o))}</button>`).join('')}</div>${q.options.some(o=>o.description)?`<details class="action-choice-help"><summary>What the choices mean${icon('down')}</summary>${q.options.map(o=>`<p><strong>${esc(o.label)}:</strong> ${esc(o.description||'')}</p>`).join('')}</details>`:''}`:`${(q.options||[]).map((o,index)=>`<label class="action-option"><input type="radio" name="q${i}" data-input-question="${esc(q.id)}" value="${index}" ${state.toolInputDrafts?.[r.id]?.[q.id]===o.label?'checked':''}><span><strong>${esc(o.label)}</strong><small>${esc(o.description||'')}</small></span></label>`).join('')}${!q.options?.length||q.isOther?`<label class="action-freeform">${q.isOther?'Custom answer':'Your answer'}<textarea id="action-answer-${esc(r.id)}-${i}" data-input-question="${esc(q.id)}" maxlength="10000" placeholder="Type your answer…">${esc(q.options?.some(o=>o.label===state.toolInputDrafts?.[r.id]?.[q.id])?'':state.toolInputDrafts?.[r.id]?.[q.id]||'')}</textarea></label>`:''}`}</fieldset>`).join('')}${errors.has(r.id)?`<p class="field-error" role="alert">${esc(errors.get(r.id))}</p>`:''}${busy?'<p class="action-wait" role="status">Submitting your choice…</p>':''}${!quick?`<div class="action-form-buttons"><button type="button" class="border-button" data-input-cancel="${esc(r.id)}" ${busy?'disabled':''}>Cancel</button><button class="primary-button" ${busy?'disabled':''}>Continue${icon('arrow')}</button></div>`:''}</form></section>`;
   }
-  api.cards=runId=>Object.values(state.toolInputs||{}).filter(r=>r.workspace===state.conversationWorkspace&&r.runId===runId).map(card).join('');
+  // A review leaves the reply once it is answered (or has ended); one that failed, or whose outcome Buddy could not confirm, stays, as it still
+  // needs a look before anything is tried again.
+  const shown=r=>['pending','failed','uncertain'].includes(r.status);
+  api.cards=runId=>Object.values(state.toolInputs||{}).filter(r=>r.workspace===state.conversationWorkspace&&r.runId===runId&&shown(r)).map(card).join('');
   function redraw(runId){
     const focus=document.activeElement,id=focus?.id,start=focus?.selectionStart,end=focus?.selectionEnd;
     const run=state.runs[runId];if(run)refreshLiveChat(run.target);
@@ -86,7 +89,9 @@
   async function answer(id,answers,cancel=false){
     const r=state.toolInputs?.[id];if(!r||r.status!=='pending'||sending.has(id)||!window.BuddyDesktop?.answerToolInput)return;
     sending.add(id);errors.delete(id);redraw(r.runId);
-    try{const result=await window.BuddyDesktop.answerToolInput({id,answers,cancel});if(!result.accepted||!result.request)throw Error('Buddy could not verify this choice. Your answer is preserved.');merge(state,[result.request]);save();}
+    try{const result=await window.BuddyDesktop.answerToolInput({id,answers,cancel});if(!result.accepted||!result.request)throw Error('Buddy could not verify this choice. Your answer is preserved.');merge(state,[result.request]);save();
+      // The card leaves the reply; a toast says the answer went.
+      showToast(cancel?'Declined.':`Sent — ${r.agentName||findAgent(r.agentId)?.name||'the agent'} is continuing.`);}
     catch(error){errors.set(id,String(error.message||error));}
     finally{sending.delete(id);redraw(r.runId);}
   }

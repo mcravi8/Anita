@@ -58,24 +58,23 @@ test('the access card asks once with ✓ / ✗, answers through the bridge, cont
 
   // ✓: the app's bridge records the person's click; the card says the agent is continuing, and the chats that waited get the note.
   await card.getByRole('button',{name:'✓ Allow'}).click();
-  await page.getByText('Allowed — Chief and Lyra are continuing.').waitFor();
+  // Answered, the card leaves the chat; a toast says what came of it.
+  await card.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Allowed — Chief and Lyra are continuing.'}).waitFor();
   assert.deepEqual(await page.evaluate(()=>calls.filter(c=>c.action==='answer')),[{action:'answer',id:'r1',choice:'allow'}]);
   await page.waitForFunction(()=>sent.length===2,null,{timeout:5000});
   const sent=await page.evaluate(()=>sent);
   assert.deepEqual(sent.map(p=>[p.agentId||p.groupId,p.text]).sort(),[['chief','Access to Desktop granted; continue.'],['team','Access to Desktop granted; continue.']],'a follow-up turn in each chat that waited');
   assert.equal(await page.evaluate(()=>state.drafts.chief),'a draft the person is still writing','the person’s draft is left alone');
-  assert.equal(await card.getByRole('button',{name:'✓ Allow'}).count(),0,'an answered card has no buttons');
 
-  // The group's copy of the same request says the same, without buttons.
-  await page.evaluate(()=>navigate('chat','team'));
-  const copy=page.locator('[data-access-request="r1"]');await copy.waitFor();
-  assert.match(await copy.innerText(),/Allowed — Chief and Lyra are continuing\./);assert.equal(await copy.getByRole('button').filter({hasText:'Allow'}).count(),0);
+  // The group's copy of the same request has left too.
+  await page.evaluate(()=>navigate('chat','team'));await page.locator('#messages').waitFor();
+  assert.equal(await page.locator('[data-access-request="r1"]').count(),0);
 
   // ✗ on the other request: recorded as not allowed, and nobody is sent a turn.
   await page.evaluate(()=>navigate('chat','chief'));
   const second=page.locator('[data-access-request="r2"]');await second.waitFor();
   await second.getByRole('button',{name:'✗ Don’t allow'}).click();
-  await second.getByText('Not allowed.').waitFor();
+  await second.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Not allowed.'}).waitFor();
   assert.deepEqual(await page.evaluate(()=>calls.filter(c=>c.action==='answer').at(-1)),{action:'answer',id:'r2',choice:'deny'});
   assert.equal(await page.evaluate(()=>sent.length),2,'no turn after a no');
 
@@ -83,7 +82,7 @@ test('the access card asks once with ✓ / ✗, answers through the bridge, cont
   await page.evaluate(()=>{for(const run of Object.values(state.runs))BuddyChat.apply(state,{runId:run.runId,key:run.key,status:'completed',text:'Read it.'});});
   const third=page.locator('[data-access-request="r3"]');
   await third.getByRole('button',{name:'Allow my whole home folder'}).click();
-  await third.getByText('Allowed — Chief is continuing.').waitFor();
+  await third.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Allowed — Chief is continuing.'}).waitFor();
   assert.deepEqual(await page.evaluate(()=>calls.filter(c=>c.action==='answer').at(-1)),{action:'answer',id:'r3',choice:'home'});
   await page.waitForFunction(()=>sent.length===3,null,{timeout:5000});
   assert.equal(await page.evaluate(()=>sent.at(-1).text),'Access to Documents granted; continue.');

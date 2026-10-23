@@ -66,14 +66,14 @@ test('a website password field offers “Remember for <site> (<account>)”, on 
   assert.equal(await message.getByRole('checkbox',{name:/Remember for shop\.example/}).isChecked(),false,'the choice survives a redraw');
   await page.evaluate(()=>{replies.secret=[{sent:true,signedIn:true}];});
   await message.locator('[data-signin-holder] input').fill(SECRET);await message.getByRole('button',{name:'Send'}).click();
-  await message.getByText('Sent — signed in').waitFor();
+  await message.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Sent — signed in'}).waitFor();
   assert.deepEqual(await page.evaluate(()=>calls.at(-1)),{action:'secret',taskId:'t1',reviewId:'r1',value:SECRET,remember:false});
   // Another request: on again by default, and the app says it remembered it.
   await snapshot(page,{signinRequests:[ask({key:'signin:t1:s2',reviewId:'r2'})]});
   const second=page.locator('[data-signin-key="signin:t1:s2"]');await second.waitFor();
   await page.evaluate(()=>{replies.secret=[{sent:true,signedIn:true,remembered:true}];});
   await second.locator('[data-signin-holder] input').fill(SECRET);await second.getByRole('button',{name:'Send'}).click();
-  await second.getByText('Sent — signed in. Remembered for shop.example.').waitFor();
+  await second.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Sent — signed in. Remembered for shop.example.'}).waitFor();
   assert.equal((await page.evaluate(()=>calls.at(-1))).remember,true);
   assert.deepEqual(await nowhere(page,SECRET),[],'what was typed is nowhere on the page');
   // A code field: nothing to remember.
@@ -82,7 +82,7 @@ test('a website password field offers “Remember for <site> (<account>)”, on 
   assert.equal(await code.getByRole('checkbox').count(),0);
   await page.evaluate(()=>{replies.secret=[{sent:true,signedIn:true}];});
   await code.locator('[data-signin-holder] input').fill('492011');await code.getByRole('button',{name:'Send'}).click();
-  await code.getByText('Sent — signed in').waitFor();
+  await code.waitFor({state:'detached'});
   assert.ok(!('remember' in await page.evaluate(()=>calls.at(-1))),'a code goes without a Remember choice');
   // An email-first sign-in (Google's own) asks which account, in a plain field, with nothing to remember.
   await snapshot(page,{signinRequests:[ask({key:'signin:t1:s4',reviewId:'r4',field:'username',step:'username',origin:'https://accounts.google.com',account:null})]});

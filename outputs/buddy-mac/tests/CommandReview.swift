@@ -457,5 +457,34 @@ import Foundation
         require(!BuddyCommandReview.unchanged(reviewed, project: project.path), "a script swapped for a link out of the project has changed, even with the same bytes")
         require(BuddyCommandReview.unchanged(inline.scripts.map(\.record), project: project.path), "inline code is part of the command itself")
         print("PASS: project scripts are read: Chief's real S01 run_guard/install/render commands go to the supervisor as scripts and its pgrep is a routine look; scripts that read secrets, send data out, delete or write outside the project or change the Mac go to the user with the reason; scripts outside the project, missing, too large, not text, or more than 4 stay with the user; a reviewed script that changed no longer counts as reviewed")
+
+        // Forge's real S04a request on 23 Oct 2026: headless Chrome turns a saved S02a figure (an SVG in the project) into a PNG for the Word
+        // draft, with its own profile in the project. Chrome is a program, not a script Buddy reads, so it was "a script from outside the project"
+        // and went to the user; it is a render of a project file into the project, which the supervisor decides.
+        let figures = project.appendingPathComponent("stages/S02a pooled/figures", isDirectory: true)
+        try FileManager.default.createDirectory(at: figures, withIntermediateDirectories: true)
+        let svg = figures.appendingPathComponent("empirical_120_VIX30D_full_event.svg"), page = svg.absoluteString
+        require(page.contains("%20"), "the figure's address carries an escaped space, as Forge's did: \(page)")
+        let chrome = "'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'"
+        let figureRender = assess("/bin/zsh -lc \"\(chrome) --headless --disable-gpu --no-first-run --user-data-dir=./chrome_profile --window-size=1200,800 --screenshot=./pooled_figure.png '\(page)'\"")
+        require(figureRender.routine && figureRender.hosts.isEmpty && figureRender.writes.contains("pooled_figure.png") && figureRender.writes.contains("chrome_profile")
+                && figureRender.reason == "A headless Chrome render of stages/S02a pooled/figures/empirical_120_VIX30D_full_event.svg into pooled_figure.png.", "Forge's figure render is routine: \(figureRender.reason) \(figureRender.writes)")
+        let pdf = assess("\(chrome) --headless=new --user-data-dir=/tmp/render-profile --no-pdf-header-footer --print-to-pdf=report/draft.pdf report/draft.html")
+        require(pdf.routine && pdf.writes.contains("report/draft.pdf"), "a PDF of a project page, with a profile in a temporary folder, is routine: \(pdf.reason)")
+        // Anything more stays with the user: a page on the internet, a file outside the project, the person's own profile (or none, which is
+        // theirs), an output outside the project, a window, an option Buddy does not know, or a browser somewhere else.
+        let notRender = [
+            "\(chrome) --headless --user-data-dir=./p --screenshot=a.png https://example.com/page.html",
+            "\(chrome) --headless --user-data-dir=./p --screenshot=a.png file:///etc/passwd",
+            "\(chrome) --headless --user-data-dir='\(NSHomeDirectory())/Library/Application Support/Google/Chrome' --screenshot=a.png '\(page)'",
+            "\(chrome) --headless --screenshot=a.png '\(page)'",
+            "\(chrome) --headless --user-data-dir=./p --screenshot=\(NSHomeDirectory())/Desktop/a.png '\(page)'",
+            "\(chrome) --user-data-dir=./p --screenshot=a.png '\(page)'",
+            "\(chrome) --headless --user-data-dir=./p --remote-debugging-port=9222 --screenshot=a.png '\(page)'",
+            "\(chrome) --headless --user-data-dir=./p --screenshot=a.png '\(page)' '\(page)'",
+            "'/tmp/Google Chrome' --headless --user-data-dir=./p --screenshot=a.png '\(page)'",
+        ]
+        for command in notRender { let v = assess(command); require(!v.routine, "stays with the user: \(command) → \(v.reason)") }
+        print("PASS: a headless browser rendering one project file into the project, with its own profile there or in a temporary folder, is routine (Forge's S04a figure render); a web page, a file or output outside the project, the person's own profile, a window or an unknown option is not")
     }
 }

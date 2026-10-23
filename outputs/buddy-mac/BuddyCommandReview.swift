@@ -369,9 +369,49 @@ enum BuddyCommandReview {
                 return run(w, at: here)
             }
         }
+        if let browser = browsers[head] { return render(browser, Array(w.dropFirst()), at: here) }
         // A project file run directly: ./x.py, stages/…/x.sh.
         if head.contains("/") { return run(w, at: here) }
         return refuse()
+    }
+    /// Browsers an agent may run headless on a project file, by where they are installed.
+    static let browsers: [String: String] = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome": "Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium": "Chromium",
+                                             "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge": "Edge"]
+    static let renderSwitches: Set<String> = ["--disable-gpu", "--no-first-run", "--no-default-browser-check", "--hide-scrollbars", "--disable-extensions", "--mute-audio",
+                                              "--disable-background-networking", "--run-all-compositor-stages-before-draw", "--no-pdf-header-footer", "--print-to-pdf-no-header", "--disable-dev-shm-usage"]
+    static let renderSizes: Set<String> = ["--window-size", "--virtual-time-budget", "--default-background-color", "--force-device-scale-factor", "--timeout"]
+    /// A headless browser rendering one project file into the project: Forge's S04a figure, Chrome screenshotting a saved SVG to a PNG for the
+    /// Word draft. Chrome is a program, not a script Buddy reads, so it read as "a script from outside the project" and went to the user. Its own
+    /// profile and its output must be in the project or a temporary folder, and the page a file in the project; a page on the internet, the
+    /// person's own profile (or none, which is theirs), a window, or any other option is not this.
+    private static func render(_ browser: String, _ args: [String], at here: Here) -> Result<Part, Refusal> {
+        var headless = false, profile: String?, outputs: [String] = [], pages: [String] = []
+        for a in args {
+            guard a.hasPrefix("--") else { pages.append(a); continue }
+            let pair = a.split(separator: "=", maxSplits: 1).map(String.init), option = pair[0], value = pair.count == 2 ? pair[1] : nil
+            switch option {
+            case "--headless":
+                guard value == nil || ["new", "old", "true"].contains(value ?? "") else { return refuse() }
+                headless = true
+            case "--user-data-dir":
+                guard let value, let place = here.reachable(value) else { return refuse(writesOutside) }
+                profile = place
+            case "--screenshot", "--print-to-pdf":
+                guard let place = here.reachable(value ?? (option == "--screenshot" ? "screenshot.png" : "output.pdf")) else { return refuse(writesOutside) }
+                outputs.append(place)
+            default:
+                if renderSwitches.contains(option), value == nil { continue }
+                guard renderSizes.contains(option), let value, value.range(of: #"^[A-Za-z0-9.,#]{1,32}$"#, options: .regularExpression) != nil else { return refuse() }
+            }
+        }
+        guard headless, let profile, !outputs.isEmpty, pages.count == 1 else { return refuse() }
+        var page = pages[0]
+        if page.lowercased().hasPrefix("file:") {
+            guard let url = URL(string: page), url.isFileURL, url.host == nil || url.host == "" || url.host == "localhost" else { return refuse() }
+            page = url.path
+        } else if page.contains(":") { return refuse() }
+        guard let shown = here.inside(page) else { return refuse(readsOutside) }
+        return .success(Part(kind: "a headless \(browser) render of \(shown) into \(outputs.joined(separator: " and "))", writes: outputs + [profile]))
     }
     /// A program after a `|`: only a read-only text tool (it reads what comes before it and prints, or saves it in the project with tee).
     private static func piped(_ w: [String], at here: Here) -> Result<Part, Refusal> {

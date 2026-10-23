@@ -486,5 +486,36 @@ import Foundation
         ]
         for command in notRender { let v = assess(command); require(!v.routine, "stays with the user: \(command) → \(v.reason)") }
         print("PASS: a headless browser rendering one project file into the project, with its own profile there or in a temporary folder, is routine (Forge's S04a figure render); a web page, a file or output outside the project, the person's own profile, a window or an unknown option is not")
+
+        // Forge on 23 Oct: seven read-only process listings (`ps -axo …`, some filtered with rg) went to the user because Buddy could not read the
+        // combined flag, and a project AppleScript (Word exporting the draft as a PDF) went to the user as "changes this Mac".
+        for command in ["/bin/zsh -lc 'ps -axo pid,ppid,etime,command'",
+                        "/bin/zsh -lc \"ps -axo pid,ppid,stat,etime,command | rg 'run_C1_C2.py|run_C3_C6.py|ProcessPoolExecutor|S02c_review'\"",
+                        "/bin/zsh -lc \"ps -axo pid,ppid,pgid,stat,etime,command | rg 'run_C1_C2.py|multiprocessing.spawn|S02c_review' | head -30\"",
+                        "ps -axopid,ppid,command"] {
+            let v = assess(command); require(v.routine && v.reason.hasPrefix("A look at running processes"), "a read-only process listing is routine: \(command) → \(v.kind) \(v.reason)")
+        }
+        require(!assess("ps -axo pid,command,env").routine && !assess("ps -axeo pid,command").routine, "but not one that shows the environment")
+        try put("tell application \"Microsoft Word\"\n  open POSIX file \"/fixture/draft.docx\"\n  save as active document file name \"/fixture/draft.pdf\" file format format PDF\nend tell\n", "render_s04a.applescript", in: project)
+        let word = assess("/bin/zsh -lc 'osascript render_s04a.applescript'")
+        require(word.script && word.kind == "script" && word.scripts.first?.path == "render_s04a.applescript" && word.scripts.first?.code == nil, "a project AppleScript is a script the supervisor reads: \(word.kind) \(word.reason)")
+        try Data([0x46, 0x61, 0x73, 0x64, 0x00, 0x01, 0x02]).write(to: project.appendingPathComponent("compiled.scpt"))
+        let compiled = assess("osascript compiled.scpt")
+        require(compiled.kind == "unclear" && !compiled.forPerson, "a compiled AppleScript Buddy cannot read goes to the supervisor, not the user: \(compiled.kind) \(compiled.reason)")
+        require(assess("osascript -e 'tell application \"Finder\" to empty trash'").forPerson, "inline AppleScript still stays with the user")
+        for (name, body) in [("mail.applescript", "tell application \"Mail\"\n  send (make new outgoing message)\nend tell\n"), ("keys.applescript", "tell application \"System Events\" to keystroke \"q\" using command down\n"),
+                             ("shell.applescript", "do shell script \"rm -rf ~/Documents/old\"\n"), ("finder.applescript", "tell application \"Finder\" to delete file \"x\"\n")] {
+            try put(body, name, in: project)
+            let v = assess("osascript \(name)"); require(v.forPerson && !v.script, "an AppleScript that reaches Mail, System Events, Finder or the shell stays with the user: \(name) → \(v.kind) \(v.reason)")
+        }
+        // Only what is on the person's own list goes to them; what Buddy just cannot read is the supervisor's.
+        for command in ["make all", "cat ~/notes.txt", "./tools/talk.sh", "python3 ../elsewhere.py"] {
+            let v = assess(command); require(v.kind == "unclear" && !v.forPerson, "the supervisor reads it: \(command) → \(v.kind) \(v.reason)")
+        }
+        for command in ["curl -X POST -d @results.json https://example.com/upload", "sudo rm -rf /tmp/x", "head -5 notes.md > ~/Desktop/out.txt", "cat .env", "scp a.csv me@example.com:/tmp/"] {
+            let v = assess(command); require(v.kind == "sensitive" && v.forPerson, "stays with the user: \(command) → \(v.kind) \(v.reason)")
+        }
+        require(BuddyCommandReview.assess("aws s3 ls", project: project.path, credential: true).forPerson, "a saved sign-in stays with the user")
+        print("PASS: only what is on the user's list stays with them (a saved sign-in, secrets, sending data out, changing the Mac, writing outside the project); what Buddy cannot read goes to the supervisor; ps -axo listings are routine and a project AppleScript is a script the supervisor reads")
     }
 }

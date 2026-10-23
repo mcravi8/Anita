@@ -47,7 +47,18 @@ enum BuddyCommandReview {
         var scripts: [Script] = []
         /// What it runs, in plain words ("Runs the project scripts a.py and b.py."), when it runs project scripts.
         var runs = ""
-        var kind: String { routine ? "routine" : script ? "script" : "sensitive" }
+        /// Whether it is on the person's own list (a saved sign-in, secrets, sending data out, changing the Mac or installing for it, writing or
+        /// deleting outside the project, a private network address): only those go to the person. Anything else Buddy could not read is the
+        /// team supervisor's, who reads the exact command. (Forge's read-only process listings went to the user seven times on 23 Oct.)
+        var forPerson: Bool { !routine && !script && BuddyCommandReview.personal(reason) }
+        var kind: String { routine ? "routine" : script ? "script" : forPerson ? "sensitive" : "unclear" }
+    }
+    /// The reasons on the person's own list, as `assess` and the script screen word them.
+    static func personal(_ reason: String) -> Bool {
+        let starts = ["It signs in with your saved sign-in", readsSecrets, sendsOut, "It puts a sign-in into the web address", changesMac, "It installs outside the project",
+                      writesOutside, "It reaches a local or private address"]
+        let screened = [" reads passwords, keys or tokens", " can send data out of this Mac", " changes this Mac", " deletes or writes files outside the project"]
+        return starts.contains { reason.hasPrefix($0) } || screened.contains { reason.contains($0) }
     }
     static func sensitive(_ reason: String, hosts: [String] = []) -> Verdict { Verdict(routine: false, reason: reason, hosts: hosts, writes: []) }
 
@@ -341,6 +352,11 @@ enum BuddyCommandReview {
         guard let head = w.first else { return refuse() }
         if head.contains("=") { return refuse() }   // a setting Buddy did not read as one (quoted, or after the program's name)
         if let name = program(head) {
+            if name == "osascript", w.count == 2, !w[1].hasPrefix("-") {
+                // A project AppleScript (Word exporting the draft as a PDF): read like any project script. Inline code (-e) and anything
+                // else osascript can be given stays with the person.
+                switch file(w[1], at: here, language: "AppleScript") { case .failure(let r): return .failure(r); case .success(let s): return .success(Part(kind: "script", scripts: [s])) }
+            }
             if systemTools.contains(name) { return refuse(changesMac) }
             if senders.contains(name) { return refuse(sendsOut) }
             if filters.contains(name) { return filter(name, Array(w.dropFirst()), at: here) }
@@ -750,9 +766,19 @@ enum BuddyCommandReview {
             let a = args[i], dashed = a.hasPrefix("-")
             let letters = dashed ? String(a.dropFirst()) : i == 0 ? a : ""
             guard !letters.isEmpty else { return refuse() }
-            if dashed, ["o", "O", "p", "U", "u", "G", "g", "t"].contains(letters) {
-                guard i + 1 < args.count, !args[i + 1].lowercased().contains("env") else { return refuse() }
-                i += 2; continue
+            // A letter that takes a value (-o columns, -p pids, …), alone or after others (`-axo pid,command`), with its value next or joined
+            // (`-opid,command`). Never the environment (`env` columns, or `e`).
+            if dashed, let at = letters.firstIndex(where: { "oOpUuGgt".contains($0) }) {
+                let before = letters[..<at], joined = String(letters[letters.index(after: at)...])
+                guard before.allSatisfy({ "AaCcfhjLlMmrSTvwxX".contains($0) }) else { return refuse() }
+                if joined.isEmpty {
+                    guard i + 1 < args.count, !args[i + 1].lowercased().contains("env") else { return refuse() }
+                    i += 2
+                } else {
+                    guard !joined.lowercased().contains("env") else { return refuse() }
+                    i += 1
+                }
+                continue
             }
             // `u` is the user format only in the old style without a dash (`ps aux`); with a dash it takes a user.
             guard letters.allSatisfy({ "AaCcfhjLlMmrSTvwxX".contains($0) || !dashed && $0 == "u" }) else { return refuse() }
@@ -1140,7 +1166,14 @@ enum BuddyCommandReview {
         }
         if let found = hit(secretRules, in: words) ?? hit([keychain], in: code) { return "\(subject) reads passwords, keys or tokens (\(found))." }
         if let found = hit(sendRules + (language == "shell" ? [shellSends] : []), in: code) { return "\(subject) can send data out of this Mac (\(found))." }
-        if let found = hit(macRules, in: code) { return "\(subject) changes this Mac (\(found))." }
+        // An AppleScript tells applications what to do; that alone changes nothing on the Mac (Word exporting a draft as a PDF). Telling Finder,
+        // System Events (keystrokes, clicks), Mail, Messages, Terminal or the settings apps, or running shell commands, stays with the person.
+        var scanned = code
+        if language == "AppleScript" {
+            if let found = hit([appleScriptReach], in: code) { return "\(subject) changes this Mac or acts for you in another app (\(found))." }
+            scanned = code.replacingOccurrences(of: #"tell\s+application"#, with: "tell app", options: [.regularExpression, .caseInsensitive])
+        }
+        if let found = hit(macRules, in: scanned) { return "\(subject) changes this Mac (\(found))." }
         var named: String?
         for line in code.components(separatedBy: .newlines) {
             let refs = outside(line, project: project, root: root, folder: folder, deleting: first(deletes, in: line) != nil)
@@ -1331,6 +1364,7 @@ enum BuddyCommandReview {
     ]
     /// The same programs at the start of a shell script's command (in other languages a bare `nc` is as likely a variable as a program).
     private static let shellSends = rx(#"(^|[;&|(`]|\$\()\s*(ssh|scp|sftp|rsync|ftp|nc|ncat|netcat|telnet|socat|mail|mailx|sendmail)\s"#)
+    private static let appleScriptReach = rx(#"tell\s+application\s+(id\s+)?"(Finder|System Events|Mail|Messages|Terminal|iTerm2?|System Settings|System Preferences|Keychain Access|Script Editor|Shortcuts|Automator|com\.apple\.[A-Za-z.]+)"|do\s+shell\s+script|\bkeystroke\b|\bkey\s+code\b"#)
     private static let macRules: [NSRegularExpression] = [
         rx(#"\b(sudo|doas)\b|\bbrew['"\s,]+(install|uninstall|reinstall|upgrade|update|tap|untap|link|unlink|services|remove|rm|cleanup|pin)\b|\bport['"\s,]+(install|uninstall|selfupdate|upgrade)\b|softwareupdate|\binstaller['"\s,]+-pkg"#),
         rx(#"launchctl|launchagents|launchdaemons|login ?items|crontab|\bdefaults['"\s,]+(write|delete|import|rename)\b|osascript|tell application|\bpmset\b|systemsetup|networksetup|\bscutil['"\s,]+--set|\bnvram\b|csrutil|\bspctl\b|\bdiskutil['"\s,]+(erase|partition|apfs|rename|unmount|mount|eject)|kextload|kmutil|tccutil|\bprofiles['"\s,]+(install|remove)"#),

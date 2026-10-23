@@ -309,6 +309,21 @@ import Security
             let enumerated = fixture("supervisor").first?["enum"] as? [String] ?? []
             try require(enumerated.contains("approve_command") && enumerated.contains("decline_command"), "the lane has the two verbs: \(enumerated)")
         }
+        await section("a command Buddy cannot take apart goes to Chief, who reads it; the user never gets a needs-you item") {
+            // Forge on 23 Oct: seven commands Buddy could not read went to the user. Only what is on the user's list goes to them now.
+            try await clearQueue()
+            try await waitForLane(true)
+            let id = try await start("CODEX_UNCLEAR: build the report.", as: forge, request: "unclear")
+            let done = try await poll(id, "the command finishes after the supervisor's answer", seconds: 60) { ["completed", "failed", "interrupted", "paused", "waiting_user"].contains($0["status"] as? String ?? "") }
+            try require(done["status"] as? String == "completed", "completed: \(done["status"] ?? "") \(done["progress"] ?? "")")
+            let review = reviews(done).first ?? [:], assessed = review["assessment"] as? [String: Any] ?? [:]
+            try require(review["route"] as? String == "supervisor" && review["answeredBy"] as? String == "supervisor" && review["answeredByName"] as? String == "Chief" && assessed["kind"] as? String == "unclear",
+                        "Chief answered it: \(review)")
+            let every = try everyDecision(id)
+            try require(!every.contains { $0.audience == "user" }, "it never went to the user: \(every)")
+            let shown = fixture("supervisor").flatMap { $0["items"] as? [[String: Any]] ?? [] }.last { $0["kind"] as? String == "command_review" } ?? [:], what = shown["command"] as? [String: Any] ?? [:]
+            try require(text(what["command"]).contains("make report") && what["kind"] as? String == "unclear", "Chief saw the exact command, marked as one Buddy could not read: \(shown)")
+        }
         await section("an upload is sensitive: it stays with the user, and the supervisor never sees it") {
             try await clearQueue()
             let id = try await start("CODEX_UPLOAD: share the results.", as: forge, request: "upload")

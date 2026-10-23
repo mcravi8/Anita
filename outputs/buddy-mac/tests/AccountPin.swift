@@ -189,6 +189,21 @@ import Darwin
             _ = try await worker(["operation": "cancel", "taskId": id])
         }
 
+        await section("the account the person named for a task, signed in to Buddy's Chrome, signs in with Google by itself where the site offers Google") {
+            // RunPod, 23 Oct: the user named matteo.craviotto@gmail.com, which was signed in to Buddy's Chrome, and still had to sign in by hand.
+            let plan: [String: Any] = ["mode": "signin", "googleAvailable": true, "origin": "https://console.runpod.io"]
+            let pinned: [String: Any] = ["id": "t", "workspace": "w", "agentId": "chief", "account": personal]
+            try require(BuddyWorkerSignInPolicy.pinnedGoogle(job: pinned, plan: plan, signedIn: [usc, personal]), "the named account is signed in: Buddy uses Google itself")
+            try require(!BuddyWorkerSignInPolicy.pinnedGoogle(job: pinned, plan: plan, signedIn: [usc]), "not when the named account is not signed in to Buddy's Chrome")
+            try require(!BuddyWorkerSignInPolicy.pinnedGoogle(job: ["id": "t", "workspace": "w", "agentId": "chief"], plan: plan, signedIn: [usc, personal]), "not without an account the person named")
+            var noGoogle = plan; noGoogle["googleAvailable"] = false
+            try require(!BuddyWorkerSignInPolicy.pinnedGoogle(job: pinned, plan: noGoogle, signedIn: [personal]), "not where the site offers no Google")
+            var signup = plan; signup["mode"] = "signup"
+            try require(!BuddyWorkerSignInPolicy.pinnedGoogle(job: pinned, plan: signup, signedIn: [personal]), "never to create an account")
+            var plain = plan; plain["origin"] = "http://console.runpod.io"
+            try require(!BuddyWorkerSignInPolicy.pinnedGoogle(job: pinned, plan: plain, signedIn: [personal]), "only over HTTPS")
+        }
+
         if !failures.isEmpty { fputs("FAILED: \(failures.count) account pin check(s) failed\n", stderr); exit(1) }
     }
 }

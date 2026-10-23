@@ -32,5 +32,17 @@ import AppKit
         _ = try await wait(id,"completed")
         require(!FileManager.default.fileExists(atPath:root.appendingPathComponent("Worker/PrivateSignIn.json").path),"finish removes the private marker and resumes the saved task")
         print("PASS: native sign-in choice/decline, the shared Chrome window handed to the person (the queue keeps running for others), protected desktop marker, Done in the chat and task resume without credentials")
+        // Chief on RunPod, 23 Oct: a click on the deploy page's "CPU" tab waited for the user. A step the browser calls routine goes ahead by
+        // itself, recorded as Buddy's own decision; one it does not (Deploy) still waits for review.
+        func browserStep(_ marker:String) async throws->String{let value=try await call(["operation":"create","agentId":agent,"requestId":marker,"title":"Deploy page","goal":"\(marker) on the deploy page","kind":"general","provider":"chatgpt","budgetUSD":0]);return (value["task"] as! [String:Any])["id"] as! String}
+        let shown=try await wait(try await browserStep("ROUTINE-CLICK"),"completed")
+        let shownStep=(shown["reviews"] as? [[String:Any]] ?? []).first{$0["kind"] as? String=="browser"} ?? [:]
+        require(shownStep["status"] as? String=="completed" && shownStep["autoApproved"] as? Bool==true && shownStep["answeredBy"] as? String=="rule" && shownStep["answeredByName"] as? String=="Buddy"
+                && (shownStep["answerReason"] as? String ?? "").contains("only changes what the page shows"),"a routine browser step went ahead as Buddy's own decision: \(shownStep)")
+        let held=try await browserStep("REVIEWED-CLICK"),waiting=try await wait(held,"waiting_review")
+        let heldStep=(waiting["reviews"] as? [[String:Any]] ?? []).first{$0["kind"] as? String=="browser"} ?? [:]
+        require(heldStep["status"] as? String=="pending" && heldStep["autoApproved"]==nil,"a step the browser does not call routine waits for review: \(heldStep)")
+        _ = try await call(["operation":"review","taskId":held,"id":heldStep["id"]!,"accept":true]);_ = try await wait(held,"completed")
+        print("PASS: a browser step that only shows something goes ahead as Buddy's own decision; one that could change something waits for review")
     }
 }

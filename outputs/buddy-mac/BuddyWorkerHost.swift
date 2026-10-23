@@ -1439,7 +1439,7 @@ import Darwin
         let old=try store.job(id),permission=old["signInPermission"] as? [String:Any] ?? [:]
         let date=(permission["approvedAt"] as? String).flatMap{ISO8601DateFormatter().date(from:$0)}
         let typedOnly=plan["typedOnly"] as? Bool==true
-        let savedGoogle = !typedOnly && BuddyWorkerSignInPolicy.reuseGoogle(job:job,plan:plan,jobs:store.jobs)
+        let savedGoogle = !typedOnly && (BuddyWorkerSignInPolicy.reuseGoogle(job:job,plan:plan,jobs:store.jobs) || BuddyWorkerSignInPolicy.pinnedGoogle(job:(try? store.job(id)) ?? job,plan:plan,signedIn:BuddyAccountPin.signedIn(profile:sharedProfile)))
         let auto = !typedOnly && (savedGoogle || mode=="verification" && permission["origin"] as? String==origin && permission["emailCodes"] as? Bool==true && date.map{Date().timeIntervalSince($0)<600}==true)
         var action=savedGoogle ? "saved":mode=="verification" ? "verify":"private"
         var reviewID:String?
@@ -2982,15 +2982,21 @@ import Darwin
         guard let token = prepared["token"] as? String, let preview = prepared["preview"] as? [String: Any] else { throw BuddyWorkerFailure(message: "The browser couldn’t prepare this operation.") }
         let reviewID = UUID().uuidString
         var reviews = (try store.job(id))["reviews"] as? [[String: Any]] ?? []
-        // Only a rule the person set, that is switched on and has been earned (enough checks approved, or this very task already checked), lets a
-        // browser step go ahead unreviewed. The browser itself has already refused sign-in, passwords, payments and terms before this point.
-        let rule = try store.autoApprovingRule(for: try store.job(id))
-        var review: [String: Any] = ["id": reviewID, "status": rule == nil ? "pending" : "answered", "kind": "browser", "tool": preview, "questions": [["id": "operation", "question": "Allow this exact browser operation?", "options": [["label": "Accept"], ["label": "Decline"]]]]]
+        // A step that only shows something (the browser says what: a tab, a filter, a link, a search) goes ahead by itself, as Buddy's own
+        // decision; so does one a rule the person set covers, once the rule is switched on and earned (enough checks approved, or this very task
+        // already checked). Anything else waits for review. The browser itself has already refused sign-in, passwords, payments and terms.
+        // (Chief's click on RunPod's "CPU" tab waited for the user like any other step.)
+        let routine = (prepared["routine"] as? String).flatMap { $0.isEmpty ? nil : String($0.prefix(200)) }
+        let rule = routine == nil ? try store.autoApprovingRule(for: try store.job(id)) : nil
+        let ahead = routine != nil || rule != nil
+        var review: [String: Any] = ["id": reviewID, "status": ahead ? "answered" : "pending", "kind": "browser", "tool": preview, "questions": [["id": "operation", "question": "Allow this exact browser operation?", "options": [["label": "Accept"], ["label": "Decline"]]]]]
+        if let routine { review["autoApproved"] = true; review["routine"] = routine; review.merge(Self.answeredBy("rule", name: "Buddy", reason: "Routine: \(routine).")) { _, new in new } }
         if let rule { review["autoApproved"] = true; review["rule"] = rule.id; review["ruleText"] = String(rule.text.prefix(300)); review.merge(Self.answeredBy("user", name: "your rule", reason: String(rule.text.prefix(300)))) { _, new in new } }
         reviews.append(review)
-        try store.update(id, rule == nil ? ["reviews": reviews, "status": "waiting_review", "progress": "Needs your review"] : ["reviews": reviews, "status": "running", "progress": "Going ahead under your rule"])
+        let progress = routine.map { "Going ahead: " + $0 } ?? "Going ahead under your rule"
+        try store.update(id, ahead ? ["reviews": reviews, "status": "running", "progress": progress] : ["reviews": reviews, "status": "waiting_review", "progress": "Needs your review"])
         let accepted: Bool
-        if rule != nil { accepted = true } else { accepted = await withCheckedContinuation { c in run.reviewDecisions[reviewID] = { c.resume(returning: $0) } } }
+        if ahead { accepted = true } else { accepted = await withCheckedContinuation { c in run.reviewDecisions[reviewID] = { c.resume(returning: $0) } } }
         guard accepted, isCurrent(run), permitted(job, tool: "web"), upload == nil || permitted(job, tool: "projectFiles") else { throw BuddyWorkerFailure(message: "Operation declined or access removed. Nothing was sent. Do not repeat it unless asked.") }
         try fenceBrowser(reviewID, run: run)
         try dispatch(reviewID, job: id)
@@ -3211,7 +3217,10 @@ import Darwin
     /// A command that runs project scripts (a `script` verdict) needs a real reading of what they do, so it goes to the supervisor's lane even
     /// on the supervisor's own task, and to the person when the lane is not online.
     private func reviewRoute(_ verdict: BuddyCommandReview.Verdict, job: [String: Any]) -> String {
-        guard verdict.routine || verdict.script, let lead = job["supervisorId"] as? String, !lead.isEmpty, (try? state()).flatMap({ teamSupervisor($0) }) == lead else { return "user" }
+        // Only what is on the person's own list goes to them. Everything else is the team supervisor's: routine shapes, project scripts it
+        // reads, and commands Buddy could not take apart (the supervisor reads the exact command). Forge's read-only process listings went to
+        // the user seven times on 23 Oct because Buddy could not read them. Without a supervisor online, the person decides.
+        guard !verdict.forPerson, let lead = job["supervisorId"] as? String, !lead.isEmpty, (try? state()).flatMap({ teamSupervisor($0) }) == lead else { return "user" }
         if verdict.routine, lead == job["agentId"] as? String { return "auto" }
         guard supervisor.status["online"] as? Bool == true else { return "user" }
         return "supervisor"

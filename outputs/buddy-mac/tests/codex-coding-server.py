@@ -198,9 +198,14 @@ def play(tid, turn, brief):
                 say(tid, turn, 'The command was declined. It did not run.')
             done(tid, turn)
         ask('item/commandExecution/requestApproval', {'threadId': tid, 'turnId': turn, 'itemId': cid, 'reason': reason, 'command': code, 'cwd': cwd}, answered); return
-    if 'CODEX_CBOE' in brief or 'CODEX_UPLOAD' in brief:
-        # Forge's real request (20 Oct 2026): a public download into the project; and an upload, which can send data out.
-        if 'CODEX_CBOE' in brief:
+    if 'CODEX_CBOE' in brief or 'CODEX_UPLOAD' in brief or 'CODEX_UNCLEAR' in brief:
+        # Forge's real request (20 Oct 2026): a public download into the project; an upload, which can send data out; and a command Buddy
+        # cannot take apart (make), which the supervisor reads.
+        if 'CODEX_UNCLEAR' in brief:
+            cid, target = 'cmd-make', 'report.txt'
+            code = "/bin/zsh -lc 'make report'"
+            reason = 'Build the report with the project Makefile.'
+        elif 'CODEX_CBOE' in brief:
             cid, target = 'cmd-cboe', 'verification/stage3_public_inputs/raw/SPX_CBOE.csv'
             code = "/bin/zsh -lc 'curl -fL --retry 1 --max-time 60 https://cdn.cboe.com/api/global/us_indices/daily_prices/SPX_History.csv -o verification/stage3_public_inputs/raw/SPX_CBOE.csv'"
             reason = 'Download the public CBOE SPX history the Stage 3 check needs.'

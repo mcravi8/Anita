@@ -10,7 +10,9 @@ for line in sys.stdin:
  x=json.loads(line);rid=x.get('id');method=x.get('method');p=x.get('params',{});result={}
  if not method:
   if str(rid) in calls:
-   tid,turn=calls.pop(str(rid));Path('signin-stage').write_text('done');done(tid,turn)
+   tid,turn,kind=calls.pop(str(rid))
+   if kind=='signin':Path('signin-stage').write_text('done')
+   done(tid,turn)
   continue
  if method=='account/read':result={'account':{'type':'chatgpt','planType':'fixture'}}
  elif method=='config/read':result={'config':{}}
@@ -22,9 +24,13 @@ for line in sys.stdin:
   seq+=1;result={'thread':{'id':'thread-'+str(seq)}}
  elif method=='turn/start':
   seq+=1;tid=p['threadId'];turn='turn-'+str(seq);out({'id':rid,'result':{'turn':{'id':turn,'status':'inProgress'}}})
-  if Path('signin-stage').exists():done(tid,turn)
+  # A browser step on the deploy page: one the browser calls routine (a tab) and one it does not (Deploy).
+  step='routine' if 'ROUTINE-CLICK' in json.dumps(p) else 'reviewed' if 'REVIEWED-CLICK' in json.dumps(p) else None
+  if step:
+   call='call-'+str(seq);calls[call]=(tid,turn,'act');out({'id':call,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':call,'tool':'buddy_browser','arguments':{'operation':'act','action':'click','snapshotId':'snapshot-1','ref':step}}})
+  elif Path('signin-stage').exists():done(tid,turn)
   else:
-   call='call-'+str(seq);calls[call]=(tid,turn);out({'id':call,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':call,'tool':'buddy_browser_signin','arguments':{'mode':'signin','reason':'Sign in to the inert fixture the user asked about.'}}})
+   call='call-'+str(seq);calls[call]=(tid,turn,'signin');out({'id':call,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':call,'tool':'buddy_browser_signin','arguments':{'mode':'signin','reason':'Sign in to the inert fixture the user asked about.'}}})
   continue
  elif method in ['turn/interrupt','thread/unsubscribe','thread/inject_items','initialize']:pass
  if rid is not None:out({'id':rid,'result':result})

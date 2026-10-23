@@ -104,6 +104,11 @@ const TRIAL_WORDS=/free[- ]trial|trial (ends|period|expires|converts)|after (you
 const PLAN_WORDS=/[$\u20ac\u00a3]\s?\d[\d.,]*\s*(\/\s?(mo|month|yr|year)\b|per month|a month|billed (monthly|annually|yearly))|choose (a|your) plan|select (a|your) plan|pick (a|your) plan|\bcheckout\b/i;
 // What a button that spends money says. ("PayPal" alone is not "pay".)
 const MONEY_ACTIONS=/\bsubscribe\b|\bupgrade\b|start (my |your |a )?(free )?trial|\bbuy\b|\bpurchase\b|\bpay\b|place (your |my )?order|\bcheckout\b|check out|add (a )?(payment|card)/i;
+// Words on a control (or in a link's address) that can spend, send, submit, delete, start or change something: a step with any of them waits
+// for review, whatever else it looks like. Everything else that only shows something (a tab, a filter, a link, a section opened, a search) is
+// routine and goes ahead by itself.
+const CONSEQUENTIAL=/\b(send|submit|post|publish|share|invite|e-?mail|message|reply|comment|delete|remove|erase|destroy|terminate|stop|cancel|unsubscribe|deactivate|disable|enable|deploy|launch|start|run|rent|create|new|add|save|apply|confirm|approve|accept|agree|authori[sz]e|allow|grant|connect|disconnect|transfer|withdraw|deposit|top.?up|fund|credits?|billing|payment|pay|buy|order|checkout|upgrade|subscribe|sign.?(in|out|up)|log.?(in|out)|reset|change|update|edit|rename|install|uninstall|download|upload|import|export|restore|archive|move|copy|duplicate|schedule|book|reserve|register|join|follow|like|vote|report|block|request|claim|redeem|activate|verify|continue|proceed|finish|done|complete)\b/i;
+const SEARCH_FIELD=/search|query|find|filter|(^|\s)q(\s|$)/i;
 const NEVER_PAYS='Buddy never enters payment details, subscribes, upgrades or starts a trial. Nothing was done. If the user wants this, ask them with buddy_checkpoint (url of this page): they do it themselves in Buddy\u2019s Chrome.';
 // The site a host belongs to (jobs.ubs.com and login.ubs.com are both ubs.com), for a link in an email; an IP address only matches itself.
 function siteOf(host){
@@ -774,7 +779,28 @@ class BrowserSession {
     }
     const formValues=args.action==='click'?await this.refs[Number(changes[0].ref)].evaluate(e=>[...(e.closest('form')?.querySelectorAll('input:not([type=hidden]),textarea,select')||[])].slice(0,100).map(f=>({field:f.labels?.[0]?.textContent?.trim()||f.getAttribute('aria-label')||f.name||f.type,value:f.type==='password'?'[hidden]':f.type==='file'?[...f.files].map(x=>x.name):['checkbox','radio'].includes(f.type)?f.checked:f.value}))):undefined;
     const token=randomUUID();this.prepared={token,args,targets,signature:this.snapshot.signature};
-    return this.browser.scrub({token,preview:{name:`Browser: ${args.action}`,service:'Buddy private browser',arguments:{page:this.safeURL(),action:args.action,...(formValues?.length?{formValues}:{}),targets:targets.map(t=>({control:t.label||t.tag,...(t.href?{destination:t.href}:{}),...(args.action==='fill'||args.action==='select'?{value:t.value}:{}),...(args.action==='upload'?{file:args.fileName,bytes:args.bytes,version:args.version}: {})}))}}});
+    const routine=await this.routineStep(args,targets,changes);
+    return this.browser.scrub({token,routine,preview:{name:`Browser: ${args.action}`,service:'Buddy private browser',arguments:{page:this.safeURL(),action:args.action,...(formValues?.length?{formValues}:{}),targets:targets.map(t=>({control:t.label||t.tag,...(t.href?{destination:t.href}:{}),...(args.action==='fill'||args.action==='select'?{value:t.value}:{}),...(args.action==='upload'?{file:args.fileName,bytes:args.bytes,version:args.version}: {})}))}}});
+  }
+  // What a prepared step does, when it only shows something: one click on a control or link whose words cannot spend, send, submit, delete,
+  // start or change anything (a button that submits a form counts only for a search form), or typing into a search box. Empty otherwise.
+  async routineStep(args,targets,changes){
+    const words=t=>`${t.label||''} ${t.name||''} ${t.href?decodeURIComponent(t.href):''}`;
+    if(!targets.length||targets.some(t=>CONSEQUENTIAL.test(words(t))||MONEY_ACTIONS.test(t.label||'')))return '';
+    const label=t=>String(t.label||t.tag).replace(/\s+/g,' ').trim().slice(0,60);
+    if(args.action==='click'&&targets.length===1){
+      const form=await this.refs[Number(changes[0].ref)].evaluate((e,pattern)=>{
+        const f=e.closest('form');if(!f)return null;
+        const submits=e.tagName==='BUTTON'?(e.getAttribute('type')||'submit').toLowerCase()==='submit':e.tagName==='INPUT'&&['submit','image'].includes((e.getAttribute('type')||'').toLowerCase());
+        const search=new RegExp(pattern,'i'),fields=[...f.querySelectorAll('input:not([type=hidden]),textarea,select')];
+        return {submits,search:fields.length>0&&fields.every(x=>(x.getAttribute('type')||'').toLowerCase()==='search'||x.getAttribute('role')==='searchbox'||search.test([x.name,x.id,x.getAttribute('aria-label'),x.getAttribute('placeholder')].join(' ')))};
+      },SEARCH_FIELD.source);
+      if(form?.submits&&!form.search)return '';
+      const t=targets[0];
+      return form?.submits?`a search on this page (“${label(t)}”)`:t.href?`opening the link “${label(t)}”`:`a click on “${label(t)}”, which only changes what the page shows`;
+    }
+    if(args.action==='fill'&&targets.every(t=>t.type==='search'||SEARCH_FIELD.test(`${t.label||''} ${t.name||''}`)))return 'typing into a search box';
+    return '';
   }
   async commit(token,upload){
     const prepared=this.prepared;this.prepared=null;
@@ -810,7 +836,7 @@ class BrowserSession {
     const filled=await this.page.locator('input[type=password]').first().evaluate(e=>!!e.value).catch(()=>false);
     const token=randomUUID();this.authPlan={token,origin:url.origin,mode,signature:await this.signature(),created:Date.now()};
     const other=this.otherSignIn(accountEmail);
-    return this.browser.scrub({token,origin:url.origin,mode,accountEmail,filled,googleAvailable:mode==='signin'&&!!await this.googleButton(this.page,url.origin),private:true,...(other?{accountReason:this.wrongSignIn(other)}:{})});
+    return this.browser.scrub({token,origin:url.origin,mode,accountEmail,filled,googleAvailable:mode==='signin'&&(!!await this.googleButton(this.page,url.origin)||await this.googleBehindSignIn(url.origin)),private:true,...(other?{accountReason:this.wrongSignIn(other)}:{})});
   }
   wrongSignIn(other){return `This sign-in is for ${other}, but this task must use ${this.account}. Choose ${this.account} in Buddy’s Chrome window, then press Done.`;}
   async useSaved(token){
@@ -841,17 +867,37 @@ class BrowserSession {
     }
     return null;
   }
+  // A link or button that goes from account creation to the existing-account sign-in ("Sign in", "Log in"); a link must stay on the site and
+  // lead to a sign-in page. RunPod's is a button.
+  async signInControl(page,origin){
+    for(const item of await page.locator('a[href],button,[role=button]').all()){
+      if(!await item.isVisible().catch(()=>false))continue;
+      const label=(await item.innerText().catch(()=>'')).trim();
+      if(!/^(?:sign|log)\s?in$/i.test(label))continue;
+      const href=await item.getAttribute('href');
+      if(href){const u=new URL(href,page.url());if(u.origin!==origin||!/\/(?:sign-in|signin|login)(?:\/|$)/i.test(u.pathname))continue;}
+      return item;
+    }
+    return null;
+  }
+  // A sign-up page that offers Google and a way to the sign-in page: Google is used from the sign-in page (useGoogle goes there first, and
+  // never presses the sign-up page's own Google button). RunPod opens on such a page ("Sign up with Google").
+  async googleBehindSignIn(origin){
+    if(!/\/(?:sign-up|signup|register)(?:\/|$)/i.test(new URL(this.page.url()).pathname))return false;
+    let offered=false;
+    for(const item of await this.page.locator('button,a[href],[role=button]').all()){
+      if(!await item.isVisible().catch(()=>false))continue;
+      const label=await item.evaluate(e=>(e.innerText||e.getAttribute('aria-label')||'').trim().replace(/\s+/g,' ')).catch(()=>'');
+      if(/^(?:(?:sign up|continue|sign in|log in)(?: with)? )?google$/i.test(label)){offered=true;break;}
+    }
+    return offered&&!!await this.signInControl(this.page,origin);
+  }
   async useGoogle(origin){
     const root=this.page;let switchedSignIn=false;
     const signup=()=>/\/(?:sign-up|signup|register)(?:\/|$)/i.test(new URL(root.url()).pathname);
     if(signup()){
       // Login must not submit the registration form shown by some sites by default.
-      let link;
-      for(const item of await root.locator('a[href]').all()){
-        if(!await item.isVisible())continue;
-        const label=(await item.innerText()).trim(),href=new URL(await item.getAttribute('href'),root.url());
-        if(/^(?:sign|log)\s?in$/i.test(label)&&href.origin===origin&&/\/(?:sign-in|signin|login)(?:\/|$)/i.test(href.pathname)){link=item;break;}
-      }
+      const link=await this.signInControl(root,origin);
       if(!link)return {needsUser:true,reason:'The site is on account creation rather than sign-in. Choose the existing-account sign-in privately.'};
       const oldLink=await link.elementHandle(),oldHref=await link.getAttribute('href');
       await link.click();await root.waitForLoadState('domcontentloaded',{timeout:6000}).catch(()=>{});

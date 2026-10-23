@@ -166,3 +166,25 @@ test('delegated browser retains the existing session while restricting access to
   b.assertScope(origin+'/inboxes');assert.throws(()=>b.assertScope(other),/only for/);
  }finally{await b.close();await rm(root,{recursive:true,force:true});await new Promise(r=>server.close(r));await new Promise(r=>outside.close(r));}
 });
+
+test('a site that opens on its sign-up page, with a Sign in button, is signed in to with Google from its sign-in page and never registers',async()=>{
+ // RunPod, 23 Oct: console.runpod.io opens on /signup ("Sign up with Google"); its "Sign in" is a button, not a link, and /login offers
+ // "Google". Buddy saw no Google option on the sign-up page and could not get to the sign-in page, so the user had to sign in by hand.
+ let registered=0,googleClicks=0,accountClicks=0;
+ const server=createServer((req,res)=>{res.setHeader('Content-Type','text/html');
+  if(req.url.startsWith('/signup'))return res.end(`<h1>Sign up for Fixture</h1><button onclick="fetch('/register-google');this.textContent='Registering'">Sign up with Google</button><button onclick="history.pushState({},'','/login');document.body.innerHTML='<h1>Log in</h1><input type=email><button onclick=&quot;location.href=\\'/start-google\\'&quot;>Google</button>'">Sign in</button>`);
+  if(req.url==='/register-google'){registered++;return res.end('');}
+  if(req.url==='/start-google'){googleClicks++;res.statusCode=302;res.setHeader('Location','/google/account');return res.end();}
+  if(req.url==='/google/account')return res.end('<div role="link" tabindex="0" data-identifier="fixture@example.test" onclick="location.href=\'/account-selected\'">Fixture account</div>');
+  if(req.url==='/account-selected'){accountClicks++;res.statusCode=302;res.setHeader('Location','/dashboard');return res.end();}
+  res.end('<h1>Pods dashboard</h1>');
+ });
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${server.address().port}`,root=await mkdtemp(join(tmpdir(),'buddy-google-button-signin-')),b=new PrivateBrowser(join(root,'profile'),{testOrigin:origin,testGooglePath:'/google/'});
+ try{
+  await b.navigate(origin+'/signup?redirect=%2F');const plan=await b.prepareSignIn('signin');
+  assert.equal(plan.googleAvailable,true,'Google is available behind the sign-in button');
+  const result=await b.useSaved(plan.token);
+  assert.equal(result.performed,true,JSON.stringify(result));assert.equal(result.method,'google');assert.match(result.page.text,/Pods dashboard/);
+  assert.equal(registered,0,'the sign-up Google button is never pressed');assert.equal(googleClicks,1);assert.equal(accountClicks,1);
+ }finally{await b.close();await rm(root,{recursive:true,force:true});await new Promise(r=>server.close(r));}
+});

@@ -108,6 +108,15 @@ enum BuddyWorkerMailCompletion {
 }
 
 enum BuddyWorkerSignInPolicy {
+    /// The person named the Google account for this task (`account`, from their own words), it is signed in to Buddy's Chrome, and the site
+    /// offers Google: Buddy signs in with it itself, asking nobody. The browser picks only that account's tile and stops for passwords,
+    /// verification challenges, permission screens and new accounts. (RunPod, 23 Oct: the user named the account, it was signed in, and they
+    /// still had to sign in by hand.)
+    static func pinnedGoogle(job:[String:Any],plan:[String:Any],signedIn:[String])->Bool {
+        guard plan["mode"] as? String=="signin",plan["googleAvailable"] as? Bool==true,let origin=plan["origin"] as? String,let url=URL(string:origin),url.scheme=="https",url.host != nil,
+              let pin=BuddyAccountPin.normalized(job["account"] as? String) else{return false}
+        return signedIn.contains(pin)
+    }
     static func reuseGoogle(job:[String:Any],plan:[String:Any],jobs:[[String:Any]])->Bool {
         guard plan["mode"] as? String=="signin",plan["googleAvailable"] as? Bool==true,let origin=plan["origin"] as? String,let url=URL(string:origin),url.scheme=="https",url.host != nil,let workspace=job["workspace"] as? String,let agent=(job["browserAgentId"] ?? job["agentId"]) as? String,job["browserOrigin"]==nil || job["browserOrigin"] as? String==origin else{return false}
         return jobs.contains{prior in

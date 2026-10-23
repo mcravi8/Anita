@@ -17,6 +17,10 @@
 
   let folder=null,folderKey='',target=null,loads=0,loading='',loadedAt=0,detailsOpen=false;
   const chosen=new Map(),scrolls={plan:0,files:0};
+  // Arriving at a chat shows its latest messages: opened from anywhere else it shows its messages (not the view it showed last), and back from
+  // its Plan or Files view the list is at the bottom (a hidden list loses its place). Opening and redraws are buddy-chat-open.js's. `landed` is
+  // the chat and view last shown, null on another page.
+  let landed=null;
   // The plain browser page has no folders: it can only offer the plan.
   const native=()=>!!window.BuddyDesktop?.projectFiles&&!!root.BuddyFiles?.native?.();
   const key=()=>`${state.conversationWorkspace||''}|${state.activeFolderId||''}`;
@@ -41,7 +45,9 @@
     if(details&&detailsOpen)details.open=true;
   }
   function paint(){
-    const convo=conversation();if(!chatView()||!convo){root.BuddyPlan?.mount?.();return;}
+    const convo=conversation();if(!chatView()||!convo){landed=null;root.BuddyPlan?.mount?.();return;}
+    // Opening a chat from elsewhere shows its messages, whichever view it showed last.
+    if(!landed||landed.target!==ui.view.target)chosen.delete(ui.view.target);
     const {list,shown}=layout(),island=convo.querySelector(':scope > .conversation-header .island');
     let nav=island?.querySelector('[data-chat-views]');
     if(!list.length)nav?.remove();
@@ -69,6 +75,15 @@
     // The plan strip goes where the view needs it: whole in the plan view, one line above the composer in the chat.
     root.BuddyPlan?.mount?.();
     if(pane&&pane.scrollTop!==scrolls[shown])pane.scrollTop=scrolls[shown];
+    land(convo,shown);
+  }
+  function land(convo,shown){
+    const target=ui.view.target,body=convo.querySelector(':scope > .chat-body');
+    if(shown==='chat'&&body&&landed?.target===target&&landed.shown!=='chat'){
+      // Late layout (rendered text, the plan line) can make the list taller a moment later, so look again.
+      const end=()=>{body.scrollTop=body.scrollHeight;};end();requestAnimationFrame(end);setTimeout(end,150);
+    }
+    landed={target,shown};
   }
   function select(view,{focus=false}={}){
     if(!chatView()||!layout().list.includes(view))return;

@@ -930,6 +930,12 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         guard let stage = try stageRow(stageId), let plan = try planRow(stage.planId), Self.live.contains(plan.status) else { throw Self.missing("That stage is not in an open plan.") }
         return try guarded { try db.transaction { try insertAdded(stage: stage, tasks: tasks, by: by, members: members, team: team).ids } }
     }
+    /// The most tasks that may be added to a stage: the loop guard, plus 12 for each time the user answered a question about the stage once it
+    /// was reached (recorded as their add_tasks decision), so the user decides how the team goes on and the team can.
+    private func addedCap(_ stage: StageRow) throws -> Int {
+        let allowed = Self.n(try db.rows("SELECT COUNT(*) FROM plan_decisions WHERE stage_id = ? AND kind = 'add_tasks' AND decided_by = 'user'", [.text(stage.id)]).first ?? [], 0)
+        return Self.maxAddedPerStage + Self.maxOpenAddedPerStage * allowed
+    }
     /// The new tasks' ids, and why Buddy made any of them a coding task.
     private func insertAdded(stage: StageRow, tasks: [[String: Any]], by: String, members: [String], team: [[String: Any]] = []) throws -> (ids: [String], notes: [String]) {
         guard !["done", "superseded"].contains(stage.status) else { throw Self.conflict("Stage \(stage.n) is finished; add the work to a later stage.") }
@@ -938,8 +944,9 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         guard openAdded + tasks.count <= Self.maxOpenAddedPerStage else {
             throw Self.conflict("Stage \(stage.n) already has \(openAdded) added tasks unfinished; at most \(Self.maxOpenAddedPerStage) may be open at once. Add more once some are finished.")
         }
-        guard stage.added + tasks.count <= Self.maxAddedPerStage else {
-            throw Self.conflict("Stage \(stage.n) has had \(stage.added) tasks added, the most one stage may get (\(Self.maxAddedPerStage)): it keeps needing more work, so the user decides how to go on.")
+        let cap = try addedCap(stage)
+        guard stage.added + tasks.count <= cap else {
+            throw Self.conflict("Stage \(stage.n) has had \(stage.added) tasks added, the most one stage may get (\(cap)): it keeps needing more work, so the user decides how to go on. Ask them; their answer lets the team add \(Self.maxOpenAddedPerStage) more.")
         }
         let earlier = try stageRows(stage.planId).filter { $0.n <= stage.n }.flatMap { try taskRows(stage: $0.id) }
         let supervisor = try planRow(stage.planId)?.supervisorId ?? ""
@@ -1108,6 +1115,11 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
             try db.transaction {
                 _ = try recordDecision(planId: planId, kind: "user_answer", by: "user", question: Self.s(row, 0), choice: answer, rationale: String(quote.prefix(600)),
                                        stageId: refs["stageId"] as? String ?? "", taskId: planTask, workerTaskId: workerTask)
+                // A question about a stage that reached the limit on added tasks: the user's answer is how the team goes on, so it may add 12 more.
+                if let stageId = refs["stageId"] as? String, !stageId.isEmpty, let stage = try stageRow(stageId), stage.added >= (try addedCap(stage)) {
+                    _ = try recordDecision(planId: planId, kind: "add_tasks", by: "user", question: "", choice: "Allow \(Self.maxOpenAddedPerStage) more tasks in stage \(stage.n)",
+                                           rationale: "The user answered the supervisor's question about stage \(stage.n) after it reached its limit on added tasks.", stageId: stageId, taskId: "", workerTaskId: "")
+                }
                 try db.run("UPDATE plan_notices SET status = 'answered', refs = ? WHERE id = ?", [.text(try BuddyOperationsDB.encode(refs)), .text(escalationId)])
                 let lane = try !db.rows("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'supervisor_items'").isEmpty
                 if continuing {

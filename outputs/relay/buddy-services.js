@@ -46,7 +46,7 @@
       else out+=`<button type="button" class="border-button" data-service-replace="${id}" ${off?'disabled':''}>Replace key</button><button type="button" class="border-button" data-service-remove="${id}" ${off?'disabled':''}>${off?'Removing…':'Remove'}</button>`;
       out+='</div>';
     }
-    if(adding)out+=`<div class="signin-holder service-form" data-service-form="new">${fields('new')}<div class="worker-toolbar"><button type="button" class="border-button" data-service-cancel="new">Cancel</button><button type="button" class="primary-button" data-service-save="new" ${busy.has('new')?'disabled':''}>${busy.has('new')?'Connecting…':'Connect'}</button></div><small class="signin-assurance">${esc(assurance)}</small></div>`;
+    if(adding)out+=`<div class="signin-holder service-form" data-service-form="new">${fields('new')}<div class="service-foot"><small class="signin-assurance">${esc(assurance)}</small><div class="worker-toolbar"><button type="button" class="border-button" data-service-cancel="new">Cancel</button><button type="button" class="primary-button" data-service-save="new" ${busy.has('new')?'disabled':''}>${busy.has('new')?'Connecting…':'Connect'}</button></div></div></div>`;
     else out+='<div class="worker-toolbar"><button type="button" class="border-button" data-service-add>Connect a service</button></div>';
     return out;
   }

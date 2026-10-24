@@ -84,3 +84,19 @@
 .worker-leases ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
 .worker-leases li{display:flex;flex-direction:column;gap:2px;font-size:12.5px}
 .worker-leases small{color:var(--text3);overflow-wrap:anywhere}
+
+/* A task's report on its page (reportParts in buddy-worker.js): its opening, the files it saved and what comes next, then Full report. */
+.worker-report{display:flex;flex-direction:column;gap:14px}
+.worker-report>*{margin:0}
+.worker-report-lead{font-size:15px;line-height:1.65;color:var(--text)}
+.worker-report-saved{font-size:13.5px;line-height:1.6;color:var(--text2)}
+.worker-report-next{padding:12px 14px;border-radius:12px;background:var(--soft);font-size:14px;line-height:1.6}
+.worker-report-next>span{display:block;margin-bottom:2px;font-size:12px;font-weight:600;color:var(--text2)}
+.worker-report-lead p,.worker-report-saved p,.worker-report-next p{margin:0}
+.worker-report-more{border-top:1px solid var(--line);padding-top:10px}
+.worker-report-more>summary{cursor:pointer;min-height:32px;display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500;color:var(--text2);list-style:none}
+.worker-report-more>summary::-webkit-details-marker{display:none}
+.worker-report-more>summary .icon{width:14px;height:14px;transition:transform .2s ease}
+.worker-report-more[open]>summary .icon{transform:rotate(180deg)}
+.worker-report-more[open]>summary{margin-bottom:6px}
+.worker-report-more>:not(summary){font-size:13.5px;line-height:1.65;color:var(--text1)}

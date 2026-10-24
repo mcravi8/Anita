@@ -360,3 +360,21 @@ test('a coding task waiting for its own command on a leased machine is running, 
  assert.equal(worker.deliverResult(s,t),true);assert.equal(s.messages.a[0].body,'**C1 replications** is running on a remote machine. I’ll continue when it’s done.');
  assert.equal(worker.workGroups([t]).running.length,1,'listed under Running in Background work');
 });
+
+test('a long task report shows its opening, the files it saved and what comes next; the working notes fold under Full report',()=>{
+ const report=['**Stage 2 is PARTIAL.** The calibration finished all 33 paths, but no process passed the gates, so the rates are blank. They are not estimates of 0%.',
+  'The detector found 34 onsets and 17 eligible events. An independent replay matched every path.',
+  'The [recovery rates](</p/rates.csv>) and [verification](</p/verification.md>) are saved in Research.',
+  'Commands run: `python3 calibrate.py` passed; `python3 seal.py` passed; the first `verify.py` call exited 1 because a folder was missing; after fixing it the second passed.',
+  'Choices made: I kept the inherited detector so counts compare, and froze the seeds first. **Next:** Chief can use this partial snapshot under the fallback gate. Stage 4 was not started.',
+  '','---','Command receipts: 15 finished, 13 exited successfully.'].join('\n');
+ const p=worker.reportParts(report);
+ assert.equal(p.lead,report.split('\n')[0],'the opening line, as written');
+ assert.deepEqual(p.saved,['The [recovery rates](</p/rates.csv>) and [verification](</p/verification.md>) are saved in Research.'],'the line that links what it saved');
+ assert.equal(p.next,'Chief can use this partial snapshot under the fallback gate. Stage 4 was not started.');
+ assert.match(p.more,/^The detector found 34 onsets/);assert.match(p.more,/Commands run: `python3 calibrate.py`/);assert.match(p.more,/Choices made: .*froze the seeds first\.$/m);
+ assert.match(p.more,/Command receipts: 15 finished, 13 exited successfully\.$/,'Buddy’s receipts are in the full report');
+ assert.doesNotMatch(p.more,/Stage 2 is PARTIAL|recovery rates\]|Next:/,'nothing shown above is said twice');
+ assert.equal(worker.reportParts('Created the inbox chief@example.test.'),null,'a short report shows as it is');
+ assert.equal(worker.reportParts(''),null);
+});

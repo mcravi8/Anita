@@ -47,10 +47,24 @@
 .signin-eye:focus-visible{outline:2px solid color-mix(in srgb,var(--ink) 35%,transparent);outline-offset:1px}
 .signin-never{color:var(--text2)}
 
-/* Connecting a service (Settings, and the chat's card when an agent asks for one): its address, how its key is sent, whether it can charge money. */
-.service-form{display:flex;flex-direction:column;gap:8px}
-.service-form select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--text)}
-.service-charges{display:flex;flex-wrap:wrap;gap:12px;margin:0;padding:0;border:0;font-size:12.5px;color:var(--text2)}
-.service-charges legend{flex:1 1 100%;margin-bottom:4px;font-weight:600;color:var(--text)}
-.service-charges label{display:inline-flex;align-items:center;gap:6px}
+/* Connecting a service (Settings, and the chat's card when an agent asks for one): its address, how its key is sent, whether it can charge money.
+   One tidy column of full-width fields: the address and how the key is sent share a row where there is room, the key and the money question
+   each have their own, and the last row closes the form (the note and Connect in the chat, Cancel and Save in Settings). The sign-in row's
+   bottom alignment and 180px field basis are for one field beside its Send button, so they do not apply here. */
+.signin-holder.service-form,.service-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));align-items:start;gap:12px;width:min(560px,100%);margin-top:6px}
+.service-form>*{min-width:0}
+.service-form>.signin-field{flex:none}
+.signin-field[hidden]{display:none}
+.service-form>.signin-field:has([data-service-input="name"]),.service-form>.signin-field:has([data-service-input="key"]),.service-form>.service-charges,.service-form>.service-foot,.service-form>.worker-toolbar{grid-column:1/-1}
+.service-form>.signin-field:has([data-service-input="key"]){order:1}
+.service-form>.service-charges{order:2}
+.service-form>.service-foot,.service-form>.worker-toolbar{order:3}
+.service-form select{width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--text)}
+.service-charges{display:flex;flex-wrap:wrap;align-items:center;gap:4px 18px;margin:0;padding:0;border:0;font-size:13px;color:var(--text2)}
+.service-charges legend{float:left;margin:0 6px 0 0;padding:0;font-size:13px;font-weight:500;color:var(--text)}
+.service-charges label{display:inline-flex;align-items:center;gap:6px;min-height:32px}
+.service-foot{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding-top:2px}
+.service-foot .signin-assurance{max-width:46ch}
+.service-foot .primary-button{flex:none}
+.service-form>.worker-toolbar{justify-content:flex-end}
 .connected-services{margin-top:14px}

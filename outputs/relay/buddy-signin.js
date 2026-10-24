@@ -174,8 +174,7 @@
       // can charge money, and the key. The person checks and fills it in; the key goes to the Keychain, never into the chat.
       if(r.instruction)html+=`<p class="signin-note">${esc(r.instruction)}</p>`;
       const chosen=serviceChoices.get(r.key)||{};
-      html+=`<div class="signin-holder service-form" data-signin-holder="${esc(r.key)}" data-signin-task="${esc(r.taskId)}">${root.BuddyServices?.fields(r.key,{name:r.service,baseUrl:r.baseUrl||'',...chosen},{fixedName:true,signin:true})||''}${button('data-signin-send',r.key,busy.has(r.key)?'Connecting…':'Connect',true,off)}</div>`;
-      html+=`<small class="signin-assurance">${esc(root.BuddyServices?.assurance||'')} ${esc(who)} never sees the key.</small>`;
+      html+=`<div class="signin-holder service-form" data-signin-holder="${esc(r.key)}" data-signin-task="${esc(r.taskId)}">${root.BuddyServices?.fields(r.key,{name:r.service,baseUrl:r.baseUrl||'',...chosen},{fixedName:true,signin:true})||''}<div class="service-foot"><small class="signin-assurance">${esc(root.BuddyServices?.assurance||'')} ${esc(who)} never sees the key.</small>${button('data-signin-send',r.key,busy.has(r.key)?'Connecting…':'Connect',true,off)}</div></div>`;
     }else if(r.kind==='credential'){
       if(r.instruction)html+=`<p class="signin-note">${esc(r.instruction)}</p>`;
       html+=`<div class="signin-holder signin-holder-pair" data-signin-holder="${esc(r.key)}" data-signin-task="${esc(r.taskId)}">${field(r,'username',`${r.service||'Service'} username`,'text')}${field(r,'password',`${r.service||'Service'} password`,'password')}${button('data-signin-send',r.key,busy.has(r.key)?'Saving…':'Save',true,off)}</div>`;

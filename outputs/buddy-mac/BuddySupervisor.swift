@@ -693,6 +693,7 @@ import Foundation
         reopenStuckByFailures(db, supervisor: supervisor)
         reopenStuckForCodexSaves(db, supervisor: supervisor)
         reopenStuckForStageLimit(db, supervisor: supervisor)
+        reopenForAnsweredAllowance(db, supervisor: supervisor)
         rerouteOwnQuestions(supervisor: supervisor, workspace: state["conversationWorkspace"] as? String ?? "")
         for row in (try? db.rows("SELECT id, workspace, plan_id, items, output, status, started_at FROM supervisor_runs WHERE status IN ('running', 'applying') ORDER BY started_at")) ?? [] {
             let id = row[0].string ?? ""
@@ -742,6 +743,31 @@ import Foundation
             }
         }
         if !rows.isEmpty { try? plans.closeStuckNotices(runIds: Array(Set(rows.compactMap { $0[1].string }))) }
+        try? db.setMeta(key, stamp)
+    }
+
+    /// Once: a stage the user already told the team to go on with, near its limit on added tasks, gets the allowance their answer should have
+    /// given, and the supervisor item that stuck on that limit is reviewed again (24 Oct, Stage 5: approved at 34 of 36, refused again).
+    static let answeredAllowanceNote = "The user approved going on with this stage: Buddy now allows 12 more tasks in it. Add the remaining work now."
+    private func reopenForAnsweredAllowance(_ db: BuddyOperationsDB, supervisor: Supervisor) {
+        let key = "supervisor.reopened.answered-allowance-v1"
+        guard (try? db.meta(key)) == nil else { return }
+        let stages = (try? plans.grantAnsweredAllowances()) ?? []
+        let stamp = Self.stamp(Date())
+        var runs: [String] = []
+        for stage in stages {
+            let rows = (try? db.rows("SELECT key, last_run FROM supervisor_items WHERE state = 'stuck' AND key LIKE ? AND refusal LIKE '%the user decides how to go on%'", [.text("stage:\(stage):%")])) ?? []
+            for row in rows {
+                let item = row[0].string ?? ""
+                _ = try? db.run("UPDATE supervisor_items SET state = 'open', presented = 0, refusal = '', reopened_at = ?, note = ?, updated_at = ? WHERE key = ? AND state = 'stuck'",
+                                [.text(stamp), .text(Self.answeredAllowanceNote), .text(stamp), .text(item)])
+                if (try? db.rows("SELECT 1 FROM decisions WHERE id = ? AND status = 'open'", [.text("stuck:\(item)")]))?.isEmpty == false {
+                    try? store.resolveDecision(id: "stuck:\(item)", by: "supervisor:" + supervisor.id, resolution: "reopened")
+                }
+                if let run = row[1].string { runs.append(run) }
+            }
+        }
+        if !runs.isEmpty { try? plans.closeStuckNotices(runIds: Array(Set(runs))) }
         try? db.setMeta(key, stamp)
     }
 

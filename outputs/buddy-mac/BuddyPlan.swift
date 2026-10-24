@@ -936,6 +936,27 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         let allowed = Self.n(try db.rows("SELECT COUNT(*) FROM plan_decisions WHERE stage_id = ? AND kind = 'add_tasks' AND decided_by = 'user'", [.text(stage.id)]).first ?? [], 0)
         return Self.maxAddedPerStage + Self.maxOpenAddedPerStage * allowed
     }
+    /// Once after the update that fixed it: a stage near its limit on added tasks whose question the user already answered, after its last
+    /// added task, gets the allowance that answer should have given (24 Oct: the user approved going on with Stage 5 at 34 of 36, Buddy
+    /// recorded the answer but allowed nothing, and Chief was refused again). Returns the ids of the stages given it.
+    func grantAnsweredAllowances() throws -> [String] {
+        var granted: [String] = []
+        try guarded {
+            try db.transaction {
+                for row in try db.rows("SELECT id FROM plan_stages WHERE status NOT IN ('done', 'superseded')") {
+                    guard let stage = try stageRow(Self.s(row, 0)), (try addedCap(stage)) - stage.added < Self.maxOpenAddedPerStage else { continue }
+                    let answered = Self.s(try db.rows("SELECT COALESCE(MAX(created_at), '') FROM plan_decisions WHERE stage_id = ? AND kind = 'user_answer'", [.text(stage.id)]).first ?? [], 0)
+                    let allowed = Self.s(try db.rows("SELECT COALESCE(MAX(created_at), '') FROM plan_decisions WHERE stage_id = ? AND kind = 'add_tasks' AND decided_by = 'user'", [.text(stage.id)]).first ?? [], 0)
+                    let added = Self.s(try db.rows("SELECT COALESCE(MAX(created_at), '') FROM plan_tasks WHERE stage_id = ?", [.text(stage.id)]).first ?? [], 0)
+                    guard !answered.isEmpty, answered > allowed, answered > added, let plan = try planRow(stage.planId), Self.live.contains(plan.status) else { continue }
+                    _ = try recordDecision(planId: stage.planId, kind: "add_tasks", by: "user", question: "", choice: "Allow \(Self.maxOpenAddedPerStage) more tasks in stage \(stage.n)",
+                                           rationale: "The user answered the supervisor's question about stage \(stage.n) near its limit on added tasks (given after an update).", stageId: stage.id, taskId: "", workerTaskId: "")
+                    granted.append(stage.id)
+                }
+            }
+        }
+        return granted
+    }
     /// The new tasks' ids, and why Buddy made any of them a coding task.
     private func insertAdded(stage: StageRow, tasks: [[String: Any]], by: String, members: [String], team: [[String: Any]] = []) throws -> (ids: [String], notes: [String]) {
         guard !["done", "superseded"].contains(stage.status) else { throw Self.conflict("Stage \(stage.n) is finished; add the work to a later stage.") }
@@ -1115,8 +1136,8 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
             try db.transaction {
                 _ = try recordDecision(planId: planId, kind: "user_answer", by: "user", question: Self.s(row, 0), choice: answer, rationale: String(quote.prefix(600)),
                                        stageId: refs["stageId"] as? String ?? "", taskId: planTask, workerTaskId: workerTask)
-                // A question about a stage that reached the limit on added tasks: the user's answer is how the team goes on, so it may add 12 more.
-                if let stageId = refs["stageId"] as? String, !stageId.isEmpty, let stage = try stageRow(stageId), stage.added >= (try addedCap(stage)) {
+                // A question about a stage at or near its limit on added tasks: the user's answer is how the team goes on, so it may add 12 more.
+                if let stageId = refs["stageId"] as? String, !stageId.isEmpty, let stage = try stageRow(stageId), (try addedCap(stage)) - stage.added < Self.maxOpenAddedPerStage {
                     _ = try recordDecision(planId: planId, kind: "add_tasks", by: "user", question: "", choice: "Allow \(Self.maxOpenAddedPerStage) more tasks in stage \(stage.n)",
                                            rationale: "The user answered the supervisor's question about stage \(stage.n) after it reached its limit on added tasks.", stageId: stageId, taskId: "", workerTaskId: "")
                 }

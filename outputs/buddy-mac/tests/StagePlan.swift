@@ -224,6 +224,21 @@ import Foundation
         require(afterAnswer.count == 12, "after the user's answer twelve more can be added")
         for id in afterAnswer { _ = try raw.run("UPDATE plan_tasks SET status = 'done' WHERE id = ?", [.text(id)]) }
         throwsCode("conflict", "then the guard holds again") { _ = try plans.addTasks(stageId: stageIDs[1], tasks: [extra[0]], by: chief, members: members) }
+        // An answer the user gave before the update that honours it (24 Oct: Stage 5 approved at 34 of 36, nothing allowed) is turned into the
+        // allowance once, when it came after the stage's last added task.
+        _ = try raw.run("UPDATE plan_tasks SET created_at = '2026-01-01T00:00:00Z' WHERE stage_id = ?", [.text(stageIDs[1])])
+        _ = try raw.run("UPDATE plan_decisions SET created_at = '2026-01-01T00:00:00Z' WHERE stage_id = ?", [.text(stageIDs[1])])
+        _ = try plans.recordDecision(planId: planID, kind: "user_answer", by: "user", question: "Go on with stage 2?", choice: "Approved", rationale: "Approve", stageId: stageIDs[1], taskId: "", workerTaskId: "")
+        require(try plans.grantAnsweredAllowances() == [stageIDs[1]], "an answer the user already gave near the limit becomes the allowance")
+        require(try plans.grantAnsweredAllowances().isEmpty, "only once")
+        let granted = try plans.addTasks(stageId: stageIDs[1], tasks: Array(extra.prefix(10)), by: chief, members: members)
+        require(granted.count == 10, "the honoured answer lets the team add more")
+        for id in granted { _ = try raw.run("UPDATE plan_tasks SET status = 'done' WHERE id = ?", [.text(id)]) }
+        // Near the limit (58 of 60), not only at it, the user's answer allows 12 more.
+        let nearID = try plans.addNotice(planId: planID, kind: "escalation", text: "Stage 2 is near its limit on added tasks. Go on?", chat: true,
+                                         refs: ["stageId": stageIDs[1], "itemKey": "stage:\(stageIDs[1]):58", "itemKind": "stage_check", "question": "Stage 2 is near its limit on added tasks. Go on?"])
+        _ = try plans.answerEscalation(planId: planID, escalationId: nearID, answer: "Approve", quote: "Approve", store: store)
+        require(try plans.addTasks(stageId: stageIDs[1], tasks: extra, by: chief, members: members).count == 12, "near the limit the user's answer allows twelve more")
         throwsCode("not_authorized", "the supervisor cannot record a scope") { _ = try plans.recordDecision(planId: planID, kind: "scope", by: chief, question: "", choice: "through 2", rationale: "", stageId: "", taskId: "", workerTaskId: "") }
         let forged = throwsAny("a raw scope decision by the supervisor aborts") { try raw.run("INSERT INTO plan_decisions(id, plan_id, decided_by, kind, choice, created_at) VALUES('x', ?, 'supervisor', 'scope', 'through 2', '')", [.text(planID)]) }
         require(forged.contains("only the user authorizes"), "the database names the reason: \(forged)")

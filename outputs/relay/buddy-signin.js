@@ -232,12 +232,12 @@
     if(missing||!value.key){(missing==='charges'?holder.querySelector('[data-service-charges]'):holder.querySelector(`[data-service-input="${missing||'key'}"]`))?.focus();if(missing==='charges')settle(state,key,{result:`Say whether ${r.service||'this service'} can charge you money.`}),redraw();return;}
     // The key is emptied from its field and let go before anything else happens.
     for(const i of holder.querySelectorAll('[data-signin-input]')){if(i.dataset.signinName==='key')i.value='';typing.delete(i.dataset.signinInput);}
-    busy.add(key);settle(state,key,{result:''});redraw();
+    busy.add(key);finish(key,{result:''});redraw();
     let reply;
     try{reply=await bridge()({action:'provideService',taskId:r.taskId,...value});}
     catch(error){reply={saved:false,error:String(error?.message||error)};}
     finally{value.key='';busy.delete(key);}
-    settle(state,key,reply?.saved?{status:'done',result:reply.resumed?`Connected — ${agentName(r.agentId)} is continuing.`:`Connected ${value.name}.`}:{result:reply?.error||'That didn’t connect. Try again.'});
+    finish(key,reply?.saved?{status:'done',result:reply.resumed?`Connected — ${agentName(r.agentId)} is continuing.`:`Connected ${value.name}.`}:{result:reply?.error||'That didn’t connect. Try again.'});
     redraw();window.BuddyWorkerUI?.refresh?.(false);
   }
   async function send(key){

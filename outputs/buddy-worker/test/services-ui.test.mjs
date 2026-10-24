@@ -88,8 +88,9 @@ test('the chat asks to connect RunPod: the address Forge suggested, Authorizatio
   await card.getByLabel('Yes').check();
   await page.evaluate(()=>BuddyWorkerUI.refresh(false));
   assert.equal(await page.locator('.signin-message').last().locator('[data-service-charges]:checked').inputValue(),'yes','the choice survives a redraw');
-  await page.locator('.signin-message').last().getByRole('button',{name:'Connect'}).click();
-  await page.locator('.signin-message').last().getByText('Connected — Forge is continuing.').waitFor();
+  const connecting=page.locator('.signin-message').last();await connecting.getByRole('button',{name:'Connect'}).click();
+  // Connected, the card leaves the chat and a toast says so once.
+  await connecting.waitFor({state:'detached'});await page.locator('#toast').filter({hasText:'Connected — Forge is continuing.'}).waitFor();
   assert.deepEqual(await page.evaluate(()=>calls.filter(c=>c.action==='provideService')),[{action:'provideService',taskId:'t1',name:'RunPod',baseUrl:'https://rest.runpod.io/v2',header:'Authorization',scheme:'Bearer',key:KEY,charges:true}],'one call to the sign-in bridge, with the choices and the key');
   assert.deepEqual(await nowhere(page,KEY),[],'afterwards the key is nowhere on the page');
   assert.deepEqual(errors,[]);

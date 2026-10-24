@@ -690,6 +690,7 @@ import Foundation
         _ = try? db.run("UPDATE supervisor_subjects SET state = 'open', repeats = 0, updated_at = ?", [.text(stamp)])
         reopenStuckByFailures(db, supervisor: supervisor)
         reopenStuckForCodexSaves(db, supervisor: supervisor)
+        reopenStuckForStageLimit(db, supervisor: supervisor)
         rerouteOwnQuestions(supervisor: supervisor, workspace: state["conversationWorkspace"] as? String ?? "")
         for row in (try? db.rows("SELECT id, workspace, plan_id, items, output, status, started_at FROM supervisor_runs WHERE status IN ('running', 'applying') ORDER BY started_at")) ?? [] {
             let id = row[0].string ?? ""
@@ -720,6 +721,26 @@ import Foundation
             }
         }
         try? plans.closeStuckNotices(runIds: Array(Set(rows.compactMap { $0[1].string })))
+    }
+
+    /// Once: plan work that stuck on the old limit of 12 tasks added to a stage, counted even when all of them were done (23 Oct: Stage 5's
+    /// last Word check and cleanups could not be added). Buddy now allows 12 unfinished at a time, so the stage gets another look.
+    static let stageLimitNote = "Buddy was updated: a stage may now get more tasks once the earlier added ones are finished (at most 12 unfinished at a time, 36 added to one stage in all). Add the remaining work now."
+    private func reopenStuckForStageLimit(_ db: BuddyOperationsDB, supervisor: Supervisor) {
+        let key = "supervisor.reopened.stage-limit-v1"
+        guard (try? db.meta(key)) == nil else { return }
+        let rows = (try? db.rows("SELECT key, last_run FROM supervisor_items WHERE state = 'stuck' AND refusal LIKE '%tasks can be added to one stage%'")) ?? []
+        let stamp = Self.stamp(Date())
+        for row in rows {
+            let item = row[0].string ?? ""
+            _ = try? db.run("UPDATE supervisor_items SET state = 'open', presented = 0, refusal = '', reopened_at = ?, note = ?, updated_at = ? WHERE key = ? AND state = 'stuck'",
+                            [.text(stamp), .text(Self.stageLimitNote), .text(stamp), .text(item)])
+            if (try? db.rows("SELECT 1 FROM decisions WHERE id = ? AND status = 'open'", [.text("stuck:\(item)")]))?.isEmpty == false {
+                try? store.resolveDecision(id: "stuck:\(item)", by: "supervisor:" + supervisor.id, resolution: "reopened")
+            }
+        }
+        if !rows.isEmpty { try? plans.closeStuckNotices(runIds: Array(Set(rows.compactMap { $0[1].string }))) }
+        try? db.setMeta(key, stamp)
     }
 
     /// Once: plan work that stuck before Codex coding sessions could save their results into a connected folder. A Stage 3 run on Codex left

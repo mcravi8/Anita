@@ -531,6 +531,37 @@ import Foundation
         require(try calls(later).count == savesCalls && (try itemState(later, savedKey)).state == "stuck", "the repair runs once: a later stuck item stays stuck")
         print("PASS: once after Codex could save results, plan items stuck before it are reviewed again and their stuck notice closed; other stuck entries stay")
 
+        // 10c. Once after the update that lifted the limit of 12 tasks added to a stage (all counted, even finished ones): an item stuck on that
+        // refusal is reviewed again, the supervisor is told what changed, and its stuck notice is closed.
+        let limit = try world(base, "limit")
+        try propose(limit); _ = try step(limit)
+        try finish(limit.store, jobs(limit, "t1").first?["id"] as? String ?? "", result: "R1: two cleanups remain.")
+        _ = try step(limit)
+        let limitKey = "result:\(limit.keys["t1"] ?? ""):1", limitRun = "6F80FC78-0000-4000-8000-0000000000A1"
+        let limitDB = try BuddyOperationsDB(directory: limit.worker, existing: true)
+        await tick(limit, state: [:])
+        try limitDB.run("INSERT INTO supervisor_runs(id, workspace, plan_id, items, status, output, started_at, finished_at, effective) VALUES(?, ?, ?, ?, 'applied', '{\"actions\":[]}', '2026-10-24T04:39:30Z', '2026-10-24T04:39:35Z', 0)",
+                        [.text(limitRun), .text(w), .text(limit.planID), .text("[{\"key\":\"\(limitKey)\",\"kind\":\"result\"}]")])
+        try limitDB.run("INSERT OR REPLACE INTO supervisor_items(key, workspace, presented, state, last_run, updated_at, refusal) VALUES(?, ?, 3, 'stuck', ?, '2026-10-24T04:39:35Z', 'At most 12 tasks can be added to one stage; stage 1 has 12.')",
+                        [.text(limitKey), .text(w), .text(limitRun)])
+        _ = try limit.plans.addNotice(planId: limit.planID, kind: "stuck", text: "The team is stuck on Stage 1: Buddy could not apply Chief's add_tasks: At most 12 tasks can be added to one stage; stage 1 has 12. Tell me how to proceed.", chat: true, refs: ["itemKeys": [limitKey], "runId": limitRun])
+        try limitDB.run("DELETE FROM meta WHERE key = 'supervisor.reopened.stage-limit-v1'")
+        try limitDB.setMeta("supervisor.reopened.codex-saves-v2", "2026-10-20T00:00:00Z")   // that earlier one-time repair is tested above
+        try mode(limit, "hold")
+        let lifted = try world(base, "limit")
+        lifted.planID = limit.planID; lifted.keys = limit.keys
+        await tick(lifted)
+        require(try (calls(lifted).last?["items"] as? [String]) == [limitKey], "after the update the item stuck on the old limit is reviewed again: \(calls(lifted).last?["items"] ?? "")")
+        require(try ((calls(lifted).last?["notes"] as? [String])?.first ?? "").contains("at most 12 unfinished at a time"), "the supervisor is told what changed: \(calls(lifted).last?["notes"] ?? "")")
+        require(try notices(lifted, "stuck").map { $0["status"] as? String ?? "" } == ["closed"], "its stuck notice is closed")
+        let liftedCalls = try calls(lifted).count
+        try limitDB.run("UPDATE supervisor_items SET state = 'stuck', refusal = 'At most 12 tasks can be added to one stage; stage 1 has 12.' WHERE key = ?", [.text(limitKey)])
+        let afterLift = try world(base, "limit")
+        afterLift.planID = limit.planID; afterLift.keys = limit.keys
+        await tick(afterLift)
+        require(try calls(afterLift).count == liftedCalls && (try itemState(afterLift, limitKey)).state == "stuck", "the repair runs once")
+        print("PASS: once after the stage limit was lifted, an item stuck on the old limit is reviewed again with a note and its stuck notice closed")
+
         // 11. Supervision on ChatGPT. A supervisor whose selection is ChatGPT supervises over the ChatGPT subscription (the app-server), in a run with no
         // tool surface, with the lane's own output schema, instructions and briefing; its actions are applied exactly as on Claude, it records no
         // Claude spend, and a daily limit the person set for it (a limit on Claude spending) does not stop it.

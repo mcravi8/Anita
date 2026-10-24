@@ -22,7 +22,7 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
 /// check or without any tasks, and a scope or objective decision made by anyone but the user.
 @MainActor final class BuddyPlanStore {
     static let live: Set<String> = ["draft", "active", "holding"]
-    static let maxStages = 6, maxTasks = 24, maxCriteria = 5, maxReworks = 3, maxAddedPerStage = 12
+    static let maxStages = 6, maxTasks = 24, maxCriteria = 5, maxReworks = 3, maxOpenAddedPerStage = 12, maxAddedPerStage = 36
     /// A worker task's brief may be 30,000 characters; a plan task's own brief leaves room for the authorization, the stage and its inputs.
     static let goalLimit = 30000, briefLimit = 20000
     static let tables = ["plans", "plan_stages", "plan_tasks", "plan_task_deps", "plan_scopes", "plan_decisions", "plan_notices"]
@@ -922,7 +922,8 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
         return note.isEmpty ? nil : note
     }
     /// Adds tasks to a stage that is not finished. Dependencies name tasks of this batch (by key or title) or existing tasks of this or an
-    /// earlier stage (by id or title). At most 12 tasks are added to one stage.
+    /// earlier stage (by id or title). At most 12 added tasks are unfinished at once, so the supervisor can keep adding as work finishes; 36
+    /// added to one stage in all is the loop guard, after which the user decides how to go on (23 Oct: Stage 5 stuck at 12 added, all done).
     func addTasks(stageId: String, tasks: [[String: Any]], by: String, members: [String], team: [[String: Any]] = []) throws -> [String] {
         guard let stage = try stageRow(stageId), let plan = try planRow(stage.planId), Self.live.contains(plan.status) else { throw Self.missing("That stage is not in an open plan.") }
         return try guarded { try db.transaction { try insertAdded(stage: stage, tasks: tasks, by: by, members: members, team: team).ids } }
@@ -931,7 +932,13 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
     private func insertAdded(stage: StageRow, tasks: [[String: Any]], by: String, members: [String], team: [[String: Any]] = []) throws -> (ids: [String], notes: [String]) {
         guard !["done", "superseded"].contains(stage.status) else { throw Self.conflict("Stage \(stage.n) is finished; add the work to a later stage.") }
         guard !tasks.isEmpty else { throw Self.invalid("Give the tasks to add.") }
-        guard stage.added + tasks.count <= Self.maxAddedPerStage else { throw Self.conflict("At most \(Self.maxAddedPerStage) tasks can be added to one stage; stage \(stage.n) has \(stage.added).") }
+        let finished = try taskRows(stage: stage.id).filter { ["done", "waived"].contains($0.status) }.count, openAdded = max(0, stage.added - finished)
+        guard openAdded + tasks.count <= Self.maxOpenAddedPerStage else {
+            throw Self.conflict("Stage \(stage.n) already has \(openAdded) added tasks unfinished; at most \(Self.maxOpenAddedPerStage) may be open at once. Add more once some are finished.")
+        }
+        guard stage.added + tasks.count <= Self.maxAddedPerStage else {
+            throw Self.conflict("Stage \(stage.n) has had \(stage.added) tasks added, the most one stage may get (\(Self.maxAddedPerStage)): it keeps needing more work, so the user decides how to go on.")
+        }
         let earlier = try stageRows(stage.planId).filter { $0.n <= stage.n }.flatMap { try taskRows(stage: $0.id) }
         let supervisor = try planRow(stage.planId)?.supervisorId ?? ""
         let specs = try tasks.enumerated().map { try Self.taskSpec($0.element, key: "new\($0.offset + 1)", members: members, supervisor: supervisor, team: team) }

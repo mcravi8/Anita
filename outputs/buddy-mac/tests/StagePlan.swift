@@ -202,8 +202,20 @@ import Foundation
         // Starts are counted (the count makes each worker request ID) but never capped: each start after the first follows a decision.
         for n in 1...8 { require(try plans.markDispatching(taskId: t3) == n, "dispatch \(n) is counted") }
         let extra: [[String: Any]] = (1...12).map { ["title": "Extra check \($0)", "assignee": forge, "kind": "general", "brief": "Check \($0).", "deliverable": "A note"] }
-        require(try plans.addTasks(stageId: stageIDs[1], tasks: extra, by: chief, members: members).count == 12, "twelve tasks can be added to a stage")
-        throwsCode("conflict", "a thirteenth added task is refused") { _ = try plans.addTasks(stageId: stageIDs[1], tasks: [extra[0]], by: chief, members: members) }
+        let extraIDs = try plans.addTasks(stageId: stageIDs[1], tasks: extra, by: chief, members: members)
+        require(extraIDs.count == 12, "twelve tasks can be added to a stage")
+        throwsCode("conflict", "a thirteenth unfinished added task is refused") { _ = try plans.addTasks(stageId: stageIDs[1], tasks: [extra[0]], by: chief, members: members) }
+        // Finished work makes room again, so the supervisor keeps going (23 Oct: Stage 5 stuck at 12 added, all done); 36 added in all is the
+        // loop guard, and then the user decides.
+        var added = extraIDs
+        for round in 2...3 {
+            for id in added { _ = try raw.run("UPDATE plan_tasks SET status = 'done' WHERE id = ?", [.text(id)]) }
+            added = try plans.addTasks(stageId: stageIDs[1], tasks: extra, by: chief, members: members)
+            require(added.count == 12, "once the earlier ones are finished, twelve more can be added (round \(round))")
+        }
+        for id in added { _ = try raw.run("UPDATE plan_tasks SET status = 'done' WHERE id = ?", [.text(id)]) }
+        let guardrail = throwsAny("a thirty-seventh added task is refused") { _ = try plans.addTasks(stageId: stageIDs[1], tasks: [extra[0]], by: chief, members: members) }
+        require(guardrail.contains("the user decides"), "past 36 added tasks the stage goes to the user: \(guardrail)")
         throwsCode("not_authorized", "the supervisor cannot record a scope") { _ = try plans.recordDecision(planId: planID, kind: "scope", by: chief, question: "", choice: "through 2", rationale: "", stageId: "", taskId: "", workerTaskId: "") }
         let forged = throwsAny("a raw scope decision by the supervisor aborts") { try raw.run("INSERT INTO plan_decisions(id, plan_id, decided_by, kind, choice, created_at) VALUES('x', ?, 'supervisor', 'scope', 'through 2', '')", [.text(planID)]) }
         require(forged.contains("only the user authorizes"), "the database names the reason: \(forged)")

@@ -193,6 +193,15 @@ import Foundation
                 "the answer is added for t2 and t2 is queued again: \(answered["updates"] ?? "") \(answered["status"] ?? "")")
         require(try rows(main, "SELECT resolved_by, status FROM decisions WHERE id = ?", [.text(waiting["id"] as? String ?? "")]).first.map { $0[0].string == "supervisor:\(chief)" && $0[1].string == "resolved" } == true, "the question is recorded as settled by the supervisor")
         require(try count(main, "SELECT COUNT(*) FROM plan_decisions WHERE kind = 'answer' AND decided_by = ?", [.text(chief)]) == 1, "the answer is a plan decision")
+        // Agent messages shows what Forge and Vera said to Chief about this work, both sides: the result Forge handed in and Chief's verdict,
+        // Vera's question and Chief's answer with its reason.
+        let talk = BuddyWorkerHost.planExchanges(try main.plans.conversations(workspace: w), attempts: { (try? main.store.attempts(of: $0)) ?? [] })
+        let handedIn = talk.first { $0["kind"] as? String == "result" }, asked = talk.first { $0["kind"] as? String == "question" }
+        require(handedIn?["fromAgentId"] as? String == forge && handedIn?["toAgentId"] as? String == chief && handedIn?["verdict"] as? String == "accepted" && handedIn?["title"] as? String == "Rerun the pipeline"
+                && (handedIn?["question"] as? String ?? "").hasPrefix("R1: the baseline reproduces") && !(handedIn?["body"] as? String ?? "").isEmpty, "Forge's result and Chief's acceptance, both sides: \(talk)")
+        require(asked?["fromAgentId"] as? String == vera && asked?["toAgentId"] as? String == chief && asked?["question"] as? String == "Which table should I check the rerun against?"
+                && asked?["body"] as? String == "Use Table 2 of the paper; it is the published baseline." && asked?["detail"] as? String == "The paper names Table 2 as the baseline.", "Vera's question and Chief's answer with its reason: \(talk)")
+        require(BuddyWorkerHost.message(of: "Saved it.\n\n---\nFiles: a.md\n\n---\nCommand receipts: 1 finished") == "Saved it.", "a handed-in result shows its message to the user, not the team's details")
         _ = try step(main)
         require(try planTask(main, "t2")["status"] as? String == "dispatched", "the answered task is working again")
         try finish(main.store, t2Job, result: "Signed off: Table 2 matches.")

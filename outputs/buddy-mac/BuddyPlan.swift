@@ -1098,6 +1098,18 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
             ["id": Self.s(r, 0), "kind": Self.s(r, 1), "by": Self.s(r, 2), "choice": Self.s(r, 3), "rationale": Self.s(r, 4), "at": Self.s(r, 5), "taskId": Self.s(r, 6), "stageId": Self.s(r, 7)]
         }
     }
+    /// What a teammate and the supervisor said to each other about plan work, oldest first: a question and the supervisor's answer, a result
+    /// and whether it was accepted or sent back. Agent messages shows these beside check-ins; nothing here changes the record.
+    func conversations(workspace: String, limit: Int = 300) throws -> [[String: Any]] {
+        try db.rows("""
+            SELECT d.id, d.kind, d.decided_by, d.question, d.choice, d.rationale, d.created_at, d.worker_task_id, t.assignee, t.title
+            FROM plan_decisions d JOIN plans p ON p.id = d.plan_id JOIN plan_tasks t ON t.id = d.task_id
+            WHERE p.workspace = ? AND d.kind IN ('answer', 'rework', 'accept') AND d.decided_by <> 'user' ORDER BY d.rowid DESC LIMIT ?
+            """, [.text(workspace), .int(Int64(max(0, limit)))]).reversed().map { r in
+            ["id": Self.s(r, 0), "kind": Self.s(r, 1), "by": Self.s(r, 2), "question": Self.s(r, 3), "choice": Self.s(r, 4), "rationale": Self.s(r, 5),
+             "at": Self.s(r, 6), "workerTaskId": Self.s(r, 7), "assignee": Self.s(r, 8), "title": Self.s(r, 9)]
+        }
+    }
     /// Counts one more resume of a task by the supervisor. False once it has resumed the task 3 times: then the task needs another decision.
     func noteSupervisorResume(taskId: String) throws -> Bool {
         try db.run("UPDATE plan_tasks SET supervisor_resumes = supervisor_resumes + 1 WHERE id = ? AND supervisor_resumes < 3", [.text(taskId)]) == 1

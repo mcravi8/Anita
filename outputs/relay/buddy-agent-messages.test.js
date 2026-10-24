@@ -26,7 +26,7 @@ test('legacy clock labels use adjacent dated records across midnight and saved u
  assert.deepEqual(out.map(m=>m.id),['legacy','agent-activity-before-midnight','dated','agent-activity-before-notice','notice','agent-activity-after-notice','reply']);
 });
 test('check-ins that were cut short or dropped are not shown in the agent-message history, saved ones included',()=>{
- const s={conversationWorkspace:'w',agents:[{id:'chief'},{id:'inbox'}]},row=(id,status,extra={})=>({id,fromAgentId:'chief',toAgentId:'inbox',question:'',body:'',status,createdAt:'2026-10-20T14:30:01Z',startedAt:'2026-10-20T14:30:01Z',...extra});
+ const s={conversationWorkspace:'w',agents:[{id:'chief'},{id:'inbox'}]},row=(id,status,extra={})=>({id,fromAgentId:'chief',toAgentId:'inbox',question:'Anything new in the inbox?',body:'',status,createdAt:'2026-10-20T14:30:01Z',startedAt:'2026-10-20T14:30:01Z',...extra});
  const stopped='This check stopped because access, settings, or its time limit changed.';
  const rows=[row('434788FF','interrupted',{error:stopped}),row('40AB5B6B','interrupted',{error:stopped}),row('dropped','cancelled',{error:'Team settings changed before this check finished.'}),row('answered','completed',{body:'Inbox is clear.'}),row('asked','running'),row('broken','failed',{error:'The check-in returned no verified structured result.'})];
  assert.deepEqual(M.validRows(s,{workspace:'w',messages:rows}).map(r=>r.id),['answered','asked','broken']);
@@ -40,4 +40,15 @@ test('task updates in a chat carry their time as workerUpdatedAt, so exchanges w
  const chief=(id,at)=>({id,exchangeId:id,fromAgentId:'chief',toAgentId:'forge',at});
  const out=M.mergeTimeline(s,'forge',messages,[chief('c1','2026-10-22T19:23:00Z'),chief('c2','2026-10-23T06:42:00Z'),chief('c3','2026-10-23T07:23:00Z'),chief('c4','2026-10-23T17:14:30Z')]);
  assert.deepEqual(out.map(m=>m.id),['hello','agent-activity-c1','s02a','agent-activity-c2','s03','s02b','agent-activity-c3','approval','agent-activity-c4']);
+});
+test('an automatic check-in is not a message: only what an agent asked or handed in, with its reply, is in the history',()=>{
+ // Forge's chat on 24 October: "Chief requested an automatic check-in. Check-in completed without a message." filled the history. An
+ // automatic check-in is Buddy asking a teammate for the supervisor; nobody wrote it. An older native build still sends them.
+ const s={conversationWorkspace:'w',agents:[{id:'chief'},{id:'forge'}]},at='2026-10-24T17:59:20Z';
+ const rows=[{id:'auto-quiet',fromAgentId:'chief',toAgentId:'forge',question:'',body:'',status:'completed',createdAt:at},
+  {id:'auto-said',fromAgentId:'chief',toAgentId:'forge',question:'',body:'The revised report is nearly ready.',status:'completed',createdAt:at},
+  {id:'asked',kind:'checkin',fromAgentId:'chief',toAgentId:'forge',question:'Is the Word check done?',body:'Not yet.',status:'completed',createdAt:at},
+  {id:'plan:q',kind:'question',fromAgentId:'forge',toAgentId:'chief',question:'May I rent a second pod?',body:'Yes, one more.',detail:'The first one is full.',status:'completed',createdAt:at},
+  {id:'plan:r',kind:'result',verdict:'sent back',title:'Final report',fromAgentId:'forge',toAgentId:'chief',question:'I saved the final report.',body:'Fix the table on page 9.',status:'completed',createdAt:at}];
+ assert.deepEqual(M.validRows(s,{workspace:'w',messages:rows}).map(r=>r.id),['asked','plan:q','plan:r']);
 });

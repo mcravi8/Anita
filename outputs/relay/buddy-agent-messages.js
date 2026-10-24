@@ -6,7 +6,7 @@
   function validRows(state,payload){
     if(payload?.workspace!==state.conversationWorkspace)return [];
     const ids=new Set(state.agents.map(a=>a.id));
-    return (payload.messages||[]).filter(r=>typeof r.id==='string'&&ids.has(r.fromAgentId)&&ids.has(r.toAgentId)&&r.fromAgentId!==r.toAgentId&&!quiet.has(r.status));
+    return (payload.messages||[]).filter(r=>typeof r.id==='string'&&ids.has(r.fromAgentId)&&ids.has(r.toAgentId)&&r.fromAgentId!==r.toAgentId&&!quiet.has(r.status)&&String(r.question||'').trim());
   }
   const stamp=value=>{const n=Date.parse(value||'');return Number.isFinite(n)?n:NaN;};
   function mergeTimeline(state,agent,messages,events,updateTimes={}){
@@ -46,7 +46,7 @@
   }
   const api={validRows,mergeTimeline};root.BuddyAgentMessages=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
-  let summaryWorkspace='',summaries={},updateTimes={},scope='',selected=[],rows=[],next=null,generation=0,loading=false,error='',revision='',newActivity=false;
+  let summaryWorkspace='',summaries={},updateTimes={},scope='',focus=[],rows=[],next=null,generation=0,loading=false,error='',revision='',newActivity=false;
   const native=()=>!!window.BuddyDesktop?.worker;
   const time=value=>value?new Date(value).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'';
   const status=value=>({queued:'Queued',running:'Waiting for reply',completed:'Completed',failed:'Couldn’t complete',interrupted:'Interrupted',budget:'Usage limit reached',cancelled:'Cancelled'}[value]||value);
@@ -60,30 +60,44 @@
     if(changed&&ui.view.kind==='chat')refreshLiveChat(ui.view.target);
     if(document.querySelector('[data-agent-message-panel]')&&value.agentMessageRevision&&value.agentMessageRevision!==revision&&!loading){newActivity=true;const notice=document.querySelector('[data-agent-message-new]');if(notice)notice.hidden=false;}
   };
-  function bubble(agent,body,extra='',reply=false){return `<div class="agent-exchange-message ${reply?'is-reply':''}"><div class="agent-exchange-sender">${avatar(agent,true)}<strong>${esc(agentName(agent))}</strong></div><div class="reply-markdown">${BuddyMarkdown.render(body)}</div>${extra}</div>`;}
+  function bubble(agent,body,extra='',reply=false,tag=''){return `<div class="agent-exchange-message ${reply?'is-reply':''}"><div class="agent-exchange-sender">${avatar(agent,true)}<strong>${esc(agentName(agent))}</strong>${tag?`<span class="agent-exchange-verdict ${tag==='Sent back'?'is-back':''}">${esc(tag)}</span>`:''}</div><div class="reply-markdown">${BuddyMarkdown.render(body)}</div>${extra}</div>`;}
+  // One exchange as a short conversation, both sides: what was asked or handed in, then the reply. A question and its answer, or a result and
+  // the supervisor's verdict, come from the plan's record; a check-in is a question the supervisor asked a teammate.
+  const kinds={question:'Question',result:'Work handed in',checkin:'Check-in'};
   function exchange(r){
-    const question=String(r.question||''),body=String(r.body||''),detail=String(r.detail||'');
-    const requested=question?bubble(r.fromAgentId,question):`<p class="agent-exchange-system">${esc(agentName(r.fromAgentId))} requested an automatic check-in.</p>`;
-    const more=body&&detail&&body!==detail?`<details><summary>Details</summary><div class="reply-markdown">${BuddyMarkdown.render(detail)}</div></details>`:'';
-    const reply=r.status==='completed'?(body||detail?bubble(r.toAgentId,body||detail,more,true):'<p class="agent-exchange-system">Check-in completed without a message.</p>'):'';
-    return `<section class="agent-exchange" data-agent-exchange="${esc(r.id)}"><div class="agent-exchange-heading"><span>${who(r.fromAgentId)} → ${who(r.toAgentId)}</span><time>${esc(time(r.createdAt))}</time></div>${requested}${reply}${r.status!=='completed'?`<p class="agent-exchange-status ${['failed','interrupted'].includes(r.status)?'is-error':''}" role="status">${esc(status(r.status))}${r.error?` · ${esc(r.error)}`:''}</p>`:''}</section>`;
+    const ask=String(r.question||''),body=String(r.body||''),detail=String(r.detail||''),kind=kinds[r.kind]||'Check-in';
+    const opening=bubble(r.fromAgentId,ask);
+    const more=body&&detail&&body!==detail?`<details><summary>${r.kind==='question'?'Why':'Details'}</summary><div class="reply-markdown">${BuddyMarkdown.render(detail)}</div></details>`:'';
+    const tag=r.verdict==='accepted'?'Accepted':r.verdict==='sent back'?'Sent back':'';
+    const reply=r.status==='completed'?(body||detail?bubble(r.toAgentId,body||detail,more,true,tag):`<p class="agent-exchange-system">${esc(agentName(r.toAgentId))} didn’t reply.</p>`):'';
+    const title=r.kind==='result'&&r.title?` · ${esc(r.title)}`:'';
+    return `<section class="agent-exchange${focus.includes(r.id)?' is-focused':''}" data-agent-exchange="${esc(r.id)}"><div class="agent-exchange-heading"><span>${kind}${title}</span><time>${esc(time(r.createdAt))}</time></div>${opening}${reply}${r.status!=='completed'?`<p class="agent-exchange-status ${['failed','interrupted'].includes(r.status)?'is-error':''}" role="status">${esc(status(r.status))}${r.error?` · ${esc(r.error)}`:''}</p>`:''}</section>`;
   }
+  // The history of the agent whose chat this is: everyone it talked with, oldest first. Opened from a "3 messages with Chief" marker, it shows
+  // the same history and brings those messages into view.
   function draw(){
     const panel=document.querySelector('[data-agent-message-panel]');if(!panel)return;
-    panel.innerHTML=`<p class="modal-description">Saved requests and replies between your agents.</p><label class="field"><span>Show messages involving</span><select aria-label="Filter agent messages" data-agent-message-filter ${loading?'disabled':''}><option value="">All agents</option>${state.agents.map(a=>`<option value="${esc(a.id)}" ${scope===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}</select></label><div class="agent-message-toolbar"><button type="button" class="small-link" data-agent-message-refresh ${loading?'disabled':''}>Refresh</button><span data-agent-message-new ${newActivity?'':'hidden'}>New activity available</span></div>${error?`<p class="field-error" role="alert">${esc(error)} Your saved messages are preserved. Try Refresh.</p>`:''}${loading?'<p class="team-caption" role="status">Loading messages…</p>':''}${next?`<button type="button" class="border-button" data-agent-message-earlier ${loading?'disabled':''}>Load earlier messages</button>`:''}<div class="agent-message-history" aria-busy="${loading}">${rows.map(exchange).join('')||(!loading&&!error?'<div class="agent-messages-empty"><h3>No agent messages yet</h3><p>Check-in requests and replies will appear here when your agents communicate.</p></div>':'')}</div>`;
+    const name=scope?agentName(scope):'';
+    panel.innerHTML=`<p class="modal-description">${name?`What ${esc(name)} and its teammates said to each other: questions and answers, work handed in and the replies, and check-ins.`:'What your agents said to each other.'}</p><div class="agent-message-toolbar"><button type="button" class="small-link" data-agent-message-refresh ${loading?'disabled':''}>Refresh</button><span data-agent-message-new ${newActivity?'':'hidden'}>New activity available</span></div>${error?`<p class="field-error" role="alert">${esc(error)} Your saved messages are preserved. Try Refresh.</p>`:''}${loading?'<p class="team-caption" role="status">Loading messages…</p>':''}${next?`<button type="button" class="border-button" data-agent-message-earlier ${loading?'disabled':''}>Load earlier messages</button>`:''}<div class="agent-message-history" aria-busy="${loading}">${rows.map(exchange).join('')||(!loading&&!error?`<div class="agent-messages-empty"><h3>No messages yet</h3><p>${name?`When ${esc(name)} and a teammate talk, it shows here.`:'When your agents talk to each other, it shows here.'}</p></div>`:'')}</div>`;
+    if(loading||!rows.length)return;
+    const target=panel.querySelector('.agent-exchange.is-focused')||[...panel.querySelectorAll('.agent-exchange')].pop();
+    target?.scrollIntoView?.({block:target.classList.contains('is-focused')?'start':'end'});
   }
   async function load(earlier=false){
     const token=++generation,workspace=state.conversationWorkspace;loading=true;error='';draw();
     try{
       if(!native())throw Error('Open Buddy for Mac to view agent messages.');
-      const value=await BuddyDesktop.worker({operation:'team',arguments:{action:'messages',...(scope?{agentId:scope}:{}),...(selected.length?{exchangeIds:selected}:{}),...(earlier&&next?{before:next}:{})}});
+      const value=await BuddyDesktop.worker({operation:'team',arguments:{action:'messages',...(scope?{agentId:scope}:{}),...(earlier&&next?{before:next}:{})}});
       if(token!==generation||!document.querySelector('[data-agent-message-panel]'))return;
       if(value.workspace!==workspace||state.conversationWorkspace!==workspace)throw Error('Your workspace changed. Reopen agent messages.');
       const page=validRows(state,value),combined=earlier?[...page,...rows]:page;rows=combined.filter((r,i)=>combined.findIndex(v=>v.id===r.id)===i);next=value.nextCursor||null;revision=value.messageRevision||'';newActivity=false;
     }catch(e){if(token===generation)error=String(e.message||e);}
     finally{if(token===generation){loading=false;draw();}}
+    // The messages a marker was opened for may be older than the latest page: earlier pages load until they are in view.
+    if(token===generation&&!error&&next&&focus.length&&!focus.some(id=>rows.some(r=>r.id===id))&&earlierPages++<10)load(true);
   }
-  api.open=(id,exchangeIds=[])=>{scope=id||'';selected=exchangeIds;rows=[];next=null;error='';newActivity=false;openDrawer('Agent messages','<div data-agent-message-panel></div>');load();};
+  let earlierPages=0;
+  // Opened from a chat: that agent's history, with no choice of whom to show. A group's or an unknown id shows everyone's.
+  api.open=(id,exchangeIds=[])=>{scope=state.agents.some(a=>a.id===id)?id:'';focus=Array.isArray(exchangeIds)?exchangeIds:[];rows=[];next=null;error='';newActivity=false;earlierPages=0;openDrawer(scope?`${agentName(scope)} and teammates`:'Agent messages','<div data-agent-message-panel></div>');load();};
   document.addEventListener('click',e=>{const open=e.target.closest('[data-agent-messages]');if(open){api.open(open.dataset.agentMessages,JSON.parse(open.dataset.agentExchanges||'[]'));return;}if(e.target.closest('[data-agent-message-refresh]'))load();else if(e.target.closest('[data-agent-message-earlier]')&&!loading)load(true);});
-  document.addEventListener('change',e=>{if(e.target.matches('[data-agent-message-filter]')){scope=e.target.value;selected=[];rows=[];next=null;load();}});
 })(typeof globalThis!=='undefined'?globalThis:this);

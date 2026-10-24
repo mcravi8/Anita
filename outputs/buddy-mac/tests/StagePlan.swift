@@ -293,6 +293,13 @@ import Foundation
                     "the supervisor is asked to plan the stage, with its goal and acceptance, not to check it: \(items10)")
             let run10 = (try plans10.summary(workspace: w, jobs: store10.jobs, names: names)).first?["run"] as? [String: Any] ?? [:]
             require(run10["state"] as? String == "waiting_on_supervisor", "the plan waits on its supervisor while the stage is planned: \(run10)")
+            // The supervisor's lane stopped on it (an open stuck notice): the plan says stuck and why, not that the supervisor is at work.
+            _ = try plans10.addNotice(planId: planID10, kind: "stuck", text: "The team is stuck on Stage 2 — Robustness: Buddy could not apply Chief's add_tasks: a reason. Tell me how to proceed.", chat: true, refs: ["runId": "stuck-run-10"])
+            let stuck10 = (try plans10.summary(workspace: w, jobs: store10.jobs, names: names)).first?["run"] as? [String: Any] ?? [:]
+            require(stuck10["state"] as? String == "stuck" && (stuck10["stuck"] as? String ?? "").contains("could not apply Chief's add_tasks"), "an open stuck notice makes the plan stuck, with the reason: \(stuck10)")
+            try plans10.closeStuckNotices(runIds: ["stuck-run-10"])
+            let moving10 = (try plans10.summary(workspace: w, jobs: store10.jobs, names: names)).first?["run"] as? [String: Any] ?? [:]
+            require(moving10["state"] as? String == "waiting_on_supervisor" && moving10["stuck"] is NSNull, "once it moves again the plan is no longer stuck: \(moving10)")
             throwsCode("conflict", "a stage with no tasks cannot be completed") { _ = try plans10.stageDone(stageId: s2, evidence: ["task:\(p1)"], report: "Done.", by: chief, attemptOutcome: { _, _ in nil }) }
             let raw10 = try BuddyOperationsDB(directory: directory10, existing: true)
             try raw10.run("INSERT INTO plan_decisions(id, plan_id, stage_id, decided_by, kind, choice, created_at) VALUES('forged-done', ?, ?, ?, 'stage_done', 'done', '')", [.text(planID10), .text(s2), .text(chief)])

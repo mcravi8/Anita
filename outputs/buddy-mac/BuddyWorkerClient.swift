@@ -410,6 +410,13 @@ enum BuddyPlanChat {
                 lines.append("Stage \(stage["n"] as? Int ?? 0) (\(stage["status"] as? String ?? "")): \(clause(stage["title"] as? String ?? "", 80)) — \(listed).")
             }
             if supervises {
+                // The supervisor's own background lane has stopped on something (23 Oct: Stage 5 stuck on Buddy's task limit while Chief told the
+                // user that resolving it was its job, and nothing ran). The chat says so plainly instead of promising work that is not happening.
+                let stuck = (plan["notices"] as? [[String: Any]] ?? []).filter { $0["kind"] as? String == "stuck" && $0["status"] as? String == "open" }
+                if !stuck.isEmpty {
+                    let why = stuck.suffix(3).map { clause(($0["text"] as? String ?? "").replacingOccurrences(of: " Tell me how to proceed.", with: ""), 400) }.joined(separator: "; ")
+                    lines.append("STUCK: your background supervision has stopped on this plan and nothing is being done about it now: " + why + ". Tell the user plainly that the work is stuck, why, and what would unblock it (their answer, or a change to Buddy itself). Never say you are resolving it, that it is your responsibility, or that it is moving, unless a tool you call in this turn returns an applied change that unblocks it; then say exactly what that receipt shows.")
+                }
                 let open = (plan["notices"] as? [[String: Any]] ?? []).filter { $0["kind"] as? String == "escalation" && $0["status"] as? String == "open" }
                 if !open.isEmpty {
                     let asked = open.map { notice -> String in

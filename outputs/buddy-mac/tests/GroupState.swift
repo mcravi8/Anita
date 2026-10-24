@@ -69,6 +69,15 @@ import Foundation
         require(block.contains("Questions the user answered recently (settled; never ask again):") && block.contains("[\(notice)]") && !block.contains("Your open questions forwarded to the user"),
                 "the question that asked for “Resume S01” is listed as answered, not open: \(block)")
         require(!block.contains("waiting on the user"), "no task reads as waiting on the user: \(block)")
+        require(!block.contains("STUCK:"), "a plan that is not stuck says nothing about it: \(block)")
+        // 1b. The supervisor's lane stopped on the plan (an open stuck notice): its chats are told plainly, so it says the work is stuck and why
+        // instead of promising to resolve it (23 Oct: Chief said resolving Stage 5's blocker was its job while nothing ran).
+        _ = try plans.addNotice(planId: planID, kind: "stuck", text: "The team is stuck on Stage 1 — S01: Buddy could not apply Chief's add_tasks: At most 12 tasks can be added to one stage; stage 1 has 12. Tell me how to proceed.", chat: true, refs: ["runId": "stuck-run"])
+        let stuckBlock = BuddyLiveState.block(plans: BuddyPlanStore.readOnlySummary(support: root, workspace: w), jobs: jobs, state: state, agent: chief, supervises: true, now: now, zone: pacific)
+        require(stuckBlock.contains("STUCK: your background supervision has stopped on this plan") && stuckBlock.contains("could not apply Chief's add_tasks") && stuckBlock.contains("Never say you are resolving it")
+                && !stuckBlock.contains("Tell me how to proceed"), "the supervisor's state says the plan is stuck, why, and not to promise it: \(stuckBlock)")
+        try plans.closeStuckNotices(runIds: ["stuck-run"])
+        require(!BuddyLiveState.block(plans: BuddyPlanStore.readOnlySummary(support: root, workspace: w), jobs: jobs, state: state, agent: chief, supervises: true, now: now, zone: pacific).contains("STUCK:"), "once it moves again the line is gone")
 
         // 2. A direct chat and a group turn carry that same block, and each the agent's latest exchange in the other chat.
         let inGroup = BuddyLiveState.elsewhere(state: state, agent: chief, chat: omori, now: now, zone: pacific)

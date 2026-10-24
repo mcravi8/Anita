@@ -104,6 +104,8 @@
       return done?`Stage ${done.n} is done — what next?`:'Which stage should the team get done?';
     }
     if(state==='needs_you'){const items=needsList(plan,names),n=Math.max(Number(run.needsYou)||0,items.length,1);return `Needs you (${n})${items[0]?': '+items[0]:''}`;}
+    // The supervisor's background lane stopped on something: say so and why, never that the supervisor is at work on it.
+    if(state==='stuck'){const why=String(run.stuck||'').replace(/\s*Tell me how to proceed\.?\s*$/,'').trim();return why?(/^The team is stuck on /.test(why)?why.replace(/^The team is stuck on /,'Stuck on '):`Stuck — ${why}`):`Stuck — ${sup} can't move this forward by itself`;}
     const planning=planningStage(plan);if(planning)return `${sup} is planning Stage ${planning.n}`;
     const tasks=allTasks(plan);
     if(state==='waiting_on_supervisor'){
@@ -254,7 +256,7 @@
   }
 
   const chevron='<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>';
-  const TONE={draft:'ready',working:'working',waiting_on_supervisor:'review',needs_you:'needs',paused:'idle',stage_done:'done',stopped:'idle',idle:'idle'};
+  const TONE={draft:'ready',working:'working',waiting_on_supervisor:'review',needs_you:'needs',stuck:'needs',paused:'idle',stage_done:'done',stopped:'idle',idle:'idle'};
   const tone=plan=>plan?TONE[runState(plan)]||'idle':'';
   // The same strip, folded above the composer or, docked in the project panel beside the chat, always open: its first line is then the live status,
   // not a toggle. Every button in it is the same button, handled the same way, wherever it is shown.

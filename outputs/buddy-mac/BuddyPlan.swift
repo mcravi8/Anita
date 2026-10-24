@@ -363,17 +363,19 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
             ["id": Self.s(r, 0), "kind": Self.s(r, 1), "text": Self.s(r, 2), "chat": Self.n(r, 3) == 1, "status": Self.s(r, 4), "at": Self.s(r, 5), "refs": (try? BuddyOperationsDB.decode(Self.s(r, 6))) ?? [String: Any]()]
         }
         needsYou += Self.n(try db.rows("SELECT COUNT(*) FROM plan_notices WHERE plan_id = ? AND kind = 'escalation' AND status = 'open'", [.text(planId)]).first ?? [], 0)
+        let stuck = notices.last { $0["kind"] as? String == "stuck" && $0["status"] as? String == "open" }?["text"] as? String
         let state: String
         switch plan.status {
         case "draft": state = "draft"
-        case "active": state = needsYou > 0 ? "needs_you" : !working.isEmpty ? "working" : forSupervisor ? "waiting_on_supervisor" : pausedByUser ? "paused" : "idle"
+        // An open stuck notice means the supervisor's background lane has stopped on something: the plan says so rather than "checking".
+        case "active": state = needsYou > 0 ? "needs_you" : !working.isEmpty ? "working" : stuck != nil ? "stuck" : forSupervisor ? "waiting_on_supervisor" : pausedByUser ? "paused" : "idle"
         case "holding", "achieved": state = latest?.status == "withdrawn" ? "stopped" : "stage_done"
         default: state = "stopped"
         }
         let scope: Any = shown.map { ["through": $0.through, "quote": $0.quote, "at": $0.at, "status": $0.status, "messageId": $0.messageId] as [String: Any] } ?? NSNull()
         return ["id": plan.id, "groupId": plan.groupId, "objective": plan.objective, "supervisorId": plan.supervisorId, "status": plan.status, "revision": plan.revision,
                 "createdBy": plan.createdBy, "createdAt": plan.createdAt, "updatedAt": plan.updatedAt, "scope": scope, "stages": stages, "notices": notices,
-                "run": ["state": state, "working": working, "needsYou": needsYou, "idleSince": state == "idle" ? (lastChange as Any) : (NSNull() as Any)] as [String: Any]]
+                "run": ["state": state, "working": working, "needsYou": needsYou, "idleSince": state == "idle" ? (lastChange as Any) : (NSNull() as Any), "stuck": stuck.map { $0 as Any } ?? NSNull()] as [String: Any]]
     }
 
     /// What the user is asked once a plan is proposed: every stage with its goal and acceptance, then which stage to get done.

@@ -69,6 +69,16 @@ test('a task the person paused reads as paused by them, waiting for them to resu
  assert.equal(P.taskChip(task('t2','blocked',{blockedOn:'paused'}),pulse({}),'Chief').label,'Paused by you');
 });
 
+test('a plan whose supervisor lane stopped says Stuck and why, never that the supervisor is checking',()=>{
+ // 23 Oct: Stage 5 stuck on Buddy's task limit while the strip read "Chief is checking that Stage 5 is done".
+ const stuck=active([task('t1','done'),task('t2','done')],{state:'stuck',stuck:"The team is stuck on Stage 5 — S04a then S04b: Buddy could not apply Chief's add_tasks: At most 12 tasks can be added to one stage; stage 5 has 12. Tell me how to proceed."});
+ assert.equal(P.banner(stuck,pulse({}),names,NOW),"Stuck on Stage 5 — S04a then S04b: Buddy could not apply Chief's add_tasks: At most 12 tasks can be added to one stage; stage 5 has 12.");
+ assert.equal(P.tone(stuck),'needs','shown like something that needs attention');
+ const html=P.stripHTML(stuck,pulse({}),names,{open:true,now:NOW});
+ assert.match(html,/Stuck on Stage 5/);assert.doesNotMatch(html,/is checking/);
+ assert.equal(P.banner(active([task('t1','done')],{state:'stuck'}),pulse({}),names,NOW),"Stuck — Chief can't move this forward by itself",'without a reason it still says stuck');
+});
+
 test('stage and task chips say where each piece of work stands',()=>{
  assert.deepEqual(['proposed','approved','working','review','done'].map(s=>P.stageChip({status:s}).label),['Not started','Up next','Working','Being checked','Done']);
  const chip=(t,p)=>P.taskChip(t,pulse(p||{}),'Chief').label;

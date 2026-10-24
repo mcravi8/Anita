@@ -95,6 +95,9 @@
 .plan-card-decision.open,.plan-card-stuck{border-color:var(--warn-line)}
 .plan-card-decision.open .plan-card-badge,.plan-card-stuck .plan-card-badge{background:var(--warn-bg);color:var(--warn)}
 .plan-card-decision.open .plan-card-badge::before,.plan-card-stuck .plan-card-badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
+.plan-card-context{color:var(--text1)}
+.plan-card-more>summary{cursor:pointer;width:max-content;color:var(--text2);font-size:12.5px;font-weight:500}
+.plan-card-more[open]>summary{margin-bottom:8px}
 .plan-card-advice{padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius-row,14px)}
 .plan-card-advice p{color:var(--text)}
 .plan-card-reply{display:flex;flex-direction:column;gap:8px}

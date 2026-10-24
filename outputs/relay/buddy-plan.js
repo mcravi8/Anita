@@ -167,6 +167,17 @@
     const structured=rows.length>=2&&rows.length>=lines.length-1,lead=structured&&!labelled.test(lines[0])?lines[0]:'';
     return {summary:lead,rows:structured?rows.map(r=>({label:r[1].trim(),text:r[2].trim()})):[],prose:structured?'':report};
   }
+  // Rows of a report that are the team's record rather than news for the person (where the files went, what Chief decided and why): they fold
+  // under Details. The files themselves show on the card.
+  const recordRow=r=>/^(?:outputs?|files?|deliverables?|decisions?|evidence|receipts?|hashes)$/i.test(r.label);
+  // A question to the person: the question itself, then what led to it. Chief's questions opened with the state of the work ("Stage 5
+  // remains PARTIAL. Vera verified … May we accept …?"), and all of it was the heading. The first sentence that asks is the heading (the first
+  // sentence when none does); the rest reads under it, folded once it runs long.
+  function askParts(text){
+    const sentences=String(text||'').trim().split(/(?<=[.!?])\s+(?=[A-Z“"(*])/).map(s=>s.trim()).filter(Boolean);
+    const at=Math.max(0,sentences.findIndex(s=>/\?["”)*]*$/.test(s)));
+    return {ask:sentences[at]||'',context:sentences.filter((_,i)=>i!==at).join(' ')};
+  }
   const noticeOf=(plan,message)=>(Array.isArray(plan?.notices)?plan.notices:[]).find(n=>'plan-notice-'+n?.id===message?.id)||null;
   const stageOfNotice=(plan,notice,text)=>{
     const ref=notice?.refs?.stageId,n=Number(String(text||'').match(/^\s*Stage\s+(\d+)\b/i)?.[1]);
@@ -196,7 +207,8 @@
     if(kind==='stage_report'){
       const stage=stageOfNotice(plan,notice,text),{summary,rows,prose}=splitReport(text),done=stage?.status==='done';
       const criteria=Array.isArray(stage?.acceptance)&&stage.acceptance.length?`<div class="plan-card-section"><span class="plan-card-label">Done when</span><ul class="plan-card-criteria">${stage.acceptance.map(a=>`<li class="${done?'met':''}">${done?check:'<span class="plan-card-open" aria-hidden="true"></span>'}<span>${esc(a)}</span></li>`).join('')}</ul></div>`:'';
-      const body=rows.length?`${summary?`<p class="plan-card-summary">${esc(summary)}</p>`:''}<dl class="plan-card-rows">${rows.map(r=>`<dt>${esc(r.label)}</dt><dd>${esc(r.text)}</dd>`).join('')}</dl>`:prose?`<div class="reply-markdown plan-card-prose">${markdown(prose)}</div>`:'';
+      const shown=rows.filter(r=>!recordRow(r)),kept=rows.filter(recordRow),dl=list=>`<dl class="plan-card-rows">${list.map(r=>`<dt>${esc(r.label)}</dt><dd>${esc(r.text)}</dd>`).join('')}</dl>`;
+      const body=rows.length?`${summary?`<p class="plan-card-summary">${esc(summary)}</p>`:''}${shown.length?dl(shown):''}${kept.length?`<details class="plan-card-more"><summary>Details</summary>${dl(kept)}</details>`:''}`:prose?`<div class="reply-markdown plan-card-prose">${markdown(prose)}</div>`:'';
       const head=stage?`<header class="plan-card-head"><h3>Stage ${Number(stage.n)} · ${esc(stage.title)}</h3>${done?`<span class="plan-chip done">Done</span>`:''}</header>`:'';
       return {label:'Stage report',html:`<article class="plan-card plan-card-report">${head}${body}${criteria}${filesHTML?`<div class="plan-card-section plan-card-files"><span class="plan-card-label">Files</span>${filesHTML}</div>`:''}${stage?aheadHTML(plan,stage,{busy}):''}</article>`};
     }
@@ -208,7 +220,8 @@
       const advice=recommendation?`<div class="plan-card-advice"><span class="plan-card-label">${esc(message.whoName||'Chief')} recommends</span><p>${esc(recommendation)}</p></div>`:'';
       const open=!!reply?.open,id=esc(notice?.id||'');
       const foot=`<div class="plan-card-foot plan-card-decide">${recommendation?`<button type="button" class="primary-button" data-plan-answer="approve" data-notice="${id}"${off}>Approve</button><button type="button" class="border-button" data-plan-answer="disapprove" data-notice="${id}"${off}>Disapprove</button>`:''}<button type="button" class="${recommendation?'small-link':'primary-button'}" data-plan-answer="reply" data-notice="${id}" aria-expanded="${open}"${off}>Reply</button><span class="plan-card-note">The team keeps working on the rest meanwhile.</span></div>${open?`<form class="plan-card-reply" data-plan-reply="${id}"><label><span class="plan-card-label">Your answer</span><textarea rows="3" maxlength="2000" data-plan-reply-text="${id}">${esc(reply?.draft||'')}</textarea></label><button type="submit" class="primary-button"${off}>Send answer</button></form>`:''}`;
-      return {label:'Decision',html:`<article class="plan-card plan-card-decision open"><span class="plan-card-badge">Needs your decision${what?` · ${esc(what)}`:''}</span><h3>${esc(question)}</h3>${advice}${foot}</article>`};
+      const {ask,context}=askParts(question),why=!context?'':context.length<=240?`<p class="plan-card-context">${esc(context)}</p>`:`<details class="plan-card-more"><summary>Details</summary><p class="plan-card-context">${esc(context)}</p></details>`;
+      return {label:'Decision',html:`<article class="plan-card plan-card-decision open"><span class="plan-card-badge">Needs your decision${what?` · ${esc(what)}`:''}</span><h3>${esc(ask||question)}</h3>${why}${advice}${foot}</article>`};
     }
     if(kind==='stuck')return {label:'Stuck',html:`<article class="plan-card plan-card-stuck"><span class="plan-card-badge">The team is stuck</span><p>${esc(text.replace(/\s*Tell me how to proceed\.?\s*$/,''))}</p><div class="plan-card-foot"><button type="button" class="primary-button" data-plan-answer="chat">Tell ${esc(message.whoName||'Chief')} how to go on</button></div></article>`};
     return null;
@@ -288,7 +301,7 @@
     return `<button type="button" class="stage-strip tone-${TONE[runState(plan)]||'idle'}${offline?' offline':''}" data-chat-view="plan" data-stage-strip="${esc(plan.id)}" aria-label="Open the plan. ${esc(said)}"><span class="stage-segs" aria-hidden="true">${stagesOf(plan).map(seg).join('')}</span><span class="plan-banner">${esc(said)}</span>${offline?'<span class="stage-offline">May be out of date</span>':''}${arrow}</button>`;
   }
 
-  const api={planFor,stageChip,taskChip,banner,noticesToDeliver,deliverNotices,stripHTML,stageStripHTML,currentStage,replyOutcome,tone,stageDeliverables,noticeFiles,splitReport,noticeCard};
+  const api={planFor,stageChip,taskChip,banner,noticesToDeliver,deliverNotices,stripHTML,stageStripHTML,currentStage,replyOutcome,tone,stageDeliverables,noticeFiles,splitReport,askParts,noticeCard};
   root.BuddyPlan=api;if(typeof module!=='undefined')module.exports=api;
   if(typeof document==='undefined')return;
 

@@ -216,6 +216,8 @@ test('plan notices read as cards: a stage report with its criteria, rows and wha
  assert.equal(card.label,'Stage report');
  assert.match(card.html,/<h3>Stage 1 · Research<\/h3><span class="plan-chip done">Done<\/span>/);
  assert.match(card.html,/<dt>Issues<\/dt><dd>No remaining S01 blockers.<\/dd>/);
+ assert.match(card.html,/<dl class="plan-card-rows"><dt>Acceptance<\/dt><dd>[^<]*<\/dd><dt>Issues<\/dt>/,'what the stage achieved and what is open stay in view');
+ assert.match(card.html,/<details class="plan-card-more"><summary>Details<\/summary><dl class="plan-card-rows"><dt>Outputs<\/dt><dd>[^<]*<\/dd><dt>Decision<\/dt>/,'where the files went and what Chief decided fold under Details');
  assert.match(card.html,/class="met"><svg[^>]*>.*?<\/svg><span>Criterion 1a<\/span>/,'its stage’s criteria, met');
  assert.match(card.html,/data-plan-authorize="2"[^>]*>Get stage 2 done</,'the next stage is the person’s choice, on the card');
  assert.doesNotMatch(card.html,/Next is Stage 2/,'the plan’s sentence about what comes next is the footer, not part of the report');
@@ -227,6 +229,15 @@ test('plan notices read as cards: a stage report with its criteria, rows and wha
  assert.match(decision.html,/<h3>Approve the recommended suspension\?<\/h3>/);
  assert.match(decision.html,/Chief recommends<\/span><p>Suspend S02a recovery until runtime access is back<\/p>/);
  assert.match(decision.html,/data-plan-answer="approve" data-notice="e1"/);
+ assert.doesNotMatch(decision.html,/plan-card-context/,'a question alone has nothing under it');
+ // A question that opened with the state of the work: the question is the heading, what led to it reads under it, folded once it is long.
+ const ask='Stage 5 remains PARTIAL. Vera verified all five numerical tables without displayed-value mismatches, but that is not full report acceptance. The original S04a draft was assembled before its required freeze; the later repair freeze cannot establish original compliance. May we accept this historical timing exception, explicitly documented, while retaining every other outstanding requirement? This does not authorize S05 or submission.';
+ assert.deepEqual(P.askParts(ask),{ask:'May we accept this historical timing exception, explicitly documented, while retaining every other outstanding requirement?',context:'Stage 5 remains PARTIAL. Vera verified all five numerical tables without displayed-value mismatches, but that is not full report acceptance. The original S04a draft was assembled before its required freeze; the later repair freeze cannot establish original compliance. This does not authorize S05 or submission.'});
+ const long=P.noticeCard({...holding,notices:[{id:'e2',kind:'escalation',text:ask,chat:true,status:'open',refs:{question:ask,recommendation:'Approve the exception',category:'objective'}}]},{id:'plan-notice-e2',planNotice:true,planId:'p1',noticeKind:'escalation',body:ask,whoName:'Chief'});
+ assert.match(long.html,/<h3>May we accept this historical timing exception, explicitly documented, while retaining every other outstanding requirement\?<\/h3><details class="plan-card-more"><summary>Details<\/summary><p class="plan-card-context">Stage 5 remains PARTIAL\./);
+ const asked=P.askParts('Please provide the student ID to use on the report cover. The revised draft is saved.');
+ assert.deepEqual(asked,{ask:'Please provide the student ID to use on the report cover.',context:'The revised draft is saved.'},'with no question mark, the first sentence is what is asked');
+ assert.deepEqual(P.askParts('The maximum spread is 0.019246, not 0.01. Approve?'),{ask:'Approve?',context:'The maximum spread is 0.019246, not 0.01.'},'a number is not the end of a sentence');
  const answered={...holding,notices:holding.notices.map(n=>n.id==='e1'?{...n,status:'answered',refs:{...n.refs,answer:'Approved. Go ahead.'}}:n)};
  assert.deepEqual(P.noticeCard(answered,msg(holding.notices[1])),{hidden:true},'answered, the question leaves the chat');
  assert.match(P.noticeCard(holding,msg(holding.notices[1]),{reply:{open:true,draft:'Wait until Monday'}}).html,/<textarea[^>]*>Wait until Monday<\/textarea>/,'a reply being written is kept');

@@ -38,6 +38,17 @@
     const team=state.runs?.[message.runId]?.team||message.team;
     return !!team&&message.status==='completed'&&team.direct!==true&&Array.isArray(team.entries)&&team.entries.some(e=>e.status==='completed'&&String(e.notes||'').trim());
   }
+  // A background task's result is the agent's message to the person, then, after a line of three dashes, the details for its supervisor and
+  // teammates (files, numbers, commands, choices); Buddy's command receipts follow such a line too. An opening addressed to a teammate
+  // ("Chief: I saved …", from results written for the supervisor) reads without the name.
+  function resultParts(body,names=[]){
+    const all=String(body||''),cut=all.search(/\n[ \t]*-{3,}[ \t]*(?:\n|$)/),alias=names.map(n=>String(n||'').trim()).filter(Boolean).map(n=>n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+    let lead=cut<0?all:all.slice(0,cut).trim();
+    const named=alias.length?lead.match(new RegExp(`^(\\*\\*)?(?:${alias.join('|')})(:\\*\\*|\\*\\*:|:)[ \\t]+`)):null;
+    // "**Chief: coverage passes.**" keeps its bold; "**Chief:** I saved" and "Chief: I saved" lose the name.
+    if(named)lead=((named[1]&&named[2]===':'?'**':'')+lead.slice(named[0].length)).replace(/^(\*\*)?(\p{Ll})/u,(m,b,c)=>(b||'')+c.toUpperCase());
+    return {lead,rest:cut<0?'':all.slice(cut).replace(/^\s*-{3,}[ \t]*/,'').trim()};
+  }
   function presentation(state,message){
     if(agentsAnswered(state,message)){
       const team=state.runs?.[message.runId]?.team||message.team;
@@ -45,13 +56,23 @@
       const cards=typeof window!=='undefined'&&window.BuddyActions?.cards?String(window.BuddyActions.cards(message.runId)||''):'';
       return message.files?.length||message.proposalIds?.length||message.teamPlanIds?.length||message.routines?.length||message.tasks?.length||message.coverage?.length||cards?{body:'Saved from this request:'}:{hidden:true};
     }
-    const run=state.runs?.[message.runId],body=String(message.body||'');
+    const run=state.runs?.[message.runId];let body=String(message.body||''),rest='';
     if(!body||message.setup||run&&/\b(?:explain|details|detail|why|breakdown|report|full|thorough)\b/i.test(run.text||''))return {body};
+    // A task's message shows whole when it is a message (two short paragraphs at most), with the team's details folded; a long one is cut
+    // to its opening below, like any other, with everything folded.
+    const parts=message.workerTaskID?resultParts(body,(state.agents||[]).map(a=>a.name)):null;
+    if(parts?.lead)({lead:body,rest}=parts);
+    if(rest&&body.length<=600&&body.split(/\n\s*\n/).length<=2)return {body,details:rest};
     const operational=message.teamPlanIds?.length||message.proposalIds?.length||message.routines?.length||message.tasks?.length||message.workerTaskID;
-    if(!operational||body.length<=360)return {body};
-    const paragraph=body.trim().split(/\n\s*\n/)[0];let short='',remaining=paragraph;
-    for(let i=0;i<2&&remaining;i++){const end=remaining.search(/[.!?](?=\s|$)/),sentence=end<0?remaining:remaining.slice(0,end+1);if((short+' '+sentence).trim().length>360)break;short=(short+' '+sentence).trim();remaining=end<0?'':remaining.slice(end+1).trimStart();}
-    short=short.trim();if(!short)short=paragraph.slice(0,320).replace(/\s+\S*$/,'')+'…';
+    if(!operational||body.length<=360)return rest?{body,details:rest}:{body};
+    if(rest)body+='\n\n---\n\n'+rest;
+    // A Markdown link counts as its label and is never cut: an opening whose first sentence linked two saved files by their full paths was cut
+    // inside the second link, and the chat showed "[editorial closure…" with the raw file:/// address before it.
+    const links=[],paragraph=body.trim().split(/\n\s*\n/)[0].replace(/\[[^\]\n]*\]\((?:<[^>\n]*>|[^)\s]*)\)/g,m=>`\u0000${links.push(m)-1}\u0000`);
+    const restore=t=>t.replace(/\u0000(\d+)\u0000/g,(_,i)=>links[i]),label=t=>t.replace(/\u0000(\d+)\u0000/g,(_,i)=>links[i].slice(1,links[i].indexOf('](')));
+    let short='',remaining=paragraph;
+    for(let i=0;i<2&&remaining;i++){const end=remaining.search(/[.!?](?=\s|$)/),sentence=end<0?remaining:remaining.slice(0,end+1);if(label((short+' '+sentence).trim()).length>360)break;short=(short+' '+sentence).trim();remaining=end<0?'':remaining.slice(end+1).trimStart();}
+    short=short.trim()?restore(short.trim()):label(paragraph).slice(0,320).replace(/\s+\S*$/,'')+'…';
     return {body:short,details:body};
   }
   function apply(state,event){
@@ -107,6 +128,6 @@
       apply(state,snapshot||{runId:run.runId,status:'failed',error:'This reply was interrupted when Buddy closed. You can retry it.'});
     }
   }
-  const api={busy,migrate,active,begin,apply,recover,presentation};
+  const api={busy,migrate,active,begin,apply,recover,resultParts,presentation};
   if(typeof module!=='undefined')module.exports=api;root.BuddyChat=api;
 })(typeof globalThis!=='undefined'?globalThis:this);

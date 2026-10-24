@@ -169,6 +169,10 @@ import Foundation
         let call = first[0]
         require(call["model"] as? String == "fixture-chief-model" && (call["tools"] as? [Any])?.isEmpty == true && call["budget"] is NSNull, "the run uses the supervisor's model, no tools and no budget: \(call)")
         require(call["policy"] as? Bool == true && call["supervises"] as? Bool == true && call["text"] as? Bool == true, "the instructions are the decision policy, the supervision line and the supervisor text")
+        // What the person reads of the supervisor's work is plain: its questions and stage reports, not the team's shorthand.
+        let speaking = BuddySupervisorLane.supervisorText(name: "Chief")
+        require(speaking.hasSuffix(BuddySupervisorLane.speaking) && speaking.contains(BuddyVoice.plain) && speaking.contains("forward_to_user's text opens with what you ask of the user") && speaking.contains("a short report for the user (see below)")
+                && speaking.contains("Everything else you write (reasons, answers, rework instructions, briefs) is for the team") && !speaking.contains("the files, the decisions you made, open issues"), "the supervisor writes to the user plainly and keeps exact details for the team")
         require((call["you"] as? [String: Any])?["name"] as? String == "Chief" && (call["authorization"] as? [String: Any])?["quote"] as? String == "get stage 1 done" && call["notices"] as? Bool == false, "the briefing names the supervisor, carries the user's authorization and leaves out the notices: \(call)")
         require((call["results"] as? [String])?.first?.contains("R1: the baseline reproduces") == true && (call["files"] as? [String]) == ["/fixture/\(t1Job)/baseline.csv"], "the briefing carries the attempt's result and the task's files: \(call)")
         require((call["cwd"] as? String ?? "").hasPrefix(main.supervisorFolder.path + "/") && (call["outcomes"] as? Int ?? 0) >= 1, "the run works in its own folder under Worker/Supervisor and sees the record of what finished: \(call)")
@@ -398,7 +402,7 @@ import Foundation
         try mode(thrice, "refuse")
         await tick(thrice); await tick(thrice); await tick(thrice)
         let refusedStuck = try notices(thrice, "stuck")
-        require(refusedStuck.count == 1 && refusedStuck.first?["text"] as? String == "The team is stuck on Rerun the pipeline: Buddy could not apply Chief's rework: Give the rework a precise instruction. Tell me how to proceed.", "a stuck notice after refusals says what was refused: \(refusedStuck)")
+        require(refusedStuck.count == 1 && refusedStuck.first?["text"] as? String == "The team is stuck on Rerun the pipeline: Chief tried to send a result back, but Buddy refused: Give the rework a precise instruction. Tell me how to proceed.", "a stuck notice after refusals says what was refused: \(refusedStuck)")
         print("PASS: a refused action is recorded on its item with the reason, kept across a restart and shown in the next briefing until an action takes effect; a stuck notice after refusals names the refusal")
 
         // 8. A run that never starts (the user's 17:25 failure) is not a presentation: nothing goes stuck, the lane keeps retrying, and after 30 minutes of

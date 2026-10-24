@@ -232,7 +232,7 @@ import Foundation
         active=job;runID=UUID().uuidString;started=now;providerRevision=settings.revision(provider)
         let input=job["input"] as? [String:Any] ?? [:],kind=job["kind"] as! String,agent=(state["agents"] as! [[String:Any]]).first{$0["id"] as? String==id}!
         let modelName=BuddyAgentMemory.privateText(agent["name"] as? String ?? "Buddy"),modelRole=BuddyAgentMemory.privateText(agent["role"] as? String ?? ""),modelDescription=BuddyAgentMemory.privateText(agent["description"] as? String ?? "")
-        let instructions=kind=="memory" ? BuddyAgentMemory.instructions:Self.instructions(kind:kind)+"\n"+BuddyAutonomy.clock()+"\nAgent role:\(modelRole)\nUser's current instructions: \(modelDescription)\n"+BuddyAgentMemory.privateText(BuddyAgentMemory.guidance(agent))
+        let instructions=kind=="memory" ? BuddyAgentMemory.instructions:Self.instructions(kind:kind)+"\n"+BuddyAutonomy.clock()+"\n"+BuddyVoice.plain+"\nAgent role:\(modelRole)\nUser's current instructions: \(modelDescription)\n"+BuddyAgentMemory.privateText(BuddyAgentMemory.guidance(agent))
         let prompt=String(data:try JSONSerialization.data(withJSONObject:input),encoding:.utf8)!
         if provider=="claude" {
             let root=support.appendingPathComponent("TeamMonitor/"+runID!,isDirectory:true);try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])

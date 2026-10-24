@@ -93,6 +93,7 @@ import AppKit
             try require(brief.contains("Decisions: decide by default.") && brief.contains("Use buddy_checkpoint only when the user must act in person") && brief.contains("No supervisor is set for this team") && brief.contains("Time: the user is in the")
                         && brief.contains(project(buildID).path) && brief.contains("You are Codey") && !brief.contains("Claude"), "Buddy's coding brief with the decision policy, supervision line and clock, adapted for Codex: \(brief.prefix(300))")
             let turn = requests(buildID, "turn/start").first ?? [:], policy = turn["sandboxPolicy"] as? [String: Any] ?? [:]
+            try require(brief.contains("End with your result. " + BuddyVoice.plain + " " + BuddyVoice.result), "the coding brief ends with a plain message to the person, then the details for the team")
             try require(policy["type"] as? String == "workspaceWrite" && policy["networkAccess"] as? Bool == false && turn["cwd"] as? String == project(buildID).path && turn["model"] as? String == "gpt-fixture-coder" && turn["effort"] as? String == "high",
                         "the turn keeps the sandbox, cwd, model and its effort: \(turn.filter { $0.key != "input" })")
             try require(((turn["input"] as? [[String: Any]])?.first?["text"] as? String ?? "").hasPrefix("CODEX_BUILD"), "the brief is the turn's input")

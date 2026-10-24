@@ -294,6 +294,7 @@ import CryptoKit
             try require((start["tools"] as? [String] ?? []).contains("buddy_browser_signup"), "the tool is offered: \(start["tools"] ?? "-")")
             let brief = start["instructions"] as? String ?? ""
             try require(brief.contains("When a site needs an account you don't have, call buddy_browser_signup") && brief.contains("Never sign up, start trials, or enter payment details yourself"), "the guidance: \(brief.suffix(2000))")
+            try require(brief.contains("Work quietly. " + BuddyVoice.plain + " " + BuddyVoice.result) && !brief.contains("Finish with just the useful result"), "a background task writes its result as a plain message to the person, then the details for the team")
             let made = saved.sitePasswords.values.filter { $0 != right && $0 != stale }
             try require(made.count >= 4, "Buddy made passwords: \(made.count)")
             var found: [String] = []

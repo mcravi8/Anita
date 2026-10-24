@@ -200,6 +200,7 @@ import Darwin
             try require((try? String(contentsOf: project(id).appendingPathComponent("data/ac498c.pdf"), encoding: .utf8)) == pdf, "saved into the Claude session's project")
             let start = lines(codingLog).first { $0["kind"] as? String == "start" }?["value"] as? [String: Any] ?? [:]
             try require((start["tools"] as? [String] ?? []).contains("buddy_browser_fetch") && (start["instructions"] as? String ?? "").contains("buddy_browser_fetch"), "Claude's coding session has the tool and is told to use it")
+            try require((start["instructions"] as? String ?? "").contains("End with your result. " + BuddyVoice.plain + " " + BuddyVoice.result) && !(start["instructions"] as? String ?? "").contains("list those choices in your final summary"), "Claude's coding session ends with a plain message to the person, then the details for the team")
             let offline = try await coding([["buddy_browser_fetch", ["url": article + "/pdf", "saveAs": "ac498c.pdf", "reason": "Needed."]]], as: bea, request: "offline-fetch")
             _ = try await poll(offline, "the offline task goes on after the refusal") { settled($0) }
             let refused = codingResults().last?["error"] as? String ?? ""

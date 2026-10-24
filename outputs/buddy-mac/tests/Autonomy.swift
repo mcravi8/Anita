@@ -73,5 +73,14 @@ import Foundation
         require(winter.contains("(PST)") && winter.contains("Tuesday, December 1, 2026, 12:00 PM"), "standard time is named in winter: \(winter)")
         require(BuddyAutonomy.chatGuidance(agent: "forge", supervisor: nil, name: nil).contains("the \(TimeZone.current.identifier) time zone"), "every chat prompt carries this Mac's own time zone")
         print("PASS: every prompt gives the person's time zone and local time, and says Buddy's UTC stamps are converted before they reach the person")
+
+        // 6. What the person reads is a plain message, not the team's shorthand ("Chief: I sign off on S02c C1–C6…", "S02a remains PARTIAL").
+        let plain = BuddyVoice.plain, result = BuddyVoice.result
+        for phrase in ["what happened, what it means for the user, and what happens next", "Only when something is truly the user's to do, end with that one thing", "(S04b, D-58, C1–C6, E4)", "PARTIAL or PASS", "task or plan IDs, hashes, file paths", "Never address a teammate"] {
+            require(plain.contains(phrase), "the plain-language rule says \"\(phrase)\"")
+        }
+        require(result.contains("First, a message to the user of two to four plain sentences") && result.contains("a line with only --- and under it what your supervisor and teammates need") && result.contains("each choice you made with its reason"), "a result is the message, then a line of three dashes and the details: \(result)")
+        require(BuddyAutonomy.chatGuidance(agent: "forge", supervisor: "chief", name: "Chief").hasSuffix("\n" + plain) && policy.contains("state the choice and its reason in one line (in a task result, under its details)"), "every chat prompt ends with the plain-language rule, and a choice's reason goes with the details")
+        print("PASS: every chat writes to the person in plain sentences, and a task result puts the team's details after a line of three dashes")
     }
 }

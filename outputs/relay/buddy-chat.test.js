@@ -32,6 +32,31 @@ test('worker result details collapse even without a conversation run; errors rem
  const body='Please reconnect Gmail.\n\n'+('Observed diagnostic detail. '.repeat(40)),m={body,workerTaskID:'task',error:'Gmail disconnected'};
  assert.equal(Chat.presentation(seed(),m).body,'Please reconnect Gmail.');assert.equal(Chat.presentation(seed(),m).details,body);assert.equal(m.error,'Gmail disconnected');
 });
+test('a task result reads as the agent’s message: the team’s details after a line of three dashes fold, and an opening addressed to Chief loses the name',()=>{
+ const s={...seed(),agents:[{id:'lyra',name:'Lyra'},{id:'chief',name:'Chief'}]};
+ const message='I fixed the two figure captions and the spelling of one paper’s title in the report. Nothing in the results changes. Vera checks the new version next.';
+ const body=message+'\n\n---\nFiles: stages/S04b_revision/citation_editorial_corrections_lyra_20261023_v2.md\nChoice: kept the DOCX at f12cbe0e… because only captions changed.\n\n---\nCommand receipts: 3 finished, 3 exited successfully.';
+ const shown=Chat.presentation(s,{body,workerTaskID:'t'});
+ assert.equal(shown.body,message,'the message shows whole');
+ assert.match(shown.details,/^Files: stages\/S04b_revision\//);assert.match(shown.details,/Command receipts: 3 finished/,'the details and Buddy’s receipts fold under Details');
+ assert.deepEqual(Chat.presentation(s,{body:'Created the inbox.\n\n---\nCommand receipts: 1 finished, 1 exited successfully.',workerTaskID:'t'}),{body:'Created the inbox.',details:'Command receipts: 1 finished, 1 exited successfully.'},'a short result keeps its receipts folded');
+ // A result written for the supervisor, before results were split: it opens without the name, and the rest folds as before.
+ const old='Chief: I saved the [editorial closure report](<file:///Users/x/editorial_closure.md>). I preserved the verified evidence; Forge’s corrections are listed in the report. Matteo’s Student ID is directly confirmed in the saved record, so no user input is currently missing. Native Word review remains team-owned; Stage 5 is not yet PASS. **Next:** separately gated S05 release, not started.';
+ const was=Chat.presentation(s,{body:old,workerTaskID:'t'});
+ assert.match(was.body,/^I saved the \[editorial closure report\]/,'the name it was addressed to is gone');assert.doesNotMatch(was.body,/Student ID|S05/,'the rest folds');assert.equal(was.details,old.replace(/^Chief: /,''));
+ assert.equal(Chat.resultParts('**Chief:** coverage passes.',['Chief']).lead,'Coverage passes.');assert.equal(Chat.resultParts('**Chief: coverage passes.** More.',['Chief']).lead,'**Coverage passes.** More.','a bold opening keeps its bold');
+ assert.equal(Chat.resultParts('Chiefly: nothing',['Chief']).lead,'Chiefly: nothing','only a teammate’s whole name is taken off');
+ // A message that runs long after all still opens short, with everything folded.
+ const long='I saved the report. '+'It explains a great deal more than it needs to. '.repeat(20)+'\n\n---\nFiles: a.md';
+ const cut=Chat.presentation(s,{body:long,workerTaskID:'t'});assert.equal(cut.body,'I saved the report. It explains a great deal more than it needs to.');assert.match(cut.details,/Files: a\.md$/);
+ assert.deepEqual(Chat.presentation(s,{body:'Chief: the plan.\n\n---\nnot a task'}),{body:'Chief: the plan.\n\n---\nnot a task'},'only a task’s result is read this way');
+ // Links count as their labels and are never cut: two long file links in the first sentence were cut mid-link, and the raw address showed.
+ const path='file:///Users/matteo/Desktop/USC/Semester%204/Directed%20Research/stages/S04b_revision/editorial_closeout_lyra_20261023/';
+ const linked=`I saved the [28-comment tracker](<${path}comment_response.csv>) and [editorial closure report](<${path}editorial_closure.md>). The report lists the text corrections. `+'More detail follows here. '.repeat(30);
+ assert.equal(Chat.presentation(s,{body:linked,workerTaskID:'t'}).body,`I saved the [28-comment tracker](<${path}comment_response.csv>) and [editorial closure report](<${path}editorial_closure.md>). The report lists the text corrections.`);
+ const endless=`See [the report](<${path}r.md>) `+'and more words without an end '.repeat(20);
+ const fallback=Chat.presentation(s,{body:endless,workerTaskID:'t'}).body;assert.match(fallback,/^See the report and more words/);assert.doesNotMatch(fallback,/file:|\]\(/,'with no sentence end in reach, the opening is cut as plain text, never inside a link');
+});
 test('brief previews retain email addresses and Markdown links intact',()=>{
  const body='I created **matteo-chief@agentmail.to** on the free plan. Seven checks are saved.\n\n'+('Details. '.repeat(80));
  const shown=Chat.presentation(seed(),{body,workerTaskID:'task'});assert.equal(shown.body,'I created **matteo-chief@agentmail.to** on the free plan. Seven checks are saved.');assert.equal(shown.details,body);

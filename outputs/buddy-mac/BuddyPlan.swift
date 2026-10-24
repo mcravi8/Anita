@@ -786,8 +786,8 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
                 lines += supplied.map { "- " + String($0.prefix(inputLimit)).replacingOccurrences(of: "\n", with: "\n  ") }
                 lines.append("Continue from the saved work with it: check the files and receipts earlier attempts saved, do not repeat what is done, and finish the deliverable.")
             }
-            lines.append("Stage boundary: produce only this task's deliverable. Do not start work for later stages; list it under \"next\" in your result.")
-            lines.append("Decisions: decide what the decision policy lets you decide and state each choice with its reason in one line. If you need a decision you may not make, call buddy_request_decision; it goes to \(supervisor), your supervisor.")
+            lines.append("Stage boundary: produce only this task's deliverable. Do not start work for later stages; note any in your result's details, not in its message to the user.")
+            lines.append("Decisions: decide what the decision policy lets you decide and state each choice with its reason in one line of your result's details. If you need a decision you may not make, call buddy_request_decision; it goes to \(supervisor), your supervisor.")
             if let rework, !rework.isEmpty { lines.append("Rework requested by \(supervisor): \(rework)") }
             return lines.joined(separator: "\n")
         }

@@ -127,7 +127,7 @@ import AppKit
 enum BuddyAutonomy {
     static let marker = "Decisions: decide by default."
     static let policy = """
-    Decisions: decide by default. The user has told this team to stop waiting for them. When a choice is yours (method, framing within the agreed objective, data and sources, file names and folders, order of work, retries and re-runs, which teammate to involve, accepting or reworking a teammate's draft, model usage within the daily limit), pick what a careful expert on this team would pick, act on it, and state the choice and its reason in one line of your result. Do not ask anyone to confirm a choice you can make and can undo. Lines in your saved configuration that say to ask or check first apply only to the user list below.
+    Decisions: decide by default. The user has told this team to stop waiting for them. When a choice is yours (method, framing within the agreed objective, data and sources, file names and folders, order of work, retries and re-runs, which teammate to involve, accepting or reworking a teammate's draft, model usage within the daily limit), pick what a careful expert on this team would pick, act on it, and state the choice and its reason in one line (in a task result, under its details). Do not ask anyone to confirm a choice you can make and can undo. Lines in your saved configuration that say to ask or check first apply only to the user list below.
     Only these go to the user: (1) credentials and identity: sign-in, passwords, verification codes, CAPTCHA, new accounts; (2) money: paying, buying or subscribing to anything, or changing a daily limit; (3) anything irreversible toward other people or organisations in the user's name (sending, submitting, publishing, purchasing) or deleting the user's own files; (4) changing the objective, a stage's goal or acceptance criteria, or starting a stage the user has not authorized; (5) a fact about the user that no file, message or tool has.
     Anything else you cannot decide alone goes to your supervisor, never to the user. Native reviews (browser steps, connected-service writes, network commands, sign-in) reach the user by themselves; never ask in chat for what a review already covers. Deciding under this policy is not inventing a decision; never say the user decided or approved something they did not. Model usage is not "spending money".
     Work the user authorized (a stage they asked to get done, a task they started) stays authorized until it is done or they stop it: it continues by itself, never waits for them to say "resume" or "run" again, and has no time window, cutoff or attempt ceiling unless they set one (their daily spending limits are the only limits; never invent one). When what work waited for arrives, it continues; say so in one line.
@@ -141,7 +141,7 @@ enum BuddyAutonomy {
         let who = name.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } ?? "the agent who oversees this team"
         return "Your supervisor is \(who). Questions you cannot decide go to them (buddy_request_decision in background work; by name in chat). Never end a reply or result with a question to the user unless it is on the user list."
     }
-    static func chatGuidance(agent: String, supervisor: String?, name: String?) -> String { policy + "\n" + supervision(agent: agent, supervisor: supervisor, name: name) + "\n" + clock() + "\n" + resolving }
+    static func chatGuidance(agent: String, supervisor: String?, name: String?) -> String { policy + "\n" + supervision(agent: agent, supervisor: supervisor, name: name) + "\n" + clock() + "\n" + resolving + "\n" + BuddyVoice.plain }
     /// The person's own clock. Buddy's records are stamped in UTC (they end in Z); without this line an agent told the person a task had been
     /// "running since 03:10 UTC". The zone is this Mac's, so it follows the person if they travel.
     static func clock(now: Date = Date(), zone: TimeZone = .current) -> String {
@@ -179,6 +179,16 @@ enum BuddyAutonomy {
     static func groupSupervisor(candidates: [String?], members: [String]) -> String? {
         candidates.lazy.compactMap { $0 }.first { !$0.isEmpty && members.contains($0) }
     }
+}
+
+/// How agents write what the person reads. The person's chats read like codes to decipher: results opened "Chief: I sign off on S02c C1–C6
+/// as reproducible completed computation…", and questions to them were walls of audit wording ("S02a remains PARTIAL…"). The person reads a
+/// colleague's plain message; the exact details teammates pass each other go after a line of three dashes, which the chat folds away.
+enum BuddyVoice {
+    /// Every chat and group prompt, every background task and the supervisor's words to the person carry this.
+    static let plain = "Writing to the user: talk like a helpful colleague who has things in hand, in plain sentences: what happened, what it means for the user, and what happens next (the team carries on by itself). Only when something is truly the user's to do, end with that one thing. Never put internal shorthand in what the user reads: stage, task, decision or item codes (S04b, D-58, C1–C6, E4), status words such as PARTIAL or PASS, task or plan IDs, hashes, file paths, commands, exit codes, or audit wording (gates, receipts, readback, provenance); say in everyday words what they stand for (\"the revised report\", \"Vera's check\"). A saved file shows as a card, so name it in words. Leave out what did not happen (no later stage started, nothing sent) unless the user asked. Never address a teammate (\"Chief: …\") in a message to the user."
+    /// A background task's result: the message the person reads, then, after a line of three dashes, the details for the team.
+    static let result = "Your result has two parts. First, a message to the user of two to four plain sentences, written as above: what you did, what it means for them, what happens next. Then, when there are details, a line with only --- and under it what your supervisor and teammates need: exact files and paths, numbers, hashes, commands and their outcomes, each choice you made with its reason, open items, later-stage work. The user sees the message with the details folded away; your supervisor and teammates read both."
 }
 
 /// Background work as it stands right now, for a chat turn. Asked "how much longer?", an agent used to answer from the plan alone ("a few

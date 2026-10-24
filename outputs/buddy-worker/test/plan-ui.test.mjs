@@ -129,7 +129,9 @@ test('a stage report and a decision are cards in the chat; the next stage and th
   await page.evaluate(()=>BuddyWorkerUI.refresh(false));
   const report=page.locator('#messages [data-chat-item="plan-notice-r1"] .plan-card-report');await report.waitFor({timeout:8000});
   assert.match(await report.locator('h3').innerText(),/Stage 1 · S01 Protocol freeze/);
-  assert.deepEqual(await report.locator('.plan-card-rows dt').allInnerTexts(),['Acceptance','Outputs','Issues'],'the report’s labelled lines read as rows');
+  assert.deepEqual(await report.locator(':scope > .plan-card-rows dt').allInnerTexts(),['Acceptance','Issues'],'the report’s labelled lines read as rows: what the stage achieved and what is open');
+  assert.deepEqual(await report.locator('.plan-card-more .plan-card-rows dt').allTextContents(),['Outputs'],'where the files went folds under Details');
+  assert.equal(await report.locator('.plan-card-more > summary').innerText(),'Details');
   assert.equal(await page.locator('#messages [data-chat-item="plan-notice-r1"] .team-chat-author .message-author').innerText(),'Chief','under Chief’s name');
   await report.getByRole('button',{name:'Get stage 2 done',exact:true}).click();
   await report.getByText('Stage 2 started').waitFor({timeout:8000});

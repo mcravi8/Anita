@@ -75,6 +75,16 @@ test('the chat asks to connect RunPod: the address Forge suggested, Authorizatio
   assert.equal(await card.getByLabel('API address').inputValue(),'https://rest.runpod.io/v2','the address the agent suggested, for the person to check');
   assert.equal(await card.getByLabel('How the key is sent').inputValue(),'Authorization');
   assert.equal(await card.locator('[data-service-charges]:checked').count(),0,'nothing is chosen for the person');
+  // One tidy column (the user, 23 Oct: the fields were scattered down the right edge with tall gaps): the address and how the key is sent
+  // side by side, the key under them across the form, then the money question, then the note and Connect; no header name with Bearer.
+  const at=sel=>card.locator(sel).first().evaluate(e=>{const b=e.getBoundingClientRect();return {l:Math.round(b.left),t:Math.round(b.top),r:Math.round(b.right),h:Math.round(b.height)};});
+  const address=await at('label:has([data-service-input="baseUrl"])'),how=await at('label:has([data-service-header])'),keyRow=await at('label:has([data-service-input="key"])'),money=await at('.service-charges'),send=await at('[data-signin-send]');
+  assert.equal(await card.getByLabel('Header name').isVisible(),false,'no header name while Bearer is chosen');
+  assert.ok(Math.abs(address.t-how.t)<2&&how.l>address.r,'the address and how the key is sent share a row');
+  assert.ok(keyRow.t>address.t+address.h&&keyRow.l===address.l&&keyRow.r>=how.r-1,'the key has its own row, across the form');
+  assert.ok(money.t>keyRow.t&&send.t>money.t,'then the money question, then Connect');
+  assert.ok(address.h<80&&keyRow.h<80,`fields are as tall as their label and box (${address.h}, ${keyRow.h})`);
+  assert.ok((await card.boundingBox()).height<560,'the whole card fits on screen');
   const key=card.getByLabel('API key');
   assert.equal(await key.evaluate(e=>e.type),'password','the key field is masked');
   await key.click();await page.keyboard.type(KEY);

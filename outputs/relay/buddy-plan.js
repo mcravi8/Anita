@@ -66,7 +66,10 @@
       case 'dispatched':
         if(isRetrying(task,pulse))return {label:'Retrying',tone:'retry'};
         if(live==='needs_you'||task.blockedOn==='user')return {label:'Needs you',tone:'needs'};
+        // The task's own run says best what it is doing: its command running on a rented machine, or running here, is never "Queued".
+        if(task.workerStatus==='paused'&&task.workerBlockedBy==='remote')return {label:'Running remotely',tone:'working'};
         if(live==='with_supervisor')return {label:`Asking ${supervisor}`,tone:'review'};
+        if(['starting','running','stopping'].includes(task.workerStatus))return {label:'Working',tone:'working'};
         if(live==='queued'||!live&&task.workerStatus==='queued')return {label:'Queued',tone:'ready'};
         return {label:'Working',tone:'working'};
       case 'ready':return {label:'Ready',tone:'ready'};

@@ -77,6 +77,12 @@ test('stage and task chips say where each piece of work stands',()=>{
  assert.equal(chip(task('a','dispatched',{workerTaskId:'w'}),{lyra:{state:'retrying',taskId:'w'}}),'Retrying');
  assert.equal(chip(task('a','dispatched',{workerTaskId:'w'}),{lyra:{state:'with_supervisor',taskId:'w'}}),'Asking Chief');
  assert.equal(chip(task('a','dispatched',{workerTaskId:'w'}),{lyra:{state:'working',taskId:'other'}}),'Queued','the agent is busy with another task');
+ // The task's own run decides first (23 Oct: Forge's C1 ran on RunPod while the Plan said "Queued").
+ const remote=task('a','dispatched',{workerTaskId:'w',workerStatus:'paused',workerBlockedBy:'remote'});
+ assert.equal(chip(remote),'Running remotely','its command runs on a rented machine');
+ assert.equal(chip(remote,{lyra:{state:'queued',taskId:'w'}}),'Running remotely','whatever the agent pulse says');
+ assert.equal(chip(task('a','dispatched',{workerTaskId:'w',workerStatus:'running'}),{lyra:{state:'queued',taskId:'w'}}),'Working','a task that runs is not queued');
+ assert.equal(chip(task('a','dispatched',{workerTaskId:'w',workerStatus:'queued'})),'Queued','one waiting its turn still is');
  assert.equal(chip(task('a','blocked',{blockedOn:'user'})),'Needs you');assert.equal(chip(task('a','blocked',{blockedOn:'supervisor'})),'With Chief');
 });
 

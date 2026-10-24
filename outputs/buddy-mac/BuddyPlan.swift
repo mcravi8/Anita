@@ -348,7 +348,7 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
                 if task.status == "dispatched" { working.append(["agentId": task.assignee, "title": task.title, "since": task.updatedAt]) }
                 lastChange = max(lastChange, task.updatedAt)
                 var row: [String: Any] = ["id": task.id, "title": task.title, "assignee": task.assignee, "kind": task.kind, "status": task.status, "workerTaskId": task.workerTaskId,
-                                          "workerStatus": job?["status"] as? String ?? "", "blockedOn": on, "resultSummary": task.resultSummary, "updatedAt": task.updatedAt,
+                                          "workerStatus": job?["status"] as? String ?? "", "workerBlockedBy": job?["blockedBy"] as? String ?? "", "blockedOn": on, "resultSummary": task.resultSummary, "updatedAt": task.updatedAt,
                                           "deliverable": task.deliverable, "dependsOn": try dependencies(of: task.id).map(\.id), "dispatches": task.dispatches, "reworks": task.reworks,
                                           "reviewAttempt": task.reviewAttempt, "blockedReason": task.blockedReason]
                 if detail { row["brief"] = task.brief }

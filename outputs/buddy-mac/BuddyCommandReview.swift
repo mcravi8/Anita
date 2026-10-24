@@ -1159,6 +1159,10 @@ enum BuddyCommandReview {
     /// regular expressions or heredocs holding comment marks, Ruby and Perl quoting forms) can hide code from it, as can any obfuscation. The
     /// supervisor still reads every script in full.
     static func screen(_ text: String, subject: String, language: String, project: URL, root: URL, folder: URL) -> String? {
+        // The project's own absolute path is the project, not a place outside it: a task's private copy lives under ~/Library/Application
+        // Support/Buddy, so a script naming its own files read as reading secrets (24 Oct: Forge's Word export of the report came to the user).
+        var text = text
+        for own in Set([project.path, project.resolvingSymlinksInPath().path]).sorted(by: { $0.count > $1.count }) where own.count > 1 { text = text.replacingOccurrences(of: own, with: ".") }
         let (code, words) = scanned(text, language: language)
         func hit(_ rules: [NSRegularExpression], in text: String) -> String? {
             for rule in rules { if let found = first(rule, in: text) { return label(found) } }

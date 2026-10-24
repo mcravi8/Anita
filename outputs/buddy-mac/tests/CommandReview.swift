@@ -526,6 +526,16 @@ import Foundation
             let v = assess((name.hasSuffix(".py") ? "python3 " : "bash ") + name)
             require(v.forPerson && !v.script, "telling another app, running a macro or writing elsewhere still stays with the user: \(name) → \(v.kind) \(v.reason)")
         }
+        // Forge on 24 Oct: a task's private copy lives under ~/Library/Application Support/Buddy, so an AppleScript naming its own report there by
+        // full path read as reading secrets. The project's own path is the project; a path elsewhere in Application Support still is not.
+        let privateCopy = FileManager.default.temporaryDirectory.appendingPathComponent("buddy-review-\(UUID().uuidString).noindex/Library/Application Support/Buddy/Worker/Tasks/T/Files")
+        try FileManager.default.createDirectory(at: privateCopy, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: privateCopy.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
+        try put("set inputPath to \"\(privateCopy.path)/stages/report.docx\"\nset outputPath to \"\(privateCopy.path)/stages/report.pdf\"\ntell application \"Microsoft Word\"\n  set docRef to open (POSIX file inputPath)\n  save as docRef file name outputPath file format format PDF\n  close docRef saving no\nend tell\n", "export_word.applescript", in: privateCopy)
+        let own = BuddyCommandReview.assess("/bin/zsh -lc 'osascript export_word.applescript'", project: privateCopy.path, credential: false)
+        require(own.script && !own.forPerson, "a script naming its own project files by full path, under Application Support, goes to the supervisor: \(own.kind) \(own.reason)")
+        try put("set p to \"/Users/someone/Library/Application Support/Google/Chrome/Default/Login Data\"\ntell application \"Microsoft Word\" to open (POSIX file p)\n", "elsewhere.applescript", in: privateCopy)
+        require(BuddyCommandReview.assess("osascript elsewhere.applescript", project: privateCopy.path, credential: false).forPerson, "a path elsewhere in Application Support still stays with the user")
         // Only what is on the person's own list goes to them; what Buddy just cannot read is the supervisor's.
         for command in ["make all", "cat ~/notes.txt", "./tools/talk.sh", "python3 ../elsewhere.py"] {
             let v = assess(command); require(v.kind == "unclear" && !v.forPerson, "the supervisor reads it: \(command) → \(v.kind) \(v.reason)")

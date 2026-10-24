@@ -520,6 +520,14 @@ sys.stdout.write('GOT:'+data.decode('utf-8','replace'))
         require(stoppedPlan["error"] == nil && (stoppedPlan["plan"] as? [String: Any])?["status"] as? String == "holding", "the person stops the plan: \(stoppedPlan)")
         let pausedPlanTask = try await pollAs(forge, t1Job, "the live plan task is paused") { $0["status"] as? String == "paused" }
         require(pausedPlanTask["stopCause"] as? String == "user.plan_stop", "it is paused because the person stopped the plan: \(pausedPlanTask["stopCause"] ?? "-")")
+        // The supervisor changes the brief of the task already handed out: the change goes into that task's own instructions, and the receipt
+        // says where it landed (23 Oct: Chief's edit changed only the plan, and Chief told the user Forge's task was updated).
+        let edited = try await plan(["action": "revise", "planId": planID, "ops": [["op": "edit_task", "taskId": t1, "brief": "STALL_FIXTURE: build it, and also write CHANGES.md"]]], actor: lead, text: "Have the build also write CHANGES.md")
+        let landed = (edited["receipt"] as? [String: Any])?["delivered"] as? [[String: Any]] ?? []
+        require(edited["error"] == nil && landed.count == 1 && landed[0]["delivered"] as? Bool == true && (landed[0]["note"] as? String ?? "").contains("The user paused it"),
+                "the receipt says the change reached the task, which reads it once the user resumes it: \(edited["receipt"] ?? edited)")
+        let editedJob = try await pollAs(forge, t1Job, "the edit is in the task") { ($0["updates"] as? [String] ?? []).contains { $0.hasPrefix("[Changed in the team plan by ") && $0.contains("also write CHANGES.md") } }
+        require(editedJob["status"] as? String == "paused", "a task the user paused stays paused: \(editedJob["status"] ?? "-")")
         var letSleep = false
         for _ in 0..<100 { if !host.testingHoldingAwake { letSleep = true; break }; try await Task.sleep(nanoseconds: 50_000_000) }
         require(letSleep, "the Mac may sleep again once the plan holds")

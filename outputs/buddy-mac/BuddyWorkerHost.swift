@@ -830,8 +830,10 @@ import Darwin
             guard leads(actor) else { throw refused("Only the team's supervisor or the group's manager revises its plan.") }
             // An authorized stage's goal or acceptance changes only on the user's own words.
             let userWords = actor == nil || (BuddyPlanIntent.change(text) != nil && BuddyAgentChanges.quoteAuthorized(args["quote"] as? String ?? "", in: text))
-            let out = try plans.revise(planId: id, expectedRevision: Self.integer(args["expectedRevision"]), ops: args["ops"] as? [[String: Any]] ?? [], by: actor ?? "user", userWords: userWords, members: members, team: state["agents"] as? [[String: Any]] ?? [])
-            return try reply(id, ["revision": out["revision"] ?? NSNull(), "corrections": out["corrections"] ?? [String]()])
+            let ops = args["ops"] as? [[String: Any]] ?? []
+            let out = try plans.revise(planId: id, expectedRevision: Self.integer(args["expectedRevision"]), ops: ops, by: actor ?? "user", userWords: userWords, members: members, team: state["agents"] as? [[String: Any]] ?? [])
+            let delivered = deliverPlanEdits(ops, plan: try? plans.plan(id: id), by: actor, names: names)
+            return try reply(id, ["revision": out["revision"] ?? NSNull(), "corrections": out["corrections"] ?? [String](), "delivered": delivered])
         case "answer":
             let plan = try existing(), id = plan["id"] as? String ?? ""
             guard leads(actor) else { throw refused("Only the team's supervisor or the group's manager passes on the user's answer.") }
@@ -851,6 +853,48 @@ import Darwin
         default:
             throw BuddyPlanFailure(message: "Choose get, propose, authorize, revise, answer or stop.", code: "invalid_input")
         }
+    }
+    /// A plan edit to a task already handed out reaches the work it changes: the new brief, deliverable or title is added to the worker task's
+    /// instructions, and a task that only waits for its own command on a rented machine continues now to act on it. The receipt says where each
+    /// edit landed, so the supervisor reports exactly that (23 Oct: Chief's edit of Forge's brief changed only the plan, and Chief told the user
+    /// Forge's task was updated while its run never saw the change).
+    private func deliverPlanEdits(_ ops: [[String: Any]], plan: [String: Any]?, by actor: String?, names: [String: String]) -> [[String: Any]] {
+        let rows = (plan?["stages"] as? [[String: Any]] ?? []).flatMap { $0["tasks"] as? [[String: Any]] ?? [] }
+        var out: [[String: Any]] = []
+        for op in ops where op["op"] as? String == "edit_task" {
+            let fields = (op["task"] as? [String: Any] ?? [:]).merging(op.filter { ["title", "brief", "deliverable"].contains($0.key) }) { first, _ in first }
+            let changed = ["brief", "deliverable", "title"].compactMap { key -> String? in
+                guard let value = (fields[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+                return key == "brief" ? "Its brief is now:\n" + value : key == "deliverable" ? "Its deliverable is now: " + value : "Its title is now: " + value
+            }
+            guard !changed.isEmpty, let row = rows.first(where: { $0["id"] as? String == op["taskId"] as? String }) else { continue }
+            let title = row["title"] as? String ?? "The task", worker = row["workerTaskId"] as? String ?? ""
+            guard row["status"] as? String == "dispatched", !worker.isEmpty, let job = try? store.job(worker) else {
+                out.append(["task": title, "delivered": false, "note": "Not handed out now: the plan has the change, and the task gets it when it is next handed out."]); continue
+            }
+            let status = job["status"] as? String ?? ""
+            if BuddyWorkerStore.terminal.contains(status) {
+                out.append(["task": title, "delivered": false, "note": "Its run already ended (\(status)): the plan has the change for its next run."]); continue
+            }
+            var updates = job["updates"] as? [String] ?? [], note = "[Changed in the team plan by \(actor.flatMap { names[$0] } ?? "the user")] " + changed.joined(separator: "\n")
+            let room = 30000 - updates.joined().count
+            guard room > 200 else { out.append(["task": title, "delivered": false, "note": "Its instructions are full, so the change was not added to the running task."]); continue }
+            if note.count > room { note = String(note.prefix(room - 1)) + "…" }
+            updates.append(note)
+            _ = try? store.update(worker, ["updates": updates])
+            if status == "paused", job["blockedBy"] as? String == "remote", runs[worker] == nil, launching[worker] == nil,
+               (try? store.resume(worker, continuingCoding: job["kind"] as? String == "coding")) != nil {
+                _ = try? store.update(worker, ["recovery": NSNull(), "stopCause": ""])
+                out.append(["task": title, "delivered": true, "note": "Added to the running task, which continues now to act on it."])
+            } else if status == "paused", (job["stopCause"] as? String ?? "").hasPrefix("user.") {
+                out.append(["task": title, "delivered": true, "note": "Added to the task. The user paused it, so it reads the change when they resume it."])
+            } else if ["queued", "starting", "running", "stopping"].contains(status) {
+                out.append(["task": title, "delivered": true, "note": "Added to the task. Its current attempt goes on as it was; the change applies from its next attempt."])
+            } else {
+                out.append(["task": title, "delivered": true, "note": "Added to the task (\(status)): it reads the change when it continues."])
+            }
+        }
+        return out
     }
     // MARK: what the user supplied in a chat (buddy_resolve_waiting)
 

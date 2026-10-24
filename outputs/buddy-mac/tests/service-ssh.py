@@ -21,6 +21,11 @@ while i < len(args) and args[i].startswith('-'):
         i += 2
     else: i += 1
 destination, remote = args[i], args[i + 1]
+# Real ssh reads UserKnownHostsFile as a list of files split at spaces unless the path is quoted (Buddy's folder is under "Application Support").
+for option in options:
+    if option.startswith('UserKnownHostsFile='):
+        value = option.split('=', 1)[1]
+        if not (len(value) > 1 and value.startswith('"') and value.endswith('"')): sys.stderr.write('stand-in ssh: unquoted UserKnownHostsFile %s\n' % value); sys.exit(255)
 for needed in ('BatchMode=yes', 'IdentitiesOnly=yes', 'StrictHostKeyChecking=accept-new'):
     if needed not in options: sys.stderr.write('stand-in ssh: missing -o %s\n' % needed); sys.exit(255)
 pod = None

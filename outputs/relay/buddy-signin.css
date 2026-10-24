@@ -46,3 +46,11 @@
 .signin-eye[aria-pressed="true"]{color:var(--text)}
 .signin-eye:focus-visible{outline:2px solid color-mix(in srgb,var(--ink) 35%,transparent);outline-offset:1px}
 .signin-never{color:var(--text2)}
+
+/* Connecting a service (Settings, and the chat's card when an agent asks for one): its address, how its key is sent, whether it can charge money. */
+.service-form{display:flex;flex-direction:column;gap:8px}
+.service-form select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--text)}
+.service-charges{display:flex;flex-wrap:wrap;gap:12px;margin:0;padding:0;border:0;font-size:12.5px;color:var(--text2)}
+.service-charges legend{flex:1 1 100%;margin-bottom:4px;font-weight:600;color:var(--text)}
+.service-charges label{display:inline-flex;align-items:center;gap:6px}
+.connected-services{margin-top:14px}

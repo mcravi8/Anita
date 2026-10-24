@@ -11,7 +11,7 @@
   // An account an agent wants Buddy to create on one site (or a password to reset there) asks "is that fine?" with ✓ and ✗, answered only
   // through the sign-in bridge; once the person said yes it says what Buddy is doing, then what came of it (`receipt`).
   const KINDS=new Set(['signin','step','credential','mfa','account']);
-  const KEPT=['key','kind','taskId','agentId','reviewId','mode','origin','account','field','step','note','attempts','choices','profile','service','instruction','need','chromeOpen','legacy','title','url','target','coding','unknownPage','fetch',
+  const KEPT=['key','kind','taskId','agentId','reviewId','mode','origin','account','field','step','note','attempts','choices','profile','service','instruction','need','chromeOpen','legacy','title','url','target','coding','unknownPage','fetch','secret','baseUrl',
     'purpose','reason','what','working','done','receipt','created','details','money'];
   const host=origin=>{try{return new URL(origin).host||String(origin);}catch{return String(origin||'')||'this website';}};
   // A step on a web page is on its exact page (`url`), else on its site; one with neither is a step Buddy doesn't know the page of.
@@ -26,7 +26,7 @@
   function title(r,who){
     const site=host(r.origin);
     if(r.kind==='account')return r.purpose==='reset'?`${who||'Your agent'} wants to reset your password on ${site} through your email — is that fine?`:`${who||'Your agent'} wants to create an account on ${site}${r.account?` with ${r.account}`:''} — is that fine?`;
-    if(r.kind==='credential')return `${r.service||'This service'} needs your sign-in`;
+    if(r.kind==='credential')return r.secret==='service'?`Connect ${r.service||'this service'}`:`${r.service||'This service'} needs your sign-in`;
     if(r.kind==='mfa')return `Approve the ${r.service||'sign-in'} Duo push on your phone`;
     if(r.kind==='step'){
       // Always the site, never "the website": the step's own page, and the account to use there.
@@ -169,6 +169,13 @@
       else if(!r.note)html+=`<p class="signin-note">${esc(r.mode==='signup'?`${who} wants to create an account on ${site}. Create it in Buddy’s Chrome window, where Chrome can save the new password.`:`${who} needs you to sign in to ${site}.`)}</p>`;
       const choices=r.choices||[];
       html+=`<div class="signin-actions">${r.step==='wait'?button('data-signin-check',r.key,'Done',true,off):''}${choices.includes('saved')?button('data-signin-choice',r.key+'|saved','Use saved login',!r.field&&r.step!=='wait',off):''}${choices.includes('verify')?button('data-signin-choice',r.key+'|verify','Get the code from Gmail',!r.field,off):''}${choices.includes('private')?button('data-signin-choice',r.key+'|private',r.mode==='signup'?'Create in Chrome':r.field?'Open Chrome instead':'Open Chrome',!r.field&&!choices.includes('saved')&&r.step!=='wait',off):''}${button('data-signin-choice',r.key+'|decline','Not now',false,off)}</div>`;
+    }else if(r.kind==='credential'&&r.secret==='service'){
+      // A service an agent asked for that isn't connected yet: its address (as the agent suggested it), how its key is sent, whether it
+      // can charge money, and the key. The person checks and fills it in; the key goes to the Keychain, never into the chat.
+      if(r.instruction)html+=`<p class="signin-note">${esc(r.instruction)}</p>`;
+      const chosen=serviceChoices.get(r.key)||{};
+      html+=`<div class="signin-holder service-form" data-signin-holder="${esc(r.key)}" data-signin-task="${esc(r.taskId)}">${root.BuddyServices?.fields(r.key,{name:r.service,baseUrl:r.baseUrl||'',...chosen},{fixedName:true,signin:true})||''}${button('data-signin-send',r.key,busy.has(r.key)?'Connecting…':'Connect',true,off)}</div>`;
+      html+=`<small class="signin-assurance">${esc(root.BuddyServices?.assurance||'')} ${esc(who)} never sees the key.</small>`;
     }else if(r.kind==='credential'){
       if(r.instruction)html+=`<p class="signin-note">${esc(r.instruction)}</p>`;
       html+=`<div class="signin-holder signin-holder-pair" data-signin-holder="${esc(r.key)}" data-signin-task="${esc(r.taskId)}">${field(r,'username',`${r.service||'Service'} username`,'text')}${field(r,'password',`${r.service||'Service'} password`,'password')}${button('data-signin-send',r.key,busy.has(r.key)?'Saving…':'Save',true,off)}</div>`;
@@ -218,8 +225,24 @@
   }
   function request(key){return messages(state,key)[0]?.request||null;}
   function bridge(){if(!window.BuddyDesktop?.signin)throw Error('Open Buddy on this Mac to sign in.');return window.BuddyDesktop.signin;}
+  // What the person chose on a service card (how the key is sent, whether it can charge money), kept across the chat's redraws.
+  const serviceChoices=new Map();
+  async function connect(key,r,holder){
+    const {value,missing}=root.BuddyServices.read(holder);
+    if(missing||!value.key){(missing==='charges'?holder.querySelector('[data-service-charges]'):holder.querySelector(`[data-service-input="${missing||'key'}"]`))?.focus();if(missing==='charges')settle(state,key,{result:`Say whether ${r.service||'this service'} can charge you money.`}),redraw();return;}
+    // The key is emptied from its field and let go before anything else happens.
+    for(const i of holder.querySelectorAll('[data-signin-input]')){if(i.dataset.signinName==='key')i.value='';typing.delete(i.dataset.signinInput);}
+    busy.add(key);settle(state,key,{result:''});redraw();
+    let reply;
+    try{reply=await bridge()({action:'provideService',taskId:r.taskId,...value});}
+    catch(error){reply={saved:false,error:String(error?.message||error)};}
+    finally{value.key='';busy.delete(key);}
+    settle(state,key,reply?.saved?{status:'done',result:reply.resumed?`Connected — ${agentName(r.agentId)} is continuing.`:`Connected ${value.name}.`}:{result:reply?.error||'That didn’t connect. Try again.'});
+    redraw();window.BuddyWorkerUI?.refresh?.(false);
+  }
   async function send(key){
     const r=request(key),holder=[...document.querySelectorAll('[data-signin-holder]')].find(h=>h.dataset.signinHolder===key);if(!r||!holder||busy.has(key))return;
+    if(r.kind==='credential'&&r.secret==='service')return connect(key,r,holder);
     const inputs=[...holder.querySelectorAll('[data-signin-input]')],values=Object.fromEntries(inputs.map(i=>[i.dataset.signinName,i.value]));
     if(inputs.some(i=>!i.value)){(inputs.find(i=>!i.value)||inputs[0])?.focus();return;}
     // The field is emptied and let go before anything else happens; the value exists only in this call until the app has it.
@@ -328,10 +351,19 @@
   });
   document.addEventListener('keydown',e=>{
     const input=e.target.closest?.('[data-signin-input]');if(!input||e.key!=='Enter'||e.isComposing)return;
-    e.preventDefault();const holder=input.closest('[data-signin-holder]'),next=[...holder.querySelectorAll('[data-signin-input]')].find(i=>!i.value);
+    e.preventDefault();const holder=input.closest('[data-signin-holder]'),next=[...holder.querySelectorAll('[data-signin-input]')].find(i=>!i.value&&!i.closest('[hidden]'));
     if(next&&next!==input)next.focus();else send(holder.dataset.signinHolder);
   });
-  document.addEventListener('change',e=>{const box=e.target.closest?.('[data-signin-remember]');if(box)remember.set(box.dataset.signinRemember,box.checked);});
+  document.addEventListener('change',e=>{
+    const box=e.target.closest?.('[data-signin-remember]');if(box)remember.set(box.dataset.signinRemember,box.checked);
+    // A service card's choices: kept for the next redraw.
+    const holder=e.target.closest?.('[data-signin-holder].service-form');
+    if(holder&&e.target.matches('[data-service-header],[data-service-charges]')){
+      const now={...(serviceChoices.get(holder.dataset.signinHolder)||{})};
+      if(e.target.matches('[data-service-header]'))now.header=e.target.value==='custom'?'custom':'Authorization';else now.charges=e.target.value==='yes';
+      serviceChoices.set(holder.dataset.signinHolder,now);
+    }
+  });
   document.addEventListener('input',e=>{const input=e.target.closest?.('[data-signin-input]');if(!input)return;if(input.value)typing.set(input.dataset.signinInput,input);else typing.delete(input.dataset.signinInput);});
   document.addEventListener('focusin',e=>{if(e.target.closest?.('[data-signin-input]'))lastField=e.target;});
   new MutationObserver(records=>{

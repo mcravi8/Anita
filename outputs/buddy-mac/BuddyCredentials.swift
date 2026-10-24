@@ -3,12 +3,15 @@ import Security
 
 /// An outside service a command signs in to with the person's own account (WRDS first). `env` says which environment variable of the command
 /// carries the username and which the password; `mfa` is the second step the service asks for while signing in ("duo-push": the person approves
-/// a push on their phone). Websites (`webHosts`) come with the website step.
+/// a push on their phone). Websites (`webHosts`) come with the website step. `key`: the API key of a service the person connected
+/// ("service:<id>", BuddyConnectedServices): one secret and no username, which Buddy itself sends to that service and never fills into a
+/// command, so it is never a command's `credential`.
 struct BuddySignInProfile {
     let id: String, name: String
     let mfa: String?
     let env: [String: String]
     let webHosts: [String]
+    var key = false
 }
 
 /// A saved sign-in. It exists only on its way from the Keychain into one approved command's environment, never in a record or a reply.
@@ -29,8 +32,19 @@ struct BuddyCredentials: BuddySignInStore {
     static let profiles: [BuddySignInProfile] = [
         BuddySignInProfile(id: "wrds", name: "WRDS", mfa: "duo-push", env: ["username": "PGUSER", "password": "PGPASSWORD"], webHosts: []),
     ]
-    static func profile(_ id: String) -> BuddySignInProfile? { profiles.first { $0.id == id } }
-    static var profileIDs: [String] { profiles.map(\.id) }
+    /// A connected service's key is the saved sign-in "service:<id>" (lowercase letters, digits and dashes).
+    static let servicePrefix = "service:"
+    static func profile(_ id: String) -> BuddySignInProfile? {
+        if id.hasPrefix(servicePrefix) {
+            let slug = String(id.dropFirst(servicePrefix.count))
+            guard slug.range(of: #"^[a-z0-9][a-z0-9-]{0,39}$"#, options: .regularExpression) != nil else { return nil }
+            return BuddySignInProfile(id: id, name: slug, mfa: nil, env: [:], webHosts: [], key: true)
+        }
+        return profiles.first { $0.id == id }
+    }
+    /// The sign-ins a command may use (`credential`): every profile but an API key Buddy keeps for itself.
+    static func commandProfile(_ id: String) -> BuddySignInProfile? { profiles.first { $0.id == id && !$0.key } }
+    static var profileIDs: [String] { profiles.filter { !$0.key }.map(\.id) }
 
     /// The Keychain service. Only a test passes its own, so it never touches the person's items.
     let service: String
@@ -45,7 +59,7 @@ struct BuddyCredentials: BuddySignInStore {
         var result: CFTypeRef?
         guard SecItemCopyMatching(request as CFDictionary, &result) == errSecSuccess, let data = result as? Data,
               let saved = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let username = saved["username"] as? String, let password = saved["password"] as? String, !username.isEmpty, !password.isEmpty else { return nil }
+              let username = saved["username"] as? String, let password = saved["password"] as? String, !username.isEmpty || Self.profile(profile)?.key == true, !password.isEmpty else { return nil }
         return BuddySignIn(username: username, password: password)
     }
     /// Whether one is saved. Only its attributes are asked for, so this never reads the secret (and never makes macOS ask to use it).
@@ -57,15 +71,23 @@ struct BuddyCredentials: BuddySignInStore {
     }
     func save(workspace: String, profile: String, username: String, password: String) throws {
         guard let named = Self.profile(profile) else { throw BuddyWorkerFailure(message: "Buddy has no sign-in for that service.") }
-        let user = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !user.isEmpty, user.count <= 200, !password.isEmpty, password.count <= 1000, !user.contains("\0"), !password.contains("\0") else {
-            throw BuddyWorkerFailure(message: "Enter your \(named.name) username and password.")
+        let user = named.key ? "" : username.trimmingCharacters(in: .whitespacesAndNewlines)
+        // An API key is one line as pasted (the spaces and line breaks a copy brings along are not part of it).
+        let password = named.key ? password.trimmingCharacters(in: .whitespacesAndNewlines) : password
+        if named.key {
+            guard password.count >= 8, password.count <= 500, password.rangeOfCharacter(from: .whitespacesAndNewlines) == nil, !password.contains("\0") else {
+                throw BuddyWorkerFailure(message: "Paste your \(named.name) API key: one line, with no spaces.")
+            }
+        } else {
+            guard !user.isEmpty, user.count <= 200, !password.isEmpty, password.count <= 1000, !user.contains("\0"), !password.contains("\0") else {
+                throw BuddyWorkerFailure(message: "Enter your \(named.name) username and password.")
+            }
         }
         let data = try JSONSerialization.data(withJSONObject: ["username": user, "password": password])
         let match = query(workspace, profile)
         let code = SecItemUpdate(match as CFDictionary, [kSecValueData: data] as CFDictionary)
         if code == errSecItemNotFound {
-            var add = match; add[kSecValueData] = data; add[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly; add[kSecAttrLabel] = "Buddy: \(named.name) sign-in"
+            var add = match; add[kSecValueData] = data; add[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly; add[kSecAttrLabel] = "Buddy: \(named.name) " + (named.key ? "API key" : "sign-in")
             guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else { throw BuddyWorkerFailure(message: "Couldn’t save the \(named.name) sign-in in Keychain.") }
         } else if code != errSecSuccess { throw BuddyWorkerFailure(message: "Couldn’t update the \(named.name) sign-in in Keychain.") }
     }
@@ -312,6 +334,8 @@ struct BuddyTypedSignIn {
             return try await BuddyWorkerClient.call(support: support, payload: ["workspace": workspace, "operation": "signin", "arguments": arguments], timeout: 90)
         }
         guard ["provide", "remove"].contains(action), let profile = BuddyCredentials.profile(payload["profile"] as? String ?? "") else { throw BuddyWorkerFailure(message: "Choose a sign-in Buddy supports.") }
+        // A connected service's key comes with its address and choices (BuddyServiceBox), never on its own.
+        guard !profile.key else { throw BuddyWorkerFailure(message: "Connect this service in Connected services, or in the chat's own field.") }
         if action == "remove" { try store.remove(workspace: workspace, profile: profile.id); return ["profile": profile.id, "saved": false] }
         guard let username = payload["username"] as? String, let password = payload["password"] as? String, !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !password.isEmpty else {
             throw BuddyWorkerFailure(message: "Type your \(profile.name) username and password in the sign-in field in the chat.")

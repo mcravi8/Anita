@@ -582,6 +582,8 @@ struct BuddyPlanTaskRef { let planId, stageId, taskId, assignee, kind, title: St
     /// What a plan task becomes for its worker task's state (nil leaves it as it is).
     private static func follow(_ job: [String: Any]) -> (status: String, reason: String)? {
         let status = job["status"] as? String ?? "", recovery = (job["recovery"] as? [String: Any])?["state"] as? String ?? ""
+        // A coding task waiting for its RunPod run is still being worked on: Buddy continues it when the results are back.
+        if status == "paused", job["blockedBy"] as? String == "remote" { return ("dispatched", "") }
         switch status {
         case "queued", "starting", "running", "stopping": return ("dispatched", "")
         case "completed": return ("review", "")

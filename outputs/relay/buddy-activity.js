@@ -37,7 +37,7 @@
       // An action that may or may not have gone through is something to check, whatever state the task is in.
       if(useDecisions&&agents.has(t.agentId)&&(!t.workspace||t.workspace===state.conversationWorkspace)){
         if(t.status==='completed')add({id:`task:${t.id}:${t.attempt||0}:${t.status}:${t.attentionKey||''}`,kind:'finished',title:t.title||'Agent task',description:'The task finished. Open it to see the result.',agentId:t.agentId,at:t.updatedAt||t.createdAt,taskId:t.id,actionLabel:'View result'});
-        else if(working.has(t.status))items.push({id:`working:${t.id}:${t.attempt||0}`,kind:'working',unread:false,title:t.title||'Agent task',description:String(t.progress||'Working on it.').slice(0,200),agentId:t.agentId,at:t.updatedAt||t.createdAt,taskId:t.id,actionLabel:'Open task'});
+        else if(working.has(t.status)||t.status==='paused'&&t.blockedBy==='remote')items.push({id:`working:${t.id}:${t.attempt||0}`,kind:'working',unread:false,title:t.title||'Agent task',description:String(t.progress||'Working on it.').slice(0,200),agentId:t.agentId,at:t.updatedAt||t.createdAt,taskId:t.id,actionLabel:'Open task'});
         continue;
       }
       const unsure=Number(t.unconfirmedCount)||0,asks=needs.has(t.status)||unsure>0;

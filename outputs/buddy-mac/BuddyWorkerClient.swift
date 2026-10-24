@@ -238,6 +238,7 @@ enum BuddyLiveWork {
                 text += "queued" + (started.map { " since \(time($0))" } ?? "")
                     + (ahead.map { ", waiting for \(who(job))’s running task “\(short($0["title"] as? String ?? "Background task", 80))” to finish (an agent works on one task at a time)" } ?? ", waiting for a free slot while other tasks run")
             case "waiting_review", "waiting_user": text += "waiting" + (touched.map { " since \(time($0))" } ?? "")
+            case "paused" where job["blockedBy"] as? String == "remote": text += "running on a RunPod machine Buddy rented for it; Buddy continues it by itself when the results are back"
             default: text += "\(status == "paused" ? "paused" : "stopped")" + (touched.map { " at \(time($0))" } ?? "") + "; Buddy restarts it by itself when it can"
             }
             let progress = short(job["progress"] as? String ?? "", 200)

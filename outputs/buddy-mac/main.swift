@@ -456,6 +456,8 @@ import AppKit
             Task { do {
                 let workspace = try workspaceContext().workspace, payload = body["payload"] as? [String: Any] ?? [:]
                 if !(payload["taskId"] as? String ?? "").isEmpty { _ = try? await BuddyWorkerClient.start(support: supportURL, workspace: workspace) }
+                // Connected services (Settings, or the chat's card when an agent asked for one): their address, choices and key.
+                if BuddyServiceBox.handles(payload) { replyHandler(try await BuddyServiceBox.handle(payload, workspace: workspace, support: supportURL), nil); return }
                 replyHandler(try await BuddySignInBox.handle(payload, workspace: workspace, support: supportURL), nil)
             } catch { replyHandler(nil, error.localizedDescription) } }
         case "sendMessage":

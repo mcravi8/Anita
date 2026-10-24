@@ -942,7 +942,7 @@ struct BuddyAttempt {
     /// Kinds of review that this app performs itself, recording "sending" before it starts, so for them "approved" really does mean "not sent
     /// yet". A connected-service request is sent by the connection service, whose ordering this app cannot fully vouch for, so an approved one
     /// is treated as possibly sent, like a review of any unknown kind.
-    private static let dispatchRecorded: Set<String> = ["browser", "authentication", "coding", "account"]
+    private static let dispatchRecorded: Set<String> = ["browser", "authentication", "coding", "account", "service", "upload"]
     private static func kindOf(_ review: [String: Any]) -> String { review["kind"] as? String ?? "connection" }
 
     private static func canMove(from current: String, to next: String) -> Bool {
@@ -1118,6 +1118,16 @@ struct BuddyAttempt {
         guard let all = try? actions(of: taskID), !all.isEmpty else { return "" }
         let lines = all.suffix(30).compactMap { action -> String? in
             let name = action.tool.isEmpty ? "an action" : "“\(action.tool)”"
+            // A request to a connected service: a new one is a new request, approved again (what it created is in the task's leases).
+            if action.kind == "service" {
+                switch action.state {
+                case "confirmed": return "- \(name): sent and answered. Do not send it again; what it created (if anything) is in this task's leases (buddy_service_api action leases)."
+                case "declined": return "- \(name): declined. Do not send it again unless asked."
+                case "not_sent": return "- \(name): the service refused it, or it was never sent. Nothing was created."
+                case "uncertain", "dispatched": return "- \(name): sent, but its answer never came. Check with a GET before trying it again."
+                default: return nil
+                }
+            }
             switch action.state {
             case "confirmed": return "- \(name): done" + (action.resolvedBy == "user" ? " (the user confirmed it went through). Do not repeat it." : ". Do not repeat it.")
             case "uncertain", "dispatched": return "- \(name): unconfirmed. It may or may not have gone through, and the user has not said. Do not repeat it; tell the user to check it."
@@ -1187,10 +1197,24 @@ struct BuddyAttempt {
                 let site = (review["origin"] as? String).flatMap { URL(string: $0)?.host } ?? "a website", reset = review["purpose"] as? String == "reset"
                 out.append(DecisionSpec(id: "review:" + reviewID, kind: "signin", title: reset ? "Reset your password on \(site)?" : "Create an account on \(site)?",
                                         question: reset ? "Answer in the chat: Reset password or Don’t." : "Answer in the chat: Create account or Don’t. Buddy never pays or starts a paid trial.", label: "Open chat", payload: ["taskId": id, "reviewId": reviewID]))
+            case "pending" where ["service", "upload"].contains(review["kind"] as? String ?? "") && review["route"] as? String != "supervisor":
+                // A change on a connected service (money, when the person said it can charge it), or files leaving the Mac for a machine: the
+                // person's, with what it costs at most by the agent's estimate.
+                if review["kind"] as? String == "upload" {
+                    let u = review["upload"] as? [String: Any] ?? [:]
+                    out.append(DecisionSpec(id: "review:" + reviewID, kind: "review", title: "Send files to \(u["host"] as? String ?? "a machine")?",
+                                            question: "\(u["agent"] as? String ?? "An agent") wants to send project files to the machine \(u["lease"] as? String ?? "it leased"). Approve or Disapprove in the task.", label: "Review", payload: ["taskId": id, "reviewId": reviewID]))
+                    continue
+                }
+                let r = review["request"] as? [String: Any] ?? [:], service = r["service"] as? String ?? "a service", cost = r["cost"] as? [String: Any]
+                let most = (cost?["maxCostUSD"] as? Double).map { "? At most " + String(format: "$%.2f", $0) } ?? "?"
+                out.append(DecisionSpec(id: "review:" + reviewID, kind: "review", title: "Allow a request to \(service)\(most)",
+                                        question: "\(r["agent"] as? String ?? "An agent") wants to send \(r["method"] as? String ?? "") \(r["path"] as? String ?? "") to \(service)" + (r["charges"] as? Bool == true ? ", which can charge you money" : "") + ". Approve or Disapprove in the task.",
+                                        label: "Review", payload: ["taskId": id, "reviewId": reviewID]))
             case "pending":
                 // A coding command Buddy judged routine is the team supervisor's to answer (`command_review`); the page shows it to the person
                 // only when the supervisor lane is not answering.
-                if review["route"] as? String == "supervisor", review["kind"] as? String == "coding" {
+                if review["route"] as? String == "supervisor", ["coding", "service"].contains(review["kind"] as? String ?? "") {
                     out.append(DecisionSpec(id: "review:" + reviewID, kind: "command_review", title: "Review: \(tool)", question: "Allow this exact command? " + ((review["assessment"] as? [String: Any])?["reason"] as? String ?? ""),
                                             label: "Review", payload: ["taskId": id, "reviewId": reviewID], audience: "supervisor"))
                     continue
@@ -1215,7 +1239,7 @@ struct BuddyAttempt {
             } else if point?["need"] as? String == "credential", let profile = point?["profile"] as? String, !profile.isEmpty {
                 // A sign-in is always the person's. Its card opens the agent's chat, where a private field takes it straight to the Keychain.
                 let service = (point?["service"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "This service"
-                out.append(DecisionSpec(id: "credential:\(id):\(attempt):\(profile)", kind: "credential", title: "\(service) needs your sign-in", question: point?["question"] as? String ?? "Sign in to continue.",
+                out.append(DecisionSpec(id: "credential:\(id):\(attempt):\(profile)", kind: "credential", title: point?["secret"] as? String == "service" ? "Connect \(service)" : "\(service) needs your sign-in", question: point?["question"] as? String ?? "Sign in to continue.",
                                         label: "Sign in", payload: ["taskId": id, "profile": profile]))
             } else if let need = point?["need"] as? String, BuddyWebStep.needs.contains(need) {
                 // A step only the person can do, outside the chat (on a web page in Buddy's Chrome window, or a file saved from one): its chat
@@ -1241,11 +1265,20 @@ struct BuddyAttempt {
             }
         }
         if status == "paused" {
-            if job["blockedBy"] as? String == "limit" {
+            if job["blockedBy"] as? String == "remote" {
+                // Waiting for its command on a leased machine: Buddy's own work, which continues the task by itself. Nobody needs to act.
+            } else if job["blockedBy"] as? String == "limit" {
                 out.append(DecisionSpec(id: "limit:\(id):\(job["blockedAt"] as? String ?? "")", kind: "limit", title: "Daily limit reached", question: progress, label: "Open task", payload: ["taskId": id]))
             } else if !(cause.hasPrefix("user") || cause == "routine.paused" || cause == "superseded") {
                 out.append(DecisionSpec(id: "paused:\(id):\(attempt):\(cause.isEmpty ? "unknown" : cause)", kind: "paused", title: title, question: progress.isEmpty ? "This task stopped by itself." : progress, label: "Open task", payload: ["taskId": id], audience: watcher))
             }
+        }
+        // Something a lease created that Buddy can't delete by itself (its teardown keeps failing, or the create's answer didn't say what was
+        // created): the person's to check, until it is gone.
+        for alert in job["leaseAlerts"] as? [[String: Any]] ?? [] {
+            guard let lease = alert["id"] as? String else { continue }
+            out.append(DecisionSpec(id: "lease:" + lease, kind: "lease", title: "Check \(alert["service"] as? String ?? "the service"): Buddy couldn’t delete what this task created",
+                                    question: String((alert["text"] as? String ?? "").prefix(300)), label: "Open task", payload: ["taskId": id, "leaseId": lease]))
         }
         if status == "completed", !(job["reportsTo"] as? String ?? "").isEmpty, (job["acceptedAt"] as? String ?? "").isEmpty {
             let result = String((job["result"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))
@@ -1254,7 +1287,7 @@ struct BuddyAttempt {
         return out
     }
     /// Kinds kept equal to a task's state. `allowance` is no longer opened, but stays here so rows left from before are still resolved.
-    private static let derivedKinds = "('review', 'signin', 'waiting', 'allowance', 'stopped', 'unconfirmed', 'limit', 'paused', 'result', 'credential', 'mfa', 'command_review', 'step')"
+    private static let derivedKinds = "('review', 'signin', 'waiting', 'allowance', 'stopped', 'unconfirmed', 'limit', 'paused', 'result', 'credential', 'mfa', 'command_review', 'step', 'lease')"
     /// Keeps the open blockers of one task equal to what its state implies, in the transaction that saves it: new ones are opened, ones whose cause
     /// has ended are resolved, and each is an event, so a consumer can follow them.
     private static func syncDecisions(_ task: [String: Any], in db: BuddyOperationsDB) throws {

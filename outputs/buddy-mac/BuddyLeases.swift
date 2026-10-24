@@ -125,6 +125,13 @@ enum BuddyRemoteMachine {
         let resolved = (path == "." ? project : project.appendingPathComponent(path)).resolvingSymlinksInPath().standardizedFileURL.path
         return resolved == root || resolved.hasPrefix(root + "/")
     }
+    /// Whether the folder `path` (relative) may be made in `project`: the deepest part of it that exists already stays inside once links are
+    /// followed, so making the rest can't land elsewhere.
+    static func makeable(_ project: URL, _ path: String) -> Bool {
+        var parts = path.split(separator: "/").map(String.init)
+        while !parts.isEmpty, !FileManager.default.fileExists(atPath: project.appendingPathComponent(parts.joined(separator: "/")).path) { parts.removeLast() }
+        return inside(project, parts.isEmpty ? "." : parts.joined(separator: "/"))
+    }
     /// Checked project paths (each relative and inside the project; `existing`: each must be there).
     static func paths(_ raw: Any?, project: URL, existing: Bool, what: String) throws -> [String] {
         let list = raw as? [Any] ?? []
@@ -175,7 +182,7 @@ enum BuddyRemoteMachine {
             let rel = String(path.dropFirst(base.count + 1))
             guard relative(rel) == rel, covered([rel], by: wanted), item.lastPathComponent != ".DS_Store" else { skipped += 1; continue }
             let parent = (rel as NSString).deletingLastPathComponent
-            guard parent.isEmpty || (try? fm.createDirectory(at: project.appendingPathComponent(parent), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])) != nil,
+            guard parent.isEmpty || (makeable(project, parent) && (try? fm.createDirectory(at: project.appendingPathComponent(parent), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])) != nil),
                   inside(project, parent.isEmpty ? "." : parent) else { skipped += 1; continue }
             let target = project.appendingPathComponent(rel)
             var folder: ObjCBool = false
@@ -493,7 +500,7 @@ enum BuddyRemoteMachine {
         let job = await shell.run("mkdir -p \(base)/work && rm -f \(base)/exit \(base)/pid && cat > \(base)/job.sh && echo buddy-ok", input: script, timeout: 120)
         guard job.ok, job.out.contains("buddy-ok") else { throw BuddyServiceAPI.Failure(message: "The machine didn’t take the command (\(job.err.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300))).") }
         let started = await shell.run("""
-        cd \(base)/work/\(BuddyRemoteMachine.quoted(cwd)) || { echo "no folder \(cwd) on the machine" >&2; exit 3; }
+        cd \(base)/work/\(BuddyRemoteMachine.quoted(cwd)) || { echo no folder \(BuddyRemoteMachine.quoted(cwd)) on the machine >&2; exit 3; }
         set -m
         nohup bash -c 'bash "$HOME/buddy/\(short)/job.sh"; echo $? > "$HOME/buddy/\(short)/exit"' > \(base)/output.log 2>&1 < /dev/null &
         echo $! > \(base)/pid

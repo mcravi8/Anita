@@ -1173,9 +1173,17 @@ enum BuddyCommandReview {
             if let found = hit([appleScriptReach], in: code) { return "\(subject) changes this Mac or acts for you in another app (\(found))." }
             scanned = code.replacingOccurrences(of: #"tell\s+application"#, with: "tell app", options: [.regularExpression, .caseInsensitive])
         }
+        // A script that only drives Microsoft Word, Excel or PowerPoint to open a file in the app's own folder and export it changes nothing else
+        // on the Mac (24 Oct: Lyra's Python script exporting the report with Word for its page check came to the person). Every app it tells is
+        // one of them, none of them runs a macro, nothing types or runs shell from AppleScript, and the only places outside the project it names
+        // are those apps' own Documents folders. The supervisor still reads it in full.
+        let office = officeExport(code)
+        if office { scanned = scanned.replacingOccurrences(of: #"osascript|tell\s+application"#, with: "office app", options: [.regularExpression, .caseInsensitive]) }
         if let found = hit(macRules, in: scanned) { return "\(subject) changes this Mac (\(found))." }
         var named: String?
-        for line in code.components(separatedBy: .newlines) {
+        for raw in code.components(separatedBy: .newlines) {
+            // In such a script the Office apps' own Documents folders are not outside the project; every other place on the line still is.
+            let line = office ? officeFolder.stringByReplacingMatches(in: raw, range: NSRange(raw.startIndex..., in: raw), withTemplate: "office-folder") : raw
             let refs = outside(line, project: project, root: root, folder: folder, deleting: first(deletes, in: line) != nil)
             guard let ref = refs.first else { continue }
             if named == nil, !ref.hasPrefix("..") { named = ref }
@@ -1365,6 +1373,16 @@ enum BuddyCommandReview {
     /// The same programs at the start of a shell script's command (in other languages a bare `nc` is as likely a variable as a program).
     private static let shellSends = rx(#"(^|[;&|(`]|\$\()\s*(ssh|scp|sftp|rsync|ftp|nc|ncat|netcat|telnet|socat|mail|mailx|sendmail)\s"#)
     private static let appleScriptReach = rx(#"tell\s+application\s+(id\s+)?"(Finder|System Events|Mail|Messages|Terminal|iTerm2?|System Settings|System Preferences|Keychain Access|Script Editor|Shortcuts|Automator|com\.apple\.[A-Za-z.]+)"|do\s+shell\s+script|\bkeystroke\b|\bkey\s+code\b"#)
+    private static let toldApp = rx(#"tell\s+application\s+(?:id\s+)?"([^"]+)""#)
+    private static let officeApps: Set<String> = ["microsoft word", "microsoft excel", "microsoft powerpoint", "com.microsoft.word", "com.microsoft.excel", "com.microsoft.powerpoint"]
+    private static let officeMacro = rx(#"do\s+visual\s+basic|run\s+(vb\s+)?macro|\bVBA\b"#)
+    private static let officeFolder = rx(#"(\$\{?HOME\}?|~|/Users/[^/\s'"]+)?/?Library/Containers/com\.microsoft\.(Word|Excel|Powerpoint)/Data/Documents[^\s'"]*"#)
+    /// Whether a script's AppleScript only tells Microsoft Word, Excel or PowerPoint what to do, with no macro, no shell and no keystrokes.
+    static func officeExport(_ code: String) -> Bool {
+        let range = NSRange(code.startIndex..., in: code)
+        let told = toldApp.matches(in: code, range: range).compactMap { Range($0.range(at: 1), in: code).map { code[$0].lowercased() } }
+        return !told.isEmpty && told.allSatisfy(officeApps.contains) && first(appleScriptReach, in: code) == nil && first(officeMacro, in: code) == nil
+    }
     private static let macRules: [NSRegularExpression] = [
         rx(#"\b(sudo|doas)\b|\bbrew['"\s,]+(install|uninstall|reinstall|upgrade|update|tap|untap|link|unlink|services|remove|rm|cleanup|pin)\b|\bport['"\s,]+(install|uninstall|selfupdate|upgrade)\b|softwareupdate|\binstaller['"\s,]+-pkg"#),
         rx(#"launchctl|launchagents|launchdaemons|login ?items|crontab|\bdefaults['"\s,]+(write|delete|import|rename)\b|osascript|tell application|\bpmset\b|systemsetup|networksetup|\bscutil['"\s,]+--set|\bnvram\b|csrutil|\bspctl\b|\bdiskutil['"\s,]+(erase|partition|apfs|rename|unmount|mount|eject)|kextload|kmutil|tccutil|\bprofiles['"\s,]+(install|remove)"#),

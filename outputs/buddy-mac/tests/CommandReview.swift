@@ -508,6 +508,24 @@ import Foundation
             try put(body, name, in: project)
             let v = assess("osascript \(name)"); require(v.forPerson && !v.script, "an AppleScript that reaches Mail, System Events, Finder or the shell stays with the user: \(name) → \(v.kind) \(v.reason)")
         }
+        // Lyra on 24 Oct: a Python script that has Word open the report in Word's own folder and export it as a PDF, for the native page check,
+        // came to the user as "changes this Mac". Driving only Word, Excel or PowerPoint that way is the supervisor's to read; telling another
+        // app, running a macro, or writing elsewhere outside the project still stays with the user.
+        let lyra = "from pathlib import Path\nimport shutil\nimport subprocess\nimport time\n\nroot = Path(__file__).resolve().parent\nsource = root / 'stage5_final_repair_20261024/stages/S04b_revision/final_repair_20261024/EE590_Report_Craviotto_Matteo.docx'\nappdir = Path.home() / 'Library/Containers/com.microsoft.Word/Data/Documents/buddy-stage5-final-review'\nappdir.mkdir(parents=True, exist_ok=True)\ndoc = appdir / 'EE590_Report_Craviotto_Matteo_956665b6.docx'\npdf = appdir / 'EE590_Report_Craviotto_Matteo_956665b6_word.pdf'\nshutil.copy2(source, doc)\nsubprocess.run(['open', '-g', '-a', 'Microsoft Word', str(doc)], check=True, timeout=30)\nscript = '''on run argv\nset docName to item 1 of argv\nset pdfPath to item 2 of argv\ntell application \"Microsoft Word\"\n  repeat 60 times\n    if exists document docName then exit repeat\n    delay 1\n  end repeat\n  if not (exists document docName) then error \"Word did not list target document\"\n  set docRef to document docName\n  save as docRef file name pdfPath file format format PDF\n  close docRef saving no\nend tell\nend run'''\nsubprocess.run(['osascript', '-e', script, doc.name, str(pdf)], check=True, timeout=180)\ndest = root / 'word_native_evidence_956665b6.pdf'\nshutil.copy2(pdf, dest)\nprint(dest, dest.stat().st_size)\n"
+        try put(lyra, "native_word_review.py", in: project)
+        let office = assess("/bin/zsh -lc 'python3 native_word_review.py'")
+        require(office.script && !office.forPerson && office.kind == "script", "a script that only drives Word to export from Word's own folder goes to the supervisor: \(office.kind) \(office.reason)")
+        let exported = "osascript -e 'tell application \"Microsoft Excel\" to save workbook as active workbook filename \"/Users/x/Library/Containers/com.microsoft.Excel/Data/Documents/buddy-x/t.pdf\"'\ncp \"$HOME/Library/Containers/com.microsoft.Excel/Data/Documents/buddy-x/t.pdf\" exports/t.pdf\n"
+        try put(exported, "export_table.sh", in: project)
+        let excel = assess("bash export_table.sh")
+        require(excel.script && !excel.forPerson, "so does a shell script that drives Excel and copies the export back into the project: \(excel.kind) \(excel.reason)")
+        for (name, body) in [("word_and_finder.py", lyra.replacingOccurrences(of: "tell application \"Microsoft Word\"", with: "tell application \"Finder\"")),
+                             ("word_macro.py", lyra.replacingOccurrences(of: "save as docRef", with: "do Visual Basic \"Shell\"\n  save as docRef")),
+                             ("word_out.sh", exported.replacingOccurrences(of: "exports/t.pdf", with: "~/Desktop/t.pdf"))] {
+            try put(body, name, in: project)
+            let v = assess((name.hasSuffix(".py") ? "python3 " : "bash ") + name)
+            require(v.forPerson && !v.script, "telling another app, running a macro or writing elsewhere still stays with the user: \(name) → \(v.kind) \(v.reason)")
+        }
         // Only what is on the person's own list goes to them; what Buddy just cannot read is the supervisor's.
         for command in ["make all", "cat ~/notes.txt", "./tools/talk.sh", "python3 ../elsewhere.py"] {
             let v = assess(command); require(v.kind == "unclear" && !v.forPerson, "the supervisor reads it: \(command) → \(v.kind) \(v.reason)")

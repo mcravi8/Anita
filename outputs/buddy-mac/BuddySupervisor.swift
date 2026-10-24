@@ -390,6 +390,49 @@ import Foundation
     }
     private static func cut(_ text: String, _ limit: Int) -> String { text.count > limit ? String(text.prefix(limit - 1)) + "…" : text }
     private static func size(_ value: [String: Any]) -> Int { (try? JSONSerialization.data(withJSONObject: value).count) ?? Int.max }
+    /// The briefing made to fit its limit whatever the plan holds: first finished tasks keep only who did what (their briefs and result texts
+    /// go), then the longest text anywhere is halved, with a note, until it fits. On 24 Oct Stage 5 grew to 45 tasks, the briefing outgrew
+    /// what a ChatGPT run accepts, every supervision run failed before starting, and with supervision down every review went to the user.
+    static func fitted(_ briefing: [String: Any], limit: Int) -> [String: Any] {
+        var out = briefing
+        if size(out) > limit, var plan = out["plan"] as? [String: Any], let stages = plan["stages"] as? [[String: Any]] {
+            plan["stages"] = stages.map { stage -> [String: Any] in
+                var s = stage
+                s["tasks"] = (stage["tasks"] as? [[String: Any]] ?? []).map { task -> [String: Any] in
+                    guard ["done", "waived"].contains(task["status"] as? String ?? "") else { return task }
+                    return task.filter { ["id", "title", "assignee", "kind", "status"].contains($0.key) }
+                }
+                return s
+            }
+            out["plan"] = plan
+        }
+        for _ in 0..<400 where size(out) > limit {
+            guard let shorter = halvingLongest(out) as? [String: Any] else { break }
+            out = shorter
+        }
+        return out
+    }
+    /// The value with its longest text (over 300 bytes) cut to half, marked; the value unchanged when no text is that long.
+    static func halvingLongest(_ value: Any) -> Any? {
+        func longest(_ v: Any) -> Int {
+            if let s = v as? String { return s.utf8.count }
+            if let d = v as? [String: Any] { return d.values.map(longest).max() ?? 0 }
+            if let a = v as? [Any] { return a.map(longest).max() ?? 0 }
+            return 0
+        }
+        let target = longest(value)
+        guard target > 300 else { return nil }
+        var done = false
+        func walk(_ v: Any) -> Any {
+            if done { return v }
+            if let s = v as? String, s.utf8.count == target { done = true; return prefix(s, bytes: target / 2) + " …[shortened to fit the briefing]" }
+            if let d = v as? [String: Any] { var o = d; for k in d.keys.sorted() where !done { o[k] = walk(d[k] as Any) }; return o }
+            if let a = v as? [Any] { var o = a; for i in a.indices where !done { o[i] = walk(a[i]) }; return o }
+            return v
+        }
+        let out = walk(value)
+        return done ? out : nil
+    }
 
     /// What the supervisor is given, as data: the items, the user's authorization, the plan as the page shows it (without its notices), the
     /// record of attempts and decisions, the standing directives and who is on the team. Kept under `limit` (120 KB on Claude, 100,000 bytes on
@@ -549,7 +592,7 @@ import Foundation
             scripts[longest.script]["note"] = "Shortened to fit the briefing: only the start of this script is shown, so you have not read all of it."
             command["scripts"] = scripts; list[longest.item]["command"] = command; out["items"] = list
         }
-        return out
+        return Self.fitted(out, limit: limit)
     }
     /// The scripts of a command review as they are now in the task's project copy: each read fresh, at most 64 KB in all for one command (a
     /// script cut there says so), and one that changed or is gone since Buddy read it is marked, since approving it will not run it.

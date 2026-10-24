@@ -102,6 +102,7 @@ import Darwin
             // A worker that has just started has no live holders: whatever the last one held is free.
             _ = try store.breakAllLeases()
             monitor=try BuddyTeamMonitor(support:support,makeClaude:makeCoding,makeGPT:{ConversationService(support:self.support,executable:self.executableOverride)},keyReader:keyReader)
+            monitor.planConversations={[weak self] in self?.planExchanges() ?? []}
             supervisor = BuddySupervisorLane(support: support, store: store, plans: plans, makeClaude: makeCoding, makeGPT: { [support, executableOverride] in ConversationService(support: support, executable: executableOverride) }, keyReader: keyReader,
                                              hooks: .init(stopTask: { [weak self] id, cause in await self?.stop(id, status: "cancelled", cause: cause) },
                                                           taskFiles: { [weak self] id in self?.taskFiles(id) ?? [] },
@@ -3168,6 +3169,44 @@ import Darwin
         if !lead.isEmpty { out += "\n\nUpdates from your supervisor:\n" + lead.joined(separator: "\n\n") }
         if !system.isEmpty { out += "\n\nNote from Buddy (not from the user):\n" + system.joined(separator: "\n\n") }
         return out
+    }
+    /// The plan's exchanges between a teammate and the supervisor, as Agent messages shows them: the teammate's question, or the result it
+    /// handed in (its message to the user, before the details), then the supervisor's answer, acceptance or instruction to redo it.
+    private func planExchanges() -> [[String: Any]] {
+        let w = workspace
+        guard UUID(uuidString: w) != nil, let rows = try? plans.conversations(workspace: w) else { return [] }
+        return Self.planExchanges(rows, attempts: { [store] id in (try? store?.attempts(of: id)) ?? [] })
+    }
+    static func planExchanges(_ rows: [[String: Any]], attempts lookup: (String) -> [BuddyAttempt]) -> [[String: Any]] {
+        var attempts: [String: [BuddyAttempt]] = [:]
+        return rows.compactMap { d in
+            let kind = d["kind"] as? String ?? "", at = d["at"] as? String ?? "", lead = d["by"] as? String ?? "", teammate = d["assignee"] as? String ?? ""
+            let choice = d["choice"] as? String ?? "", why = d["rationale"] as? String ?? "", title = d["title"] as? String ?? ""
+            guard !lead.isEmpty, !teammate.isEmpty, lead != teammate, !at.isEmpty else { return nil }
+            var row: [String: Any] = ["id": "plan:" + (d["id"] as? String ?? ""), "fromAgentId": teammate, "toAgentId": lead, "title": title, "status": "completed",
+                                      "createdAt": at, "startedAt": at, "finishedAt": at, "error": ""]
+            if kind == "answer" {
+                row["kind"] = "question"; row["question"] = d["question"] ?? ""; row["body"] = choice; row["detail"] = why
+                return row
+            }
+            // The attempt the verdict was about: the one it names ("accept attempt 2"), else the last that had ended by then.
+            let job = d["workerTaskId"] as? String ?? ""
+            if attempts[job] == nil { attempts[job] = job.isEmpty ? [] : lookup(job) }
+            let named = choice.range(of: #"^accept attempt (\d+)$"#, options: .regularExpression).flatMap { _ in Int(choice.split(separator: " ").last ?? "") }
+            let attempt = attempts[job]?.last { a in named.map { a.number == $0 } ?? ((a.endedAt ?? "~") <= at) }
+            let handedIn = attempt?.result.map { Self.message(of: $0) } ?? ""
+            row["kind"] = "result"; row["verdict"] = kind == "accept" ? "accepted" : "sent back"
+            row["question"] = handedIn.isEmpty ? "Handed in “\(title)”." : handedIn
+            row["body"] = kind == "accept" ? (why.isEmpty ? "Accepted." : why) : choice; row["detail"] = ""
+            if let ended = attempt?.endedAt, ended <= at { row["createdAt"] = ended; row["startedAt"] = ended }
+            return row
+        }
+    }
+    /// A result's message to the user: the text before its first line of three dashes (the details for the team, and Buddy's receipts, follow it).
+    static func message(of result: String) -> String {
+        let text = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cut = text.range(of: #"\n[ \t]*-{3,}[ \t]*(\n|$)"#, options: .regularExpression)
+        return String((cut.map { String(text[..<$0.lowerBound]) } ?? text).prefix(4000)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
     static let receiptsMarker = "\n\n---\nCommand receipts:"
     /// A coding result without its trailing receipts line, so fresh receipts replace the old ones instead of piling up.

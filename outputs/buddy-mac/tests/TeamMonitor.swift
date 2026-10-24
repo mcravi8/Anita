@@ -129,11 +129,17 @@ final class KeyBox {var key:String?="fixture-key"}
   require(updates.count==1 && updates[0]["agentId"] as? String==chief,"a real peer check-in reaches Chief once and stays out of the quiet peer's DM")
   require((updates[0]["sources"] as! [[String:Any]]).contains{$0["taskId"] as? String==task},"Chief update retains actual task-source provenance")
   require(checks.contains{$0["kind"] as? String=="checkin" && $0["status"] as? String=="completed"} && checks.contains{$0["kind"] as? String=="overview" && $0["status"] as? String=="completed"},"separate target-agent response and Chief summary have completed receipts")
+  // An automatic check-in is Buddy asking a teammate for the supervisor, not a message anyone wrote: it is in neither the history nor the chat's
+  // markers. A check-in where the supervisor asked a question is a message, with its reply.
+  require((try monitor.handle(["action":"messages","agentId":maze],state:state,jobs:jobs)["messages"] as! [[String:Any]]).isEmpty && (done["agentMessages"] as? [String:[String:Any]])?[maze]==nil,"an automatic check-in is not a message between agents: \(done["agentMessages"] ?? "")")
+  let askedMaze=try monitor.store.enqueue(kind:"checkin",workspace:w,agent:maze,input:["requesterId":chief,"question":"Is the baseline table done?"],fingerprint:"asked-maze",policy:monitor.store.policy(state),selection:.init(provider:"claude",model:"fixture"),now:Date(),force:true)
+  try monitor.store.update(askedMaze["id"] as! String,["status":"completed","createdAt":"2026-10-24T10:00:00Z","startedAt":"2026-10-24T10:00:00Z","finishedAt":"2026-10-24T10:00:05Z","output":["body":"Yes, it matches the paper.","notify":false]])
   let history=try monitor.handle(["action":"messages","agentId":maze],state:state,jobs:jobs)
   let exchanges=history["messages"] as! [[String:Any]]
-  require(exchanges.count==1 && exchanges[0]["fromAgentId"] as? String==chief && exchanges[0]["toAgentId"] as? String==maze && exchanges[0]["status"] as? String=="completed","the actual completed peer check-in is inspectable with its true participants")
+  require(exchanges.count==1 && exchanges[0]["fromAgentId"] as? String==chief && exchanges[0]["toAgentId"] as? String==maze && exchanges[0]["status"] as? String=="completed" && exchanges[0]["kind"] as? String=="checkin" && exchanges[0]["question"] as? String=="Is the baseline table done?","the question the supervisor asked is inspectable with its true participants: \(exchanges)")
   require(exchanges[0]["input"]==nil && exchanges[0]["sources"]==nil && exchanges[0]["output"]==nil,"message history excludes internal prompts and model context")
-  require((done["agentMessages"] as? [String:[String:Any]])?[maze]?["count"] as? Int==2,"the collapsed chat link counts a recorded request and response")
+  let afterAsking=try monitor.status(state)
+  require((afterAsking["agentMessages"] as? [String:[String:Any]])?[maze]?["count"] as? Int==2,"the collapsed chat link counts a recorded request and response")
   // The supervisor answers the person itself, with the plan and everyone's work in view. An automatic check-in of its own saw neither, ran
   // beside that answer and posted a second report that contradicted it, so the supervisor never gets one.
   func chiefCheckins()throws->Int{(try monitor.status(state)["checks"] as! [[String:Any]]).filter{$0["kind"] as? String=="checkin" && $0["agentId"] as? String==chief}.count}
@@ -141,12 +147,26 @@ final class KeyBox {var key:String?="fixture-key"}
   let chiefCheckinsBefore=try chiefCheckins()
   for _ in 0..<4 {await step(chiefAsked)}
   require(try chiefCheckins()==chiefCheckinsBefore,"a message to the supervisor never starts an automatic check-in on the supervisor beside its own reply")
-  let activity=(done["agentMessages"] as! [String:[String:Any]])[maze]!["events"] as! [[String:Any]]
+  let activity=(afterAsking["agentMessages"] as! [String:[String:Any]])[maze]!["events"] as! [[String:Any]]
   require(activity.count==2 && activity[0]["at"] as? String==exchanges[0]["createdAt"] as? String && activity[1]["at"] as? String==exchanges[0]["finishedAt"] as? String,"timeline markers retain the actual request and reply times")
   require(activity.allSatisfy{$0["exchangeId"] as? String==exchanges[0]["id"] as? String && $0["body"]==nil && $0["input"]==nil},"timeline metadata links to real exchanges without exposing their private content")
   do{_ = try monitor.handle(["action":"messages"],state:state,jobs:jobs,actor:maze);require(false,"models cannot use the user-only full history endpoint")}catch{}
   let reopenedJournal=try BuddyTeamMonitorStore(support:root)
   require((try reopenedJournal.messages(state:state,agent:chief)["messages"] as! [[String:Any]]).count==1,"recorded messages survive reopening without replay")
+  // What the teammates said about plan work, from the plan's record: Maze's question and Chief's answer, the work Maze handed in and Chief's
+  // verdict. They sit in time order beside the check-in, both sides, in the history and in the chat's markers; an exchange with an agent
+  // that no longer exists, or with itself, is left out.
+  monitor.planConversations={[
+    ["id":"plan:q1","kind":"question","fromAgentId":maze,"toAgentId":chief,"question":"Use Table 2 or Table 3 as the baseline?","body":"Table 2.","detail":"The paper names it.","status":"completed","createdAt":"2026-10-24T09:00:00Z","startedAt":"2026-10-24T09:00:00Z","finishedAt":"2026-10-24T09:00:00Z","error":""],
+    ["id":"plan:r1","kind":"result","verdict":"sent back","title":"Rerun the pipeline","fromAgentId":maze,"toAgentId":chief,"question":"I reran the pipeline; the table matches.","body":"Add the seed you used.","detail":"","status":"completed","createdAt":"2026-10-24T11:00:00Z","startedAt":"2026-10-24T11:00:00Z","finishedAt":"2026-10-24T11:05:00Z","error":""],
+    ["id":"plan:gone","kind":"question","fromAgentId":UUID().uuidString,"toAgentId":chief,"question":"?","body":"!","status":"completed","createdAt":"2026-10-24T12:00:00Z"],
+    ["id":"plan:self","kind":"question","fromAgentId":chief,"toAgentId":chief,"question":"?","body":"!","status":"completed","createdAt":"2026-10-24T12:00:00Z"]]}
+  let talk=try monitor.handle(["action":"messages","agentId":maze],state:state,jobs:jobs)["messages"] as! [[String:Any]]
+  require(talk.compactMap{$0["id"] as? String}==["plan:q1",askedMaze["id"] as! String,"plan:r1"],"the plan's exchanges join the history in time order: \(talk.compactMap{$0["id"]})")
+  require(talk[2]["verdict"] as? String=="sent back" && talk[2]["body"] as? String=="Add the seed you used." && talk[0]["body"] as? String=="Table 2.","each keeps both sides")
+  let markers=(try monitor.status(state)["agentMessages"] as? [String:[String:Any]])?[maze]
+  require(markers?["count"] as? Int==6 && (markers?["events"] as? [[String:Any]] ?? []).contains{$0["exchangeId"] as? String=="plan:r1" && $0["at"] as? String=="2026-10-24T11:05:00Z"},"the chat's markers count the plan's exchanges at their own times: \(markers ?? [:])")
+  monitor.planConversations={[]}
   try FileManager.default.createDirectory(at:root.appendingPathComponent("HistoryFixture"),withIntermediateDirectories:true)
   let historyStore=try BuddyTeamMonitorStore(support:root.appendingPathComponent("HistoryFixture"))
   for n in 0..<45 {let j=try historyStore.enqueue(kind:"checkin",workspace:w,agent:maze,input:["requesterId":chief,"question":"Fixture question \(n)"],fingerprint:"fixture-\(n)",policy:monitor.store.policy(state),selection:.init(provider:"claude",model:"fixture"),now:Date(),force:true);try historyStore.update(j["id"] as! String,["status":"completed","output":["body":"Fixture reply \(n)"]])}
@@ -596,7 +616,7 @@ final class KeyBox {var key:String?="fixture-key"}
     func oldCheck(_ id:String,_ at:String,_ status:String,_ extra:[String:Any]=[:])->[String:Any] {(["id":id,"workspace":w,"agentId":rex,"kind":"checkin","status":status,"createdAt":at,"startedAt":at,"fingerprint":"f","policyRevision":1,"provider":"claude","model":"claude-haiku-5-5","force":false,"input":["requesterId":cChief,"agent":["id":rex,"name":"Inbox"]]] as [String:Any]).merging(extra){_,n in n}}
     let stoppedText="This check stopped because access, settings, or its time limit changed."
     let answered=UUID().uuidString,old=[UUID().uuidString,UUID().uuidString,UUID().uuidString],stamp=ISO8601DateFormatter()
-    var oldChecks:[[String:Any]]=[oldCheck(answered,stamp.string(from:Date().addingTimeInterval(-3*3600)),"completed",["finishedAt":stamp.string(from:Date().addingTimeInterval(-3*3600+30)),"output":["notify":false,"body":"","priority":2,"sourceIds":[String]()]])]
+    var oldChecks:[[String:Any]]=[oldCheck(answered,stamp.string(from:Date().addingTimeInterval(-3*3600)),"completed",["input":["requesterId":cChief,"agent":["id":rex,"name":"Inbox"],"question":"Anything new in the inbox?"],"finishedAt":stamp.string(from:Date().addingTimeInterval(-3*3600+30)),"output":["notify":false,"body":"","priority":2,"sourceIds":[String]()]])]
     for (id,ago) in zip(old,[-7200.0,-5400,-3600]) {oldChecks.append(oldCheck(id,stamp.string(from:Date().addingTimeInterval(ago)),"interrupted",["error":stoppedText]))}
     try JSONSerialization.data(withJSONObject:["version":1,"settings":[w:policyRow],"checks":oldChecks,"updates":[[String:Any]](),"observed":[String:Any](),"daily":[String:Any]()]).write(to:oldRoot.appendingPathComponent("team-monitor.json"))
     let older=try BuddyTeamMonitor(support:oldRoot,makeClaude:factory,keyReader:{_ in "fixture-key"})

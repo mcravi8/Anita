@@ -278,14 +278,30 @@ import CryptoKit
             let input=j["input"] as? [String:Any] ?? [:]
             guard j["workspace"] as? String==w,j["kind"] as? String=="checkin",Self.shown(j),let from=input["requesterId"] as? String,let to=j["agentId"] as? String,from != to,ids.contains(from),ids.contains(to) else{return nil}
             let output=j["status"] as? String=="completed" ? j["output"] as? [String:Any] ?? [:]:[:]
-            let row:[String:Any]=["id":j["id"]!,"fromAgentId":from,"toAgentId":to,"question":input["question"] ?? "","body":output["body"] ?? "","detail":output["detail"] ?? "","status":j["status"] ?? "queued","createdAt":j["createdAt"] ?? "","startedAt":j["startedAt"] ?? "","finishedAt":j["finishedAt"] ?? "","error":j["error"] ?? ""]
+            // An automatic check-in is not a message: no one wrote it. Buddy asks the teammate, for the supervisor, to sum up its work whenever
+            // it changes, and what is worth telling reaches the person as the supervisor's update. Shown as messages, 216 of them filled the
+            // history with "Chief requested an automatic check-in. Check-in completed without a message." Only a check-in that asked a
+            // question is a message between agents.
+            let question=input["question"] as? String ?? ""
+            guard !question.isEmpty else{return nil}
+            let row:[String:Any]=["id":j["id"]!,"kind":"checkin","fromAgentId":from,"toAgentId":to,"question":question,"body":output["body"] ?? "","detail":output["detail"] ?? "","status":j["status"] ?? "queued","createdAt":j["createdAt"] ?? "","startedAt":j["startedAt"] ?? "","finishedAt":j["finishedAt"] ?? "","error":j["error"] ?? ""]
             return BuddyAgentMemory.privateValue(row) as? [String:Any]
         }
     }
-    func messages(state:[String:Any],agent:String?=nil,before:String?=nil,exchangeIDs:[String]?=nil)throws->[String:Any] {
+    /// The whole history between agents, oldest first: check-ins, and `plan` exchanges (a teammate's question and the supervisor's answer, a
+    /// result and the supervisor's verdict) between agents of this workspace.
+    private func conversation(state:[String:Any],plan:[[String:Any]])->[[String:Any]] {
+        let ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
+        let extra=plan.compactMap{r->[String:Any]? in
+            guard let from=r["fromAgentId"] as? String,let to=r["toAgentId"] as? String,from != to,ids.contains(from),ids.contains(to),r["id"] is String else{return nil}
+            return BuddyAgentMemory.privateValue(r) as? [String:Any]
+        }
+        return (exchanges(state:state)+extra).enumerated().sorted{($0.element["createdAt"] as? String ?? "",$0.offset)<($1.element["createdAt"] as? String ?? "",$1.offset)}.map(\.element)
+    }
+    func messages(state:[String:Any],agent:String?=nil,before:String?=nil,exchangeIDs:[String]?=nil,plan:[[String:Any]]=[])throws->[String:Any] {
         let ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
         if let agent,!ids.contains(agent){throw BuddyWorkerFailure(message:"This agent is no longer available.")}
-        let all=exchanges(state:state)
+        let all=conversation(state:state,plan:plan)
         var rows=all.filter{agent==nil || $0["fromAgentId"] as? String==agent || $0["toAgentId"] as? String==agent}
         if let exchangeIDs {
             let selected=Set(exchangeIDs),available=Set(rows.compactMap{$0["id"] as? String})
@@ -296,7 +312,7 @@ import CryptoKit
         let page=Array(rows.suffix(40))
         return ["workspace":state["conversationWorkspace"] ?? "","messages":page,"nextCursor":rows.count>40 ? page.first!["id"]! : NSNull(),"messageRevision":Self.hash(all)]
     }
-    func status(state:[String:Any])->[String:Any] {
+    func status(state:[String:Any],plan:[[String:Any]]=[])->[String:Any] {
         let w=state["conversationWorkspace"] as? String ?? "",ids=Set((state["agents"] as? [[String:Any]] ?? []).compactMap{$0["id"] as? String})
         var out=(value["settings"] as? [String:[String:Any]])?[w] ?? [:]
         out["agents"]=Dictionary(uniqueKeysWithValues:ids.map{($0,configuration(out,agent:$0))})
@@ -309,7 +325,7 @@ import CryptoKit
         out["updates"]=updates.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}
         out["observed"]=(value["observed"] as? [String:[String:Any]] ?? [:]).values.filter{$0["workspace"] as? String==w && ids.contains($0["agentId"] as? String ?? "")}.map{r in r.filter{$0.key != "sources"}}
         var summaries=[String:[String:Any]]()
-        let conversationRows=exchanges(state:state)
+        let conversationRows=conversation(state:state,plan:plan)
         for row in conversationRows {
             let from=row["fromAgentId"] as! String,to=row["toAgentId"] as! String
             let hasReply = !(row["body"] as? String ?? "").isEmpty || !(row["detail"] as? String ?? "").isEmpty

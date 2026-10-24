@@ -46,6 +46,6 @@ for line in sys.stdin:
   report=json.loads(text.split(marker)[-1]);c=report['coverage'];assert c['read']==2 and c['pages']==2 and not c['partial']
   rid='ack-'+turn;calls[rid]=(tid,turn)
   out({'id':rid,'method':'item/tool/call','params':{'threadId':tid,'turnId':turn,'callId':rid,'tool':'buddy_record_inbox_review','arguments':{'reviewID':c['id'],'findings':[{'messageID':i,'status':'action_required','summary':'Invitation found; completion not established.'} for i in ['ubs','zopa']]}}});continue
- elif method in ['initialize','initialized','thread/inject_items','thread/unsubscribe','turn/interrupt']:pass
+ elif method in ['initialize','initialized','thread/inject_items','thread/unsubscribe','turn/interrupt','thread/archive','thread/unarchive']:pass
  else:raise AssertionError(method)
  if 'id' in m:out({'id':m['id'],'result':r})

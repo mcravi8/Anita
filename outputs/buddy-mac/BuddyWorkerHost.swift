@@ -3607,7 +3607,8 @@ import Darwin
         for (review, outcome) in run.typedOutcomes { outcome.resume(returning: ["sent": false, "error": "The task stopped before Buddy could use what you typed. Nothing was typed."]); run.typedSecrets[review] = nil }
         run.typedOutcomes.removeAll(); run.typedSecrets.removeAll(); run.rememberTyped.removeAll(); run.typedUsernames.removeAll(); run.signInPlans.removeAll()
         let service = run.service, claude = run.claude; run.service = nil; run.claude = nil
-        service?.shutdown(); claude?.close()
+        // Its saved ChatGPT threads are archived before the connection ends, so the task leaves the person's ChatGPT/Codex list.
+        service?.close(); claude?.close()
         // The shared browser keeps running for everyone else: only this task's page closes, unless the person's Chrome window is open
         // for it (its page is looked at again when they choose Done).
         if ended != privateTask, let browser, browser.isRunning { Task { _ = try? await browser.request(["command": "closeSession", "session": ended], timeout: 15) } }

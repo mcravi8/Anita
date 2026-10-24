@@ -10,6 +10,15 @@ EDIT_AFTER_REVIEW has its scripts edited first, as an agent changing a script af
 import json, os, re, sys, time, uuid
 
 LOG = os.path.join(os.getcwd(), 'codex-fixture.jsonl')
+# Saved thread id -> archived, kept on disk as Codex keeps its rollouts, so it outlives this process. As in Codex 0.155: an archived thread
+# can't be resumed until it is unarchived, and archiving one that is already archived or was never saved finds no rollout.
+SHELF = os.path.join(os.getcwd(), 'codex-archive.json')
+def shelf():
+    try:
+        with open(SHELF) as f: return json.load(f)
+    except (OSError, ValueError): return {}
+def shelve(value):
+    with open(SHELF, 'w') as f: json.dump(value, f)
 threads = {}   # thread id -> {'cwd': project folder, 'resumed': whether this process resumed it}
 waiting = {}   # id of a request this fixture made of Buddy -> what to do with the answer
 seq = 0
@@ -255,8 +264,18 @@ for line in sys.stdin:
         result = {'rateLimits': {'primary': {'usedPercent': 100, 'windowDurationMins': 300, 'resetsAt': now + 3}, 'secondary': {'usedPercent': 30, 'windowDurationMins': 10080, 'resetsAt': now + 86400}}}
     elif method == 'thread/start':
         tid = str(uuid.uuid4()); threads[tid] = {'cwd': p.get('cwd'), 'resumed': False}; result = {'thread': {'id': tid}}
+        if not p.get('ephemeral'): saved = shelf(); saved[tid] = False; shelve(saved)
     elif method == 'thread/resume':
-        tid = p.get('threadId'); threads[tid] = {'cwd': p.get('cwd'), 'resumed': True}; result = {'thread': {'id': tid}}
+        tid = p.get('threadId')
+        if shelf().get(tid):
+            out({'id': m['id'], 'error': {'code': -32600, 'message': 'session %s is archived. Run `codex unarchive %s` to unarchive it first.' % (tid, tid)}}); continue
+        threads[tid] = {'cwd': p.get('cwd'), 'resumed': True}; result = {'thread': {'id': tid}}
+    elif method in ('thread/archive', 'thread/unarchive'):
+        tid = p.get('threadId'); saved = shelf(); archiving = method == 'thread/archive'
+        if tid not in saved or saved[tid] == archiving:
+            out({'id': m['id'], 'error': {'code': -32600, 'message': ('no rollout found for thread id ' if archiving else 'no archived rollout found for thread id ') + str(tid)}}); continue
+        saved[tid] = archiving; shelve(saved)
+        result = {} if archiving else {'thread': {'id': tid}}
     elif method == 'turn/start':
         tid = p['threadId']; turn = 'turn-' + str(nxt())
         out({'id': m['id'], 'result': {'turn': {'id': turn, 'status': 'inProgress', 'items': []}}})

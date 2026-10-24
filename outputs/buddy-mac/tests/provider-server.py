@@ -38,5 +38,5 @@ for line in sys.stdin:
    reply='Sure, I will keep you posted.' if 'CLAIM_PROACTIVE' in str(p.get('input')) else 'ChatGPT fixture answer'
    finish(tid,turn)
   continue
- elif method not in ['initialize','initialized','thread/inject_items','thread/unsubscribe','turn/interrupt']:raise AssertionError(method)
+ elif method not in ['initialize','initialized','thread/inject_items','thread/unsubscribe','turn/interrupt','thread/archive','thread/unarchive']:raise AssertionError(method)
  if 'id' in m:out({'id':m['id'],'result':r})

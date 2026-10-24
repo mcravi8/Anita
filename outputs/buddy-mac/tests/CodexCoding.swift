@@ -56,6 +56,16 @@ import AppKit
             fixtureLog(id).compactMap { $0["kind"] as? String == "request" ? $0["value"] as? [String: Any] : nil }.filter { $0["method"] as? String == method }.compactMap { $0["params"] as? [String: Any] }
         }
         func logged(_ id: String, _ kind: String) -> [Any] { fixtureLog(id).filter { $0["kind"] as? String == kind }.compactMap { $0["value"] } }
+        /// Whether the stand-in holds the task's thread as archived (codex-archive.json), waiting a few seconds: the attempt's connection archives it as it closes.
+        func archived(_ id: String, _ thread: String, seconds: Double = 12) async -> Bool {
+            let url = support.appendingPathComponent("Worker/Tasks/\(id)/Conversation/Conversations/codex-archive.json"), deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                if let data = try? Data(contentsOf: url), let shelf = try? JSONSerialization.jsonObject(with: data) as? [String: Bool], shelf[thread] == true { return true }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            return false
+        }
+        func order(_ id: String) -> [String] { fixtureLog(id).compactMap { $0["kind"] as? String == "request" ? ($0["value"] as? [String: Any])?["method"] as? String : nil } }
         func review(_ job: [String: Any]) -> [String: Any] { (job["reviews"] as? [[String: Any]] ?? []).last ?? [:] }
         func answer(_ task: String, _ job: [String: Any], accept: Bool) async throws { _ = try await worker(["operation": "review", "taskId": task, "id": review(job)["id"] ?? "", "accept": accept]) }
         func text(_ value: Any?) -> String { value as? String ?? "" }
@@ -95,6 +105,8 @@ import AppKit
             try require((try? String(contentsOf: project(buildID).appendingPathComponent("index.js"), encoding: .utf8)) == "console.log(\"codex fixture\");\n", "Codex's edit is in the project copy")
             try require(UUID(uuidString: text(done["codingSessionID"])) != nil, "the Codex thread is saved for continuing: \(done["codingSessionID"] ?? "-")")
             try require(text(done["codingSessionTools"]) == BuddyCodexCoding.toolsFingerprint, "with the tools it was started with: \(done["codingSessionTools"] ?? "-")")
+            // Codex lists every saved thread in the person's own ChatGPT/Codex apps; Buddy's tasks must not pile up there.
+            try require(await archived(buildID, text(done["codingSessionID"])), "the thread is archived out of the person's ChatGPT/Codex list once the attempt ends: \(order(buildID))")
         }
 
         // A resumed Codex thread keeps the tools it was started with. Chief's S01 thread started before buddy_checkpoint gained need file; on
@@ -120,6 +132,9 @@ import AppKit
             try require(again["status"] as? String == "completed" && text(again["result"]).hasPrefix("Continued on the same thread"), "the follow-up finished: \(again["status"] ?? "") \(again["result"] ?? "")")
             try require(requests(buildID, "thread/resume").last?["threadId"] as? String == text(before["codingSessionID"]) && !text(before["codingSessionID"]).isEmpty, "it resumed the saved thread")
             try require(requests(buildID, "thread/start").count == 1, "and started no new one, since its tools are today's")
+            let methods = order(buildID), resumed = methods.lastIndex(of: "thread/resume") ?? 0
+            try require(methods[..<resumed].last { $0.hasPrefix("thread/") } == "thread/unarchive" && requests(buildID, "thread/unarchive").last?["threadId"] as? String == text(before["codingSessionID"]), "it unarchived the thread first, since Codex resumes only an unarchived thread: \(methods)")
+            try require(await archived(buildID, text(before["codingSessionID"])), "and archived it again once this attempt ended")
             try require((again["commands"] as? [[String: Any]])?.count == 3, "the earlier receipts stay and the new one is added")
         }
 

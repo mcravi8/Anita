@@ -203,12 +203,16 @@ import Foundation
             var id: String?
             if let resume, !resume.isEmpty {
                 var again = params; again.removeValue(forKey: "dynamicTools"); again["threadId"] = resume
+                // The last attempt archived it when its connection closed (ConversationService.close), and Codex resumes only an unarchived thread.
+                await service.reopen(resume)
                 id = ((try? await service.codingRequest("thread/resume", again))?["thread"] as? [String: Any])?["id"] as? String
                 guard !closed else { return }
             }
             if id == nil { id = (try await service.codingRequest("thread/start", params)["thread"] as? [String: Any])?["id"] as? String }
-            guard !closed else { return }
             guard let id else { throw BuddyFailure(message: "ChatGPT did not start the coding session.") }
+            // Saved for the next attempt, and archived out of the person's ChatGPT/Codex list when this attempt's connection closes.
+            service.track(id)
+            guard !closed else { return }
             thread = id
             service.threadHandlers[id] = { [weak self] message in self?.receive(message) }
             var turnParams = BuddyCodexCoding.turnParams(thread: id, prompt: prompt, cwd: cwd, model: model, run: runID)

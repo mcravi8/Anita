@@ -32,6 +32,12 @@ struct BuddyFailure: LocalizedError {
     /// The configuration parts each chat thread holds (BuddyThreadConfiguration), so a turn sends only what changed.
     private var threadConfigurations: [String: [String: String]] = [:]
     private var threadConfigurationsURL: URL { support.appendingPathComponent("conversation-configurations.json") }
+    /// Saved threads this service opened and has not archived yet. Codex lists every saved thread in the person's own ChatGPT/Codex apps, so
+    /// each one is archived once its turn is over (`fileAway`) and unarchived only to continue it (`reopen`). Kept on disk, so a thread left
+    /// open by a quit or a crash is archived on the next connection.
+    private var unfiled: Set<String> = []
+    private var filing: [String: Task<Void, Never>] = [:]
+    private var unfiledURL: URL { support.appendingPathComponent("codex-threads-to-archive.json") }
     /// Threads this service does not run itself (a Codex coding session, BuddyCodexCoding.swift): every request and notification for one of
     /// them goes to its handler, and nothing else here acts on it.
     var threadHandlers: [String: ([String: Any]) -> Void] = [:]
@@ -92,6 +98,7 @@ struct BuddyFailure: LocalizedError {
         if let data = try? Data(contentsOf: sessionsURL), let saved = try? JSONDecoder().decode([String: String].self, from: data) { sessions = saved }
         if let data = try? Data(contentsOf: support.appendingPathComponent("conversation-policies.json")), let saved = try? JSONDecoder().decode([String: String].self, from: data) { sessionPolicies = saved }
         if let data = try? Data(contentsOf: threadConfigurationsURL), let saved = try? JSONDecoder().decode([String: [String: String]].self, from: data) { threadConfigurations = saved }
+        if let data = try? Data(contentsOf: unfiledURL), let saved = try? JSONDecoder().decode([String].self, from: data) { unfiled = Set(saved) }
     }
 
     /// Keeps the record for the threads still in use; a thread with no record is sent the whole configuration, so losing this file costs text, not correctness.
@@ -117,6 +124,51 @@ struct BuddyFailure: LocalizedError {
         output = nil
         process = nil
         failPending("Buddy’s connection closed. Reopen Buddy to continue.")
+    }
+    /// Ends the connection once the saved threads it opened are archived, so a task stopped in the middle of a turn leaves the person's Codex
+    /// list too (archiving ends the turn). Never waits more than 10 seconds; what could not be archived is archived on the next connection.
+    func close() {
+        guard let closing = process, !unfiled.isEmpty else { shutdown(); return }
+        // Both hold the service: its owner has let go of it, and the threads must still be archived.
+        Task {
+            var tried: Set<String> = []
+            while process === closing, let thread = unfiled.subtracting(tried).first {
+                tried.insert(thread); await fileAway(thread).value
+            }
+            if process === closing { shutdown() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+            if self.process === closing { self.shutdown() }
+        }
+    }
+    /// Notes a saved thread this connection opened or continues, so it is archived when its turn is over or the connection closes.
+    func track(_ thread: String) {
+        if unfiled.insert(thread).inserted { saveUnfiled() }
+    }
+    /// Archives a saved thread so it leaves the person's ChatGPT/Codex list; only once its turn is over, since archiving unloads it. A thread
+    /// already archived, or never written, counts as done ("no rollout found"); any other failure keeps it on record for the next connection.
+    @discardableResult func fileAway(_ thread: String) -> Task<Void, Never> {
+        if let running = filing[thread] { return running }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            var done = false
+            do { _ = try await self.request("thread/archive", ["threadId": thread]); done = true }
+            catch { done = error.localizedDescription.contains("no rollout found") }
+            self.filing[thread] = nil
+            if done, self.unfiled.remove(thread) != nil { self.saveUnfiled() }
+        }
+        filing[thread] = task
+        return task
+    }
+    /// Brings an archived thread back so it can be continued: Codex resumes or forks only an unarchived thread. A thread that isn't archived
+    /// (one saved before Buddy archived its threads, or still loaded) refuses, and is continued as it is.
+    func reopen(_ thread: String) async {
+        if let running = filing[thread] { await running.value }
+        track(thread)
+        _ = try? await request("thread/unarchive", ["threadId": thread])
+    }
+    private func saveUnfiled() {
+        try? JSONEncoder().encode(unfiled.sorted()).write(to: unfiledURL, options: .atomic)
     }
 
     private func failPending(_ message: String) {
@@ -198,6 +250,8 @@ struct BuddyFailure: LocalizedError {
         for category in ["mcp_servers", "plugins"] {
             for name in (config[category] as? [String: Any] ?? [:]).keys { restrictions["\(category).\(name).enabled"] = false }
         }
+        // Saved threads a quit or crash left unarchived; one this connection continues waits for this (reopen).
+        for thread in unfiled { fileAway(thread) }
     }
 
     func connection(refresh: Bool = false) async throws -> [String: Any] {
@@ -469,9 +523,14 @@ struct BuddyFailure: LocalizedError {
                 } else if let threadID = sessions[key] {
                     params["threadId"] = threadID
                     opened = sessionPolicies[key] == policy ? "thread/resume" : "thread/fork"
+                    await reopen(threadID)
                     thread = try await request(opened, params)
+                    // A fork continues in a new thread: the one it copied goes back to the archive.
+                    if opened == "thread/fork" { fileAway(threadID) }
                 } else { if !dynamicTools.isEmpty { params["dynamicTools"] = dynamicTools }; thread = try await request("thread/start", params) }
                 guard let threadID = (thread["thread"] as? [String: Any])?["id"] as? String else { throw BuddyFailure(message: "Buddy couldn’t start this conversation.") }
+                // A saved thread is archived when this run ends, however it ends (finish).
+                if !options.internalRun { track(threadID); runs[runID]?["savedThread"] = threadID }
                 if computerUsable { try await verifyComputerPlugin(threadID) }
                 let effective = try await request("app/installed", ["threadId": threadID, "forceRefresh": false])["apps"] as? [[String: Any]] ?? []
                 let permittedIDs = Set(usable.map(\.id))
@@ -1073,6 +1132,8 @@ struct BuddyFailure: LocalizedError {
         if runs[id]?["internal"] as? Bool == true, let threadID = runs[id]?["threadId"] as? String {
             Task { _ = try? await request("thread/unsubscribe", ["threadId": threadID]) }
         }
+        // Out of the person's ChatGPT/Codex list until Buddy continues it (reopen).
+        if let threadID = runs[id]?["savedThread"] as? String { fileAway(threadID) }
     }
     private func emit(_ id: String) {
         guard let run = runs[id] else { return }

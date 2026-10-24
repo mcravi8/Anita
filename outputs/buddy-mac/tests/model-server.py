@@ -31,6 +31,6 @@ for line in sys.stdin:
         out({'id':m['id'],'result':{'turn':{'id':turn,'status':'inProgress'}}})
         out({'method':'item/completed','params':{'threadId':tid,'turnId':turn,'item':{'type':'agentMessage','id':'answer-'+turn,'phase':'final_answer','text':json.dumps(result)}}})
         out({'method':'turn/completed','params':{'threadId':tid,'turn':{'id':turn,'status':'completed'}}}); continue
-    elif method not in ['initialize','initialized','thread/inject_items','thread/unsubscribe','turn/interrupt']:
+    elif method not in ['initialize','initialized','thread/inject_items','thread/unsubscribe','turn/interrupt','thread/archive','thread/unarchive']:
         raise AssertionError(method)
     if 'id' in m: out({'id':m['id'],'result':result})

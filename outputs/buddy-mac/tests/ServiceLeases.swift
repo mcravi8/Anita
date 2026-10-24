@@ -245,7 +245,7 @@ import Darwin
             try require(leases(mainTask).first?["state"] as? String == "released" && (done["leases"] as? [[String: Any]])?.first?["state"] as? String == "released", "the lease is released, on the task too: \(done["leases"] ?? "-")")
             // Only Buddy ran ssh: with its own key, a known_hosts of the lease's own, and no secret in any argument.
             let calls = lines(sshLog).compactMap { $0["argv"] as? [String] }
-            try require(!calls.isEmpty && calls.allSatisfy { $0.contains(privateKey.path) && $0.contains { $0.hasPrefix("UserKnownHostsFile=") && $0.contains("Worker/Leases/Leases/") } }, "ssh ran with Buddy's key and the lease's own known_hosts")
+            try require(!calls.isEmpty && calls.allSatisfy { $0.contains(privateKey.path) && $0.contains { $0.hasPrefix("UserKnownHostsFile=\"") && $0.hasSuffix("/known_hosts\"") && $0.contains("Worker/Leases/Leases/") } }, "ssh ran with Buddy's key and the lease's own known_hosts, quoted (ssh splits that option at spaces, and the real folder is under Application Support)")
             let environments = Set(lines(sshLog).compactMap { $0["env"] as? [String] }.flatMap { $0 }.filter { !["__CF_USER_TEXT_ENCODING", "__CFBundleIdentifier"].contains($0) })
             try require(environments.isSubset(of: ["PATH", "HOME", "LC_ALL", "LC_CTYPE"]), "ssh gets no environment of Buddy's beyond PATH and HOME: \(environments.sorted())")
             let readings = results("buddy_remote_machine")
@@ -313,17 +313,24 @@ import Darwin
             let after = try await detail(id)
             try require(back >= 4 && after["status"] as? String == "cancelled", "what existed came back, and the task stays cancelled: \(back)")
         }
-        await section("a worker restart: the next worker finds the recorded lease, brings back what the machine saved, tears the pod down and resumes the task saying so") {
+        await section("a worker restart (an update): the next worker keeps the lease and its running command, watches it again, and still ends it at its hours") {
             let (id, podID) = try await startLong("restart")
             host.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
             try require(pod(podID)["status"] as? String == "RUNNING", "closing Buddy leaves the pod as recorded")
+            let seen = (leases(id).first?["run"] as? [String: Any])?["lastSeenAt"] as? String ?? ""
             host = makeHost()
             host.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
-            _ = try await poll(id, "the task continues after the restart", seconds: 60) { $0["status"] as? String == "completed" }
-            try require(requests("DELETE", "/v2/pods/\(podID)").count == 1 && pod(podID)["status"] as? String == "TERMINATED", "the new worker tore the pod down")
-            try require(leases(id).first?["why"] as? String == "restart", "for the restart")
-            let note = prompts(id).last ?? ""
-            try require(note.contains("Buddy restarted while it ran, so Buddy brought back what it had saved") && note.contains("new files added"), "the agent hears it: \(note.suffix(600))")
+            var watched = ""
+            for _ in 0..<200 { watched = (leases(id).first?["run"] as? [String: Any])?["lastSeenAt"] as? String ?? ""; if !watched.isEmpty && watched != seen { break }; try await Task.sleep(nanoseconds: 50_000_000) }
+            try require(!watched.isEmpty && watched != seen, "the new worker watches the command again: \(seen) → \(watched)")
+            let waiting = try await detail(id), lease = leases(id).first ?? [:]
+            try require(pod(podID)["status"] as? String == "RUNNING" && lease["state"] as? String == "active" && requests("DELETE", "/v2/pods/\(podID)").isEmpty,
+                        "the restart leaves the pod running and the lease held: \(lease["state"] ?? "")")
+            try require(waiting["status"] as? String == "paused" && waiting["blockedBy"] as? String == "remote", "the task still waits for its command: \(waiting["status"] ?? "")")
+            clock.offset += 3 * 3600
+            _ = try await poll(id, "the task continues once the lease's hours pass", seconds: 60) { $0["status"] as? String == "completed" }
+            try require(requests("DELETE", "/v2/pods/\(podID)").count == 1 && pod(podID)["status"] as? String == "TERMINATED", "the new worker ended it at its hours")
+            try require(leases(id).first?["why"] as? String == "time", "for its hours: \(leases(id).first?["why"] ?? "")")
         }
         await section("a refusal by the service (402, not enough balance) creates nothing: the agent gets RunPod's own answer, the task says it plainly, and the lease records nothing to tear down") {
             try JSONSerialization.data(withJSONObject: ["create": 402]).write(to: state.appendingPathComponent("control.json"))

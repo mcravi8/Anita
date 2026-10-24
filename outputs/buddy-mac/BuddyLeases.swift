@@ -4,8 +4,8 @@ import Foundation
 /// Leases: cleanup that can't be forgotten. Something an agent creates on a connected service that bills over time (a machine, a pod) is
 /// recorded the moment its create request is approved (Worker/Leases/leases.json: the service, what was created, the request that deletes
 /// it, its deadline, its task and the agent's cost estimate), and Buddy runs that teardown itself: when the agent releases it, when its task
-/// ends, is cancelled or fails, when its approved hours pass, and after the worker restarts. A teardown that fails is tried again with
-/// backoff, and the person is told plainly if it keeps failing.
+/// ends, is cancelled or fails, and when its approved hours pass. A worker restart (an update) keeps a live lease and watches its command
+/// again. A teardown that fails is tried again with backoff, and the person is told plainly if it keeps failing.
 ///
 /// Remote machines (`buddy_remote_machine`): a leased machine is reached over SSH by Buddy alone, with its own key pair (the agent only ever
 /// gets the public key, for the create request), its own known_hosts, and only to a host the service itself named for that lease. The agent
@@ -60,13 +60,14 @@ enum BuddyProcessRunner {
 }
 
 /// Buddy's SSH to one machine: Buddy's own key, a known_hosts file of the lease's own (the machine's host key is trusted the first time, then
-/// held to), no agent, no user ssh configuration, nothing interactive.
+/// held to), no agent, no user ssh configuration, nothing interactive. The known_hosts path is quoted: ssh reads that option as a list of
+/// files split at spaces, and Buddy's folder is under "Application Support" (unquoted, the key went to a file named ~/Library/Application).
 struct BuddyRemoteShell {
     let ssh: [String], identity: URL, knownHosts: URL, home: URL, host: String, port: Int, user: String
     var env: [String: String] { ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home.path, "LC_ALL": "C"] }
     func args(_ remote: String) -> [String] {
         ssh + ["-F", "/dev/null", "-i", identity.path, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-               "-o", "UserKnownHostsFile=" + knownHosts.path, "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+               "-o", "UserKnownHostsFile=\"" + knownHosts.path + "\"", "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
                "-o", "LogLevel=ERROR", "-p", String(port), user + "@" + host, remote]
     }
     func run(_ remote: String, input: URL? = nil, output: URL? = nil, timeout: TimeInterval) async -> BuddyProcessResult {
@@ -415,14 +416,17 @@ enum BuddyRemoteMachine {
         default: return nil
         }
     }
-    /// After the worker starts: a lease that was live is no longer watched by anyone, so what its command saved comes back and it is torn
-    /// down; one whose create request never answered can't be named, and the person is told.
+    /// After the worker starts (an update, a crash, the Mac restarting): a live lease carries on as recorded. A command still running on its
+    /// machine is watched again, and the lease still ends when its task ends and at its approved hours (tick), so an update no longer stops
+    /// work on a rented machine. A teardown under way is tried again; a create request that never answered can't be named, and the person
+    /// is told.
     func start() {
         load()
         for r in records { guard let id = r["id"] as? String else { continue }
             switch r["state"] as? String ?? "" {
             case "creating": unknown(id, why: "Buddy restarted while the create request was under way, so it can’t tell whether something was created.")
-            case "active", "releasing": Task { await self.close(id, why: "restart") }
+            case "active": if (r["run"] as? [String: Any])?["state"] as? String == "running" { watch(id) }
+            case "releasing": Task { await self.teardown(id) }
             default: break
             }
         }
